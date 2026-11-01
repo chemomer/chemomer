@@ -382,9 +382,11 @@ fn kept_ion_pair_charges(original: &Structure) -> Option<std::collections::HashM
 /// input's own atom order, explicit hydrogens included.
 fn reversibility_block(original: &Structure) -> String {
     let n = original.atoms.len();
-    // The atom-block prefix letter records the chiral flag; the reader
-    // does not carry it yet, so the structure reads non-chiral.
-    let mut out = format!("/rA:{n}n");
+    // The atom-block prefix letter records the counts-line chiral
+    // flag (the reference's WriteOrigAtoms: `c` chiral, `n`
+    // non-chiral — every molfile carries one of the two bits).
+    let chiral_letter = if original.chiral_flag { 'c' } else { 'n' };
+    let mut out = format!("/rA:{n}{chiral_letter}");
     for atom in &original.atoms {
         out.push_str(&atom.element);
         match atom.charge {

@@ -52,6 +52,10 @@ pub struct Structure {
     /// ALTERN|TRIPLE (7, "2 or 3": neither role) on triple-sourced
     /// ones — while the valence arithmetic reads the moved orders.
     pub ride_marks: Vec<u8>,
+    /// The molfile counts-line chiral flag: the structure was marked
+    /// chiral at submission (the reference's FLAG_INP_AT_CHIRAL).
+    /// The SUCF option reads it and the aux `/rA` letter speaks it.
+    pub chiral_flag: bool,
 }
 
 /// Allowed valences of the organic subset; the implicit hydrogen

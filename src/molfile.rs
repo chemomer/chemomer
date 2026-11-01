@@ -31,6 +31,11 @@ pub fn parse(input: &str) -> Result<Structure> {
         .trim()
         .parse()
         .map_err(|_| bad_counts(counts))?;
+    // The chiral flag (counts column 12–15): nonzero marks the
+    // structure chiral (the reference's FLAG_INP_AT_CHIRAL, read at
+    // mol2atom.c:483) — the SUCF option and the aux /rA letter read
+    // it.
+    let chiral_flag: u32 = counts.get(12..15).unwrap_or("").trim().parse().unwrap_or(0);
 
     let mut atoms = Vec::with_capacity(atom_count);
     let mut positions = Vec::with_capacity(atom_count);
@@ -116,6 +121,7 @@ pub fn parse(input: &str) -> Result<Structure> {
         isotopic_h: Default::default(),
         protons_hard_moved: false,
         ride_marks: Vec::new(),
+        chiral_flag: chiral_flag != 0,
     })
 }
 

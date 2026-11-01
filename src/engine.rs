@@ -99,6 +99,17 @@ impl Engine {
         if group_removals > 0 {
             structure.protons_hard_moved = true;
         }
+        // SUCF resolves per structure (the reference's on-the-fly mode
+        // mutation, runichi2.c:538–552): the molfile chiral flag set
+        // forces ABSOLUTE — the chiral-flag mode stays and the stereo
+        // type reads /s1 with the /m standing; the flag clear forces
+        // RELATIVE — the reference sets REQ_MODE_RELATIVE_STEREO
+        // (clearing the racemic bit), so the relative reshape plus the
+        // InChI=1/ prefix apply.
+        let mut options = options;
+        if options.chiral_flag_stereo && !structure.chiral_flag {
+            options = options.with_relative_stereo();
+        }
         Ok(Engine {
             structure,
             original,
