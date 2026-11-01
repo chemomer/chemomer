@@ -86,6 +86,32 @@ pub struct Options {
     /// TG_FLAG_DISCONNECT_COORD_DONE + RECONNECT_COORD pair,
     /// runichi.c:980) — a salt-only disconnection never reconnects.
     pub rec_met: bool,
+    /// `KET` — keto-enol tautomerism: the extra 1,3 registration pass
+    /// over C/O endpoint pairs (TG_FLAG_KETO_ENOL_TAUT, ichiparm.c
+    /// 367–371). Non-standard: the version prefix reads `InChI=1/`.
+    pub keto_enol: bool,
+    /// `15T` — 1,5 tautomerism across alternating paths (one endpoint
+    /// off-ring): the shift-walk pass (TG_FLAG_1_5_TAUT, ichiparm.c
+    /// 373–378). Non-standard.
+    pub t15: bool,
+    /// `PT_22_00` — the imine/enamine endpoint pass
+    /// `[#1:1][CX4:2][NX2:3]=[CX3:4]` (ichiparm.c 383–388).
+    pub pt_22_00: bool,
+    /// `PT_16_00` — the N-oxide/oxime endpoint pass
+    /// `[#1:1][O;!R:2][N:3]=[CX3:4]` (ichiparm.c 390–395).
+    pub pt_16_00: bool,
+    /// `PT_06_00` — the general hetero-ene endpoint pass with Q = N,C,P
+    /// (ichiparm.c 397–402).
+    pub pt_06_00: bool,
+    /// `PT_39_00` — the nitronic-acid endpoint pass
+    /// `[CX3,NX2:1]=[NX3+:2]([O-:3])[CX4:4]` (ichiparm.c 404–409).
+    pub pt_39_00: bool,
+    /// `PT_13_00` — the thio-cumulene/alkyne endpoint pass
+    /// `[O,S,Se,Te;X1:1]=[C:2]=[C:3][#1:4]` (ichiparm.c 411–416).
+    pub pt_13_00: bool,
+    /// `PT_18_00` — the cyanic-acid endpoint pass
+    /// `[#1:1][O:2][C:3]#[N:4]` (ichiparm.c 418–423).
+    pub pt_18_00: bool,
 }
 
 impl Options {
@@ -189,12 +215,68 @@ impl Options {
         self
     }
 
+    /// `KET` — keto-enol tautomerism. Non-standard.
+    #[must_use]
+    pub fn with_ket(mut self) -> Self {
+        self.keto_enol = true;
+        self
+    }
+
+    /// `15T` — 1,5 tautomerism across alternating paths. Non-standard.
+    #[must_use]
+    pub fn with_15t(mut self) -> Self {
+        self.t15 = true;
+        self
+    }
+
+    /// `PT_22_00` — the imine/enamine pass. Non-standard.
+    #[must_use]
+    pub fn with_pt_22_00(mut self) -> Self {
+        self.pt_22_00 = true;
+        self
+    }
+
+    /// `PT_16_00` — the N-oxide/oxime pass. Non-standard.
+    #[must_use]
+    pub fn with_pt_16_00(mut self) -> Self {
+        self.pt_16_00 = true;
+        self
+    }
+
+    /// `PT_06_00` — the general hetero-ene pass. Non-standard.
+    #[must_use]
+    pub fn with_pt_06_00(mut self) -> Self {
+        self.pt_06_00 = true;
+        self
+    }
+
+    /// `PT_39_00` — the nitronic-acid pass. Non-standard.
+    #[must_use]
+    pub fn with_pt_39_00(mut self) -> Self {
+        self.pt_39_00 = true;
+        self
+    }
+
+    /// `PT_13_00` — the thio-cumulene/alkyne pass. Non-standard.
+    #[must_use]
+    pub fn with_pt_13_00(mut self) -> Self {
+        self.pt_13_00 = true;
+        self
+    }
+
+    /// `PT_18_00` — the cyanic-acid pass. Non-standard.
+    #[must_use]
+    pub fn with_pt_18_00(mut self) -> Self {
+        self.pt_18_00 = true;
+        self
+    }
+
     /// Whether the assembled identifier is the standard one
-    /// (`InChI=1S/`): `SRel`/`SRac`/`SUCF`/`SUU`/`SLUUD`, `FixedH`
-    /// and `RecMet` each turn the std flag off; `SNon` and
-    /// `DoNotAddH` leave it standing (the reference's `bStdFormat`:
-    /// the perception options "DO NOT TURN OFF Std flag", the format
-    /// options do).
+    /// (`InChI=1S/`): `SRel`/`SRac`/`SUCF`/`SUU`/`SLUUD`, `FixedH`,
+    /// `RecMet` and the experimental tautomerism flags each turn the
+    /// std flag off; `SNon` and `DoNotAddH` leave it standing (the
+    /// reference's `bStdFormat`: the perception options "DO NOT TURN
+    /// OFF Std flag", the format options do).
     #[must_use]
     pub fn is_standard(&self) -> bool {
         !(self.relative_stereo
@@ -203,7 +285,15 @@ impl Options {
             || self.include_unknown_stereo
             || self.distinct_unknown_undefined
             || self.fixed_h
-            || self.rec_met)
+            || self.rec_met
+            || self.keto_enol
+            || self.t15
+            || self.pt_22_00
+            || self.pt_16_00
+            || self.pt_06_00
+            || self.pt_39_00
+            || self.pt_13_00
+            || self.pt_18_00)
     }
 
     /// Whether the identifier speaks a stereo TYPE segment (`/s`) with
@@ -251,9 +341,28 @@ mod tests {
             Options::default().with_distinct_unknown_undefined(),
             Options::default().with_fixed_h(),
             Options::default().with_rec_met(),
+            Options::default().with_ket(),
+            Options::default().with_15t(),
+            Options::default().with_pt_22_00(),
+            Options::default().with_pt_16_00(),
+            Options::default().with_pt_06_00(),
+            Options::default().with_pt_39_00(),
+            Options::default().with_pt_13_00(),
+            Options::default().with_pt_18_00(),
         ] {
             assert!(!options.is_standard(), "{options:?}");
         }
+    }
+
+    #[test]
+    fn the_tautomer_flags_stay_independent() {
+        // Each builder sets exactly its own bit; combinations carry
+        // both (-KET -15T is a legal option line).
+        let options = Options::default().with_ket().with_15t();
+        assert!(options.keto_enol && options.t15);
+        assert!(!options.pt_22_00);
+        let options = options.with_pt_18_00();
+        assert!(options.keto_enol && options.t15 && options.pt_18_00);
     }
 
     #[test]

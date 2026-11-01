@@ -70,6 +70,7 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
             fold_source: Vec::new(),
+            taut_ext: Default::default(),
             chiral_flag: false,
         };
         assert_eq!(
@@ -90,6 +91,7 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
             fold_source: Vec::new(),
+            taut_ext: Default::default(),
             chiral_flag: false,
         };
         assert_eq!(
@@ -117,6 +119,7 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
             fold_source: Vec::new(),
+            taut_ext: Default::default(),
             chiral_flag: false,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
@@ -143,6 +146,7 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
             fold_source: Vec::new(),
+            taut_ext: Default::default(),
             chiral_flag: false,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
@@ -162,6 +166,7 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
             fold_source: Vec::new(),
+            taut_ext: Default::default(),
             chiral_flag: false,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
@@ -185,6 +190,7 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
             fold_source: Vec::new(),
+            taut_ext: Default::default(),
             chiral_flag: false,
         };
         assert_eq!(
@@ -206,6 +212,7 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
             fold_source: Vec::new(),
+            taut_ext: Default::default(),
             chiral_flag: false,
         };
         assert_eq!(
@@ -233,6 +240,7 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
             fold_source: Vec::new(),
+            taut_ext: Default::default(),
             chiral_flag: false,
         };
         let hydrogens = s.hydrogens();

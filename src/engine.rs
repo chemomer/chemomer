@@ -180,6 +180,22 @@ impl Engine {
         // structure copied BEFORE the taut pass — the (DE)PROTONATION
         // and the hard group-H removal never touch it.
         let snapshot = options.fixed_h.then(|| structure.clone());
+        // The experimental tautomer extensions stamp onto the
+        // pipeline's structure state (the reference's taut flags ride
+        // bTautFlags into the perception, ichiparm.c 1988–2005); the
+        // snapshot above stays a pre-taut artifact — the enlarged
+        // groups the flags admit are downstream knowledge both
+        // readings share.
+        structure.taut_ext = crate::graph::TautExt {
+            keto_enol: options.keto_enol,
+            t15: options.t15,
+            pt_22_00: options.pt_22_00,
+            pt_16_00: options.pt_16_00,
+            pt_06_00: options.pt_06_00,
+            pt_39_00: options.pt_39_00,
+            pt_13_00: options.pt_13_00,
+            pt_18_00: options.pt_18_00,
+        };
         // The (DE)PROTONATION normalization: charged structures read
         // as their conjugate form before any layer runs; the pinned
         // H/charge state is final.
