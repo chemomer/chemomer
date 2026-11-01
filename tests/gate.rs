@@ -238,6 +238,96 @@ fn the_snon_output_equals_the_oracle_recording() {
     );
 }
 
+/// The FixedH gate: the corpus records every fixture's `-FixedH`
+/// oracle run (`fixedh.inchi` — the full identifier with its /f block,
+/// plain `InChI=1/` prefix) and its auxiliary line (`fixedh.aux` — the
+/// `/F:` pass marker plus repetition markers). The engine under
+/// [`chemomer::Options::with_fixed_h`] must equal both recordings
+/// byte-for-byte. Expected failures are the union of the two dated
+/// ledgers; the retirement check reads the identifier ledger only.
+/// Fixtures without the field are skipped, the way the other mode
+/// gates skip missing recordings.
+#[test]
+fn the_fixedh_output_equals_the_oracle_recording() {
+    let dir = suite_dir();
+    let cases = load_cases(&dir);
+    let triage = load_ledger(&dir, "triage.json");
+    let aux_triage = load_ledger(&dir, "aux-triage.json");
+
+    let mut pass = 0;
+    let mut skipped = 0;
+    let mut without_recording = 0;
+    let mut retired = 0;
+    let mut failures = Vec::new();
+    let mut retirements = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let Some(recorded) = case["fixedh"]
+            .as_object()
+            .and_then(|s| s.get("inchi"))
+            .and_then(|v| v.as_str())
+        else {
+            without_recording += 1;
+            continue;
+        };
+        let identifier_debt = triage.get(id).map(|_| ()).is_some();
+        let aux_debt = aux_triage.get(id).map(|_| ()).is_some();
+        let expected_failure = identifier_debt || aux_debt;
+        let molfile = case["molfile"].as_str().expect("molfile");
+
+        let assembled =
+            chemomer::Engine::with_options(molfile, chemomer::Options::default().with_fixed_h())
+                .and_then(|engine| engine.inchi_string());
+        match assembled {
+            Ok(assembled) => {
+                if assembled == recorded {
+                    if identifier_debt {
+                        retired += 1;
+                        retirements.push(id.to_string());
+                    } else {
+                        pass += 1;
+                    }
+                } else if !expected_failure {
+                    failures.push(format!(
+                        "{id}: assembled {assembled:?} != oracle {recorded:?}"
+                    ));
+                } else {
+                    skipped += 1;
+                }
+            }
+            Err(error) => {
+                if error.message().contains("beyond the ±1 corpus gate") {
+                    continue;
+                }
+                if !expected_failure {
+                    failures.push(format!("{id}: {error}"));
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} FixedH mismatch(es):\n{}\n(FixedH pass: {pass}, expected-failure skips: {skipped}, \
+         no fixedh recording: {without_recording}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "FixedH gate: pass {pass}, expected-failure skips {skipped}, \
+         no recording {without_recording}, retired {retired}"
+    );
+    assert!(
+        retirements.is_empty(),
+        "{} triaged fixture(s) now PASS the FixedH gate — retire their triage entries:\n{}",
+        retirements.len(),
+        retirements.join("\n")
+    );
+}
+
 /// The DoNotAddH gate: the corpus records every fixture's
 /// `-DoNotAddH` oracle run (`donotaddh.inchi` — only drawn hydrogens
 /// exist, H-count codes ignored, the valence-gap inference never
@@ -610,5 +700,73 @@ fn the_key_extensions_match_the_oracle() {
     println!(
         "key-extension gate: pass {pass}, no recording {without_recording}, total {}",
         cases.len()
+    );
+}
+
+/// The FixedH aux gate: the auxiliary line under `-FixedH` — the `/F:`
+/// pass marker and the repetition markers (`m` = same as main) — must
+/// equal the oracle's `fixedh.aux` recording byte-for-byte.
+#[test]
+fn the_fixedh_aux_equals_the_oracle_recording() {
+    let dir = suite_dir();
+    let cases = load_cases(&dir);
+    let triage = load_ledger(&dir, "triage.json");
+    let aux_triage = load_ledger(&dir, "aux-triage.json");
+
+    let mut pass = 0;
+    let mut skipped = 0;
+    let mut without_recording = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let Some(recorded) = case["fixedh"]
+            .as_object()
+            .and_then(|s| s.get("aux"))
+            .and_then(|v| v.as_str())
+        else {
+            without_recording += 1;
+            continue;
+        };
+        let expected_failure =
+            triage.get(id).map(|_| ()).is_some() || aux_triage.get(id).map(|_| ()).is_some();
+        let molfile = case["molfile"].as_str().expect("molfile");
+        match chemomer::Engine::with_options(molfile, chemomer::Options::default().with_fixed_h())
+            .and_then(|engine| engine.aux_string())
+        {
+            Ok(assembled) => {
+                if assembled == recorded {
+                    pass += 1;
+                } else if !expected_failure {
+                    failures.push(format!(
+                        "{id}: assembled {assembled:?} != oracle {recorded:?}"
+                    ));
+                } else {
+                    skipped += 1;
+                }
+            }
+            Err(error) => {
+                if error.message().contains("beyond the ±1 corpus gate") {
+                    continue;
+                }
+                if !expected_failure {
+                    failures.push(format!("{id}: {error}"));
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} FixedH aux mismatch(es):\n{}\n(FixedH aux pass: {pass}, expected-failure skips: {skipped}, \
+         no fixedh recording: {without_recording}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "FixedH aux gate: pass {pass}, expected-failure skips {skipped}, \
+         no recording {without_recording}"
     );
 }
