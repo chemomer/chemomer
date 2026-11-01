@@ -23,6 +23,12 @@
 //! table: they never touch the assembled identifier — they extend the
 //! [`crate::key`] composition the engine prints (see
 //! [`crate::Engine::inchikey_output`]).
+//!
+//! The experimental tautomerism flags (`KET`, `15T`, `PT_*`,
+//! ichiparm.c 1988–2005) ride the same surface: each enables one
+//! extra perception pass (the keto-enol C/O anchors, the 1,5
+//! shift-walk, the six PT endpoint families), and each turns the
+//! std flag off — the identifier reads `InChI=1/`.
 
 /// The option flags one generation runs under. Builder methods mirror
 /// the reference's parse-order toggles exactly, so a chain of
