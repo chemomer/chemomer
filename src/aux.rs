@@ -12,12 +12,21 @@ use crate::error::Result;
 use crate::graph::Structure;
 use crate::layers::hydrogen::canonical_ranks_for;
 use crate::layers::standardization;
+use crate::options::Options;
 
 /// The AuxInfo line for a submitted structure (`original`, exactly as
 /// parsed) and its normalized form (`working`, the one the layers
 /// read). `proton_shift` is the net protons the (DE)PROTONATION
-/// standardization moved — the `/p` layer's pinned-path value.
-pub fn aux_info(original: &Structure, working: &Structure, proton_shift: i32) -> Result<String> {
+/// standardization moved — the `/p` layer's pinned-path value. The
+/// options ride along: `SNon` clears the inverted-stereo block (the
+/// oracle's SNon recordings drop `/it:` while keeping the
+/// stereo-informed numbering).
+pub fn aux_info(
+    original: &Structure,
+    working: &Structure,
+    proton_shift: i32,
+    options: &Options,
+) -> Result<String> {
     standardization::ensure_typable_charges(working)?;
     let counts = standardization::adjusted_hydrogens(working);
     let ranks = canonical_ranks_for(working);
@@ -81,7 +90,10 @@ pub fn aux_info(original: &Structure, working: &Structure, proton_shift: i32) ->
             );
         ranks_aux = ranks;
         symmetry = classes;
-        if sign != 0 {
+        // SNon withholds the stereo layers and the inverted-stereo
+        // fields alike (ichiparm.c:248–253): the block never prints
+        // under that mode.
+        if sign != 0 && !options.no_stereo {
             // The inverted-stereo block: the marker `im` ("main =
             // Inv(main)") when the inverted layer is the pairwise
             // parity-flip of the main over the same centers; the
@@ -525,7 +537,7 @@ mod tests {
         let original = crate::molfile::parse(WATER_MOL).expect("parses");
         let mut working = original.clone();
         working.fold_explicit_hydrogens();
-        let aux = aux_info(&original, &working, 0).expect("aux");
+        let aux = aux_info(&original, &working, 0, &Options::default()).expect("aux");
         assert_eq!(aux, "AuxInfo=1/0/N:1/rA:1nO/rB:/rC:12,12,0;");
     }
 
@@ -569,7 +581,7 @@ mod tests {
         };
         working.fold_explicit_hydrogens();
         let original = working.clone();
-        let aux = aux_info(&original, &working, 0).expect("aux");
+        let aux = aux_info(&original, &working, 0, &Options::default()).expect("aux");
         assert!(aux.starts_with("AuxInfo=1/1/N:"), "{aux}");
         assert!(aux.contains("/CRV:"), "{aux}");
         assert!(aux.contains("(3,4)"), "{aux}");

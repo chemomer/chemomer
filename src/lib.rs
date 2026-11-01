@@ -30,11 +30,13 @@ pub mod graph;
 pub mod key;
 pub mod layers;
 mod molfile;
+pub mod options;
 pub mod rinchi;
 
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use graph::{AtomRecord, Structure};
+pub use options::Options;
 pub use rinchi::{parse_rxn, RinchiComponent, RinchiReaction};
 
 /// Parses the V2000 molfile subset into a [`Structure`].

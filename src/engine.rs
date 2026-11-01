@@ -7,6 +7,7 @@ use crate::error::{err, Result};
 use crate::graph::Structure;
 use crate::layers::{default_layers, standardization, LayerEmitter, MANDATORY_KINDS};
 use crate::molfile;
+use crate::options::Options;
 
 pub struct Engine {
     structure: Structure,
@@ -18,18 +19,41 @@ pub struct Engine {
     /// the hard group-H removal applied — the `/p` layer's value on
     /// the pinned path (zero when the layers read the heuristics).
     proton_shift: i32,
+    /// The generation options this engine runs under — the stereo
+    /// layers consult them at emit, the hydrogen perception obeys
+    /// `do_not_add_h`, and the assembler reads the version prefix.
+    options: Options,
     layers: Vec<Box<dyn LayerEmitter>>,
 }
 
 impl Engine {
     /// Parses the V2000 molfile subset, normalizes the bonded ion
     /// pairs (terminal N⁺–O⁻), folds explicit hydrogen atoms onto
-    /// their carriers, and equips the default layer registry.
+    /// their carriers, and equips the default layer registry — the
+    /// standard identifier path.
     pub fn from_molfile(input: &str) -> Result<Self> {
+        Self::with_options(input, Options::default())
+    }
+
+    /// [`Engine::from_molfile`] under generation `options` — the
+    /// reference's option flags (see [`Options`]). The default options
+    /// reproduce the standard identifier bit-for-bit.
+    pub fn with_options(input: &str, options: Options) -> Result<Self> {
         let original = molfile::parse(input)?;
         let mut structure = original.clone();
         standardization::normalize_internal_salts(&mut structure);
         structure.fold_explicit_hydrogens();
+        if options.do_not_add_h {
+            // DoNotAddH: only drawn hydrogens exist — every atom is
+            // pinned at its explicit count (drawn H folded above,
+            // H-count codes ignored exactly like the reference's
+            // calculate_valences gate), so the valence-gap inference
+            // never runs and the (DE)PROTONATION standardization reads
+            // the explicit-only state from here on.
+            for atom in &mut structure.atoms {
+                atom.h_pinned = true;
+            }
+        }
         // The (DE)PROTONATION normalization: charged structures read
         // as their conjugate form before any layer runs; the pinned
         // H/charge state is final.
@@ -74,8 +98,14 @@ impl Engine {
             structure,
             original,
             proton_shift,
-            layers: default_layers(proton_shift),
+            options: options.clone(),
+            layers: default_layers(&options, proton_shift),
         })
+    }
+
+    /// The generation options this engine runs under.
+    pub fn options(&self) -> &Options {
+        &self.options
     }
 
     /// The normalized structure — diagnostics for the triage tools.
@@ -122,7 +152,15 @@ impl Engine {
 
         let mut sorted: Vec<&Box<dyn LayerEmitter>> = self.layers.iter().collect();
         sorted.sort_by_key(|layer| layer.order());
-        let mut out = String::from("InChI=1S/");
+        // The version prefix: the standard flag is the assembler's
+        // only contract with the options — the non-std modes
+        // (SRel/SRac/SUCF/SUU/SLUUD) read `InChI=1/` (the reference's
+        // bStdFormat), everything else stays `InChI=1S/`.
+        let mut out = String::from(if self.options.is_standard() {
+            "InChI=1S/"
+        } else {
+            "InChI=1/"
+        });
         let mut appended = false;
         for layer in sorted {
             if let Some(segment) = layer.emit(&self.structure)? {
@@ -144,9 +182,15 @@ impl Engine {
 
     /// The AuxInfo line beside the identifier: canonical numbering,
     /// equivalence classes, charges, and the echo of the submitted
-    /// structure (see [`crate::aux`]).
+    /// structure (see [`crate::aux`]). The options ride along — SNon
+    /// clears the inverted-stereo block.
     pub fn aux_string(&self) -> Result<String> {
-        crate::aux::aux_info(&self.original, &self.structure, self.proton_shift)
+        crate::aux::aux_info(
+            &self.original,
+            &self.structure,
+            self.proton_shift,
+            &self.options,
+        )
     }
 }
 
@@ -292,6 +336,7 @@ mod tests {
             structure: crate::parse_molfile(WATER).expect("parses"),
             original: Structure::default(),
             proton_shift: 0,
+            options: Options::default(),
             layers: vec![Box::new(FixedSegment {
                 order: order::FORMULA,
                 kind: None,
@@ -316,6 +361,7 @@ mod tests {
             structure: Structure::default(),
             original: Structure::default(),
             proton_shift: 0,
+            options: Options::default(),
             layers: vec![
                 Box::new(FixedSegment {
                     order: order::P,
