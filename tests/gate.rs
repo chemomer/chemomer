@@ -750,3 +750,87 @@ fn the_fixedh_aux_equals_the_oracle_recording() {
          no recording {without_recording}"
     );
 }
+
+/// The RecMet gate: the corpus records every metal fixture's
+/// `-RecMet` oracle run — the main identifier under the non-standard
+/// prefix with the reconnected `/r` layers appended (only when a
+/// coordination disconnect actually happened), plus the aux line
+/// carrying the embedded `/R:` short-aux block of the reconnected
+/// pass. Expected failures are the union of the two dated ledgers.
+/// Fixtures without the field (no metal anywhere) are skipped.
+#[test]
+fn the_recmet_output_equals_the_oracle_recording() {
+    let dir = suite_dir();
+    let cases = load_cases(&dir);
+    let triage = load_ledger(&dir, "triage.json");
+    let aux_triage = load_ledger(&dir, "aux-triage.json");
+
+    let mut pass = 0;
+    let mut skipped = 0;
+    let mut without_recording = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let Some(recmet) = case["recmet"].as_object() else {
+            without_recording += 1;
+            continue;
+        };
+        let expected_failure =
+            triage.get(id).map(|_| ()).is_some() || aux_triage.get(id).map(|_| ()).is_some();
+        let molfile = case["molfile"].as_str().expect("molfile");
+        let assembled =
+            chemomer::Engine::with_options(molfile, chemomer::Options::default().with_rec_met());
+        for (kind, recorded) in [
+            ("inchi", recmet.get("inchi").and_then(|v| v.as_str())),
+            ("aux", recmet.get("aux").and_then(|v| v.as_str())),
+        ] {
+            let Some(recorded) = recorded else {
+                continue;
+            };
+            let line = match kind {
+                "inchi" => assembled.as_ref().map(|engine| engine.recmet_string()),
+                _ => assembled.as_ref().map(|engine| engine.aux_string()),
+            };
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => Err(error.clone()),
+            };
+            match line {
+                Ok(line) => {
+                    if line == recorded {
+                        pass += 1;
+                    } else if !expected_failure {
+                        failures.push(format!(
+                            "{id}: recmet {kind} assembled {line:?} != oracle {recorded:?}"
+                        ));
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                Err(error) => {
+                    if error.message().contains("beyond the ±1 corpus gate") {
+                        continue;
+                    }
+                    if !expected_failure {
+                        failures.push(format!("{id}: recmet {kind} {error}"));
+                    } else {
+                        skipped += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} RecMet mismatch(es):\n{}\n(RecMet pass: {pass}, expected-failure skips: {skipped}, \
+         no recmet recording: {without_recording}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "RecMet gate: pass {pass}, expected-failure skips {skipped}, \
+         no recording {without_recording}"
+    );
+}

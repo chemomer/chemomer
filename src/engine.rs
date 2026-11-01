@@ -74,18 +74,16 @@ impl Engine {
         // disconnection CREATES the components (cisplatin: Pt(NH3)2
         // Cl2 reads whole, emits five).
         let mut base = original.clone();
-        let h_codes: Vec<u32> = base.atoms.iter().map(|atom| atom.h_count).collect();
         standardization::normalize_internal_salts(&mut base);
         base.fold_explicit_hydrogens();
         if options.do_not_add_h {
             // DoNotAddH: only drawn hydrogens exist — every atom is
-            // pinned at its drawn count (the folded explicit H atoms
-            // minus the H-count codes, which the reference's
-            // calculate_valences gate also ignores), so the
-            // valence-gap inference never runs and the transforms
-            // materialize nothing.
-            for (atom, source) in base.atoms.iter_mut().zip(base.fold_source.iter()) {
-                atom.h_count = atom.h_count.saturating_sub(h_codes[*source]);
+            // pinned at its post-fold count (the folded explicit H
+            // atoms; the implicit derivation never runs because the
+            // read never added any H and pinning holds the gap
+            // derivations off), so the transforms materialize
+            // nothing.
+            for atom in &mut base.atoms {
                 atom.h_pinned = true;
             }
         } else {
@@ -104,9 +102,14 @@ impl Engine {
         let reconnected = if options.rec_met && metal_pending {
             let rec_base = base.clone();
             let rec_salt = salt_disconnected;
-            Some(Box::new(
-                Self::from_prepared(rec_base, rec_base.clone(), options.clone(), rec_salt, false, None)?,
-            )?)
+            Some(Box::new(Self::from_prepared(
+                rec_base.clone(),
+                rec_base,
+                options.clone(),
+                rec_salt,
+                false,
+                None,
+            )?))
         } else {
             None
         };
@@ -252,6 +255,9 @@ impl Engine {
             fixed_h: fixed_h.clone(),
             layers: default_layers(&options, proton_shift, fixed_h),
             siblings: Vec::new(),
+            salt_disconnected: false,
+            metal_disconnected: false,
+            reconnected: None,
         })
     }
 
@@ -429,24 +435,24 @@ impl Engine {
         }
         let mut order: Vec<usize> = (0..parts.len()).collect();
         order.sort_by(|&a, &b| compare_components(&self.siblings[a], &self.siblings[b]));
-        // Identical adjacent components group under a multiplier.
-        let mut groups: Vec<(Vec<usize>, usize)> = Vec::new();
+        // Identical adjacent FORMULAS group under a multiplier (the
+        // reference's formula prefix counts components with the same
+        // Hill formula — the two oxygens of the permanganate
+        // recording write `2O` though one is neutral and one −1, the
+        // charges speaking through their individual /q slots).
+        let mut groups: Vec<Vec<usize>> = Vec::new();
         for &index in &order {
             match groups.last_mut() {
-                Some((members, _))
-                    if parts[members[0]] == parts[index]
-                        && self.siblings[members[0]].inchi_string()
-                            == self.siblings[index].inchi_string() =>
-                {
+                Some(members) if parts[members[0]][0].1 == parts[index][0].1 => {
                     members.push(index);
                 }
-                _ => groups.push((vec![index], 1)),
+                _ => groups.push(vec![index]),
             }
         }
         let mut out = String::from(if standard { "InChI=1S/" } else { "InChI=1/" });
         let formulas: Vec<String> = groups
             .iter()
-            .map(|(members, _)| {
+            .map(|members| {
                 let formula = parts[members[0]][0].1.clone();
                 // The formula multiplier is a bare count (the
                 // recording's `K.Mn.2H2O.2O`); the asterisk belongs to
@@ -460,38 +466,29 @@ impl Engine {
             .collect();
         out.push_str(&formulas.join("."));
         // The layer kinds in the reference's order (formula, c, h, q,
-        // b, t, m, s, i — the /p comes last as the net).
+        // b, t, m, s, i — the /p comes last as the net). Each member
+        // of a group speaks its own segment; the join merges
+        // consecutive equal non-empty segments (`2*+1`) and keeps
+        // empty segments as bare slots.
         let kinds = ['c', 'h', 'q', 'b', 't', 'm', 's', 'i'];
         for kind in kinds {
             let mut present = false;
-            let mut segments: Vec<String> = Vec::new();
-            for (members, _) in &groups {
-                let first = &parts[members[0]];
-                let segment = first
-                    .iter()
-                    .find(|(k, _)| *k == kind)
-                    .map(|(_, v)| v[1..].to_string())
-                    .unwrap_or_default();
-                present = present || !segment.is_empty();
-                // A group with a NON-EMPTY segment renders one
-                // `n*segment` slot; an empty-segment group renders n
-                // individual empty slots (the decahydrate recording:
-                // `/q;2*+1;;;;;;;;;;` — one multiplied slot for the
-                // two sodiums, ten bare slots for the waters).
-                if !segment.is_empty() {
-                    segments.push(if members.len() > 1 {
-                        format!("{}*{}", members.len(), segment)
-                    } else {
-                        segment
-                    });
-                } else {
-                    segments.extend(std::iter::repeat_n(String::new(), members.len()));
+            let mut fields: Vec<String> = Vec::new();
+            for members in &groups {
+                for &member in members {
+                    let segment = parts[member]
+                        .iter()
+                        .find(|(k, _)| *k == kind)
+                        .map(|(_, v)| v[1..].to_string())
+                        .unwrap_or_default();
+                    present = present || !segment.is_empty();
+                    fields.push(segment);
                 }
             }
             if present {
                 out.push('/');
                 out.push_str(kind.to_string().as_str());
-                out.push_str(&segments.join(";"));
+                out.push_str(&merge_runs(fields).join(";"));
             }
         }
         // The proton layer: one NET segment, the sum of the
@@ -527,26 +524,31 @@ impl Engine {
             })
             .max()
             .unwrap_or(0);
-        // CRV never appears in the multi-component aux: the charges
-        // speak through the identifier's per-component /q.
-        let canonical_tags = ["N:", "E:", "gE:", "it:", "iN:"];
+        // CRV joins the per-component fields like the rest (the
+        // cisplatin recording: `/CRV:;;2*1-1;` — the ClH components'
+        // normalized charges read empty, the NH2⁻ ones merge
+        // `2*1-1`, the bare Pt⁴⁺ speaking through the identifier's
+        // /q only), with the layer segments' multiplier semantics:
+        // consecutive equal non-empty fields collapse to `n*field`,
+        // an empty field stays one bare slot.
+        let canonical_tags = ["N:", "E:", "gE:", "it:", "iN:", "CRV:"];
         let mut out = format!("AuxInfo=1/{norm}");
         for tag in canonical_tags {
             let mut present = false;
-            let mut segments: Vec<String> = Vec::new();
-            for fields in &field_aux {
-                let value = fields
+            let mut fields: Vec<String> = Vec::new();
+            for aux in &field_aux {
+                let value = aux
                     .iter()
                     .find(|(t, _)| t == tag)
                     .map(|(_, v)| v.clone())
                     .unwrap_or_default();
                 present = present || !value.is_empty();
-                segments.push(value);
+                fields.push(value);
             }
             if present {
                 out.push('/');
                 out.push_str(tag);
-                out.push_str(&segments.join(";"));
+                out.push_str(&merge_runs(fields).join(";"));
             }
         }
         out.push_str(&crate::aux::reversibility_block(&self.original));
@@ -558,28 +560,46 @@ impl Engine {
     /// structure (see [`crate::aux`]). The options ride along — SNon
     /// clears the inverted-stereo block; the Fixed-H analysis appends
     /// the `/F:` repetition block when the identifier's /f carried
-    /// non-isotopic content.
+    /// non-isotopic content. Under [`Options::rec_met`] a coordination
+    /// disconnect appends the reference's embedded `/R:` block — the
+    /// SHORT aux of the RECONNECTED pass (its canonical fields, the
+    /// reversibility echo never repeating).
     pub fn aux_string(&self) -> Result<String> {
-        if !self.siblings.is_empty() {
-            return self.assemble_aux();
+        let base = if !self.siblings.is_empty() {
+            self.assemble_aux()?
+        } else {
+            let fixed_block = self
+                .fixed_h
+                .as_ref()
+                .map(|fixed| {
+                    crate::layers::fixedh::FixedHLayer::new(fixed.clone(), self.options.clone())
+                        .non_iso_content(&self.structure)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            crate::aux::aux_info(
+                &self.original,
+                &self.structure,
+                self.proton_shift,
+                &self.options,
+                self.fixed_h.as_ref(),
+                fixed_block,
+            )?
+        };
+        match (&self.reconnected, self.options.rec_met) {
+            (Some(reconnected), true) => {
+                let aux = reconnected.aux_string()?;
+                // The body keeps its own leading slash: `/R:` rides
+                // against `/0/N:...` exactly as the main line rides
+                // against `AuxInfo=1`.
+                let body = aux.strip_prefix("AuxInfo=1").unwrap_or(&aux);
+                // The short-aux form: the canonical fields only — the
+                // reversibility echo never repeats under /R:.
+                let body = body.split("/rA:").next().unwrap_or(body);
+                Ok(format!("{base}/R:{body}"))
+            }
+            _ => Ok(base),
         }
-        let fixed_block = self
-            .fixed_h
-            .as_ref()
-            .map(|fixed| {
-                crate::layers::fixedh::FixedHLayer::new(fixed.clone(), self.options.clone())
-                    .non_iso_content(&self.structure)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        crate::aux::aux_info(
-            &self.original,
-            &self.structure,
-            self.proton_shift,
-            &self.options,
-            self.fixed_h.as_ref(),
-            fixed_block,
-        )
     }
 }
 
@@ -709,56 +729,97 @@ fn rem_proton_route_for(structure: &Structure, holder: usize, acceptor: usize) -
     crate::canonical::protons::rem_proton_route(&context, &donors, &acids, holder, acceptor).0
 }
 
+/// The multi-component layer and aux-field join semantics: identical
+/// consecutive NON-EMPTY fields collapse to one `n*field` slot (the
+/// decahydrate recording's `2*+1`, the cisplatin aux's `2*1-1`); an
+/// empty field is one bare slot and never multiplies.
+fn merge_runs(fields: Vec<String>) -> Vec<String> {
+    let mut runs: Vec<(usize, String)> = Vec::new();
+    for segment in fields {
+        match runs.last_mut() {
+            Some((count, last)) if !segment.is_empty() && *last == segment => {
+                *count += 1;
+            }
+            _ => runs.push((1, segment)),
+        }
+    }
+    runs.into_iter()
+        .map(|(count, segment)| {
+            if count > 1 {
+                format!("{count}*{segment}")
+            } else {
+                segment
+            }
+        })
+        .collect()
+}
+
 /// The reference's component comparator (ichimake.c CompINChI2): the
-/// Hill formula WITHOUT terminal H compares lexicographically with the
-/// PREFIX-GOES-LAST rule, then more atoms first, then greater periodic
-/// numbers first, then longer connection tables first, then fewer
-/// total H first.
+/// Hill formulas WITHOUT terminal H compare ELEMENT-BY-ELEMENT
+/// (ichimake.c:272 CompareHillFormulasNoH) — the bare H terms skip
+/// out (their totals feed the later H comparison), each element name
+/// lexicographic and each count INVERSE (more atoms of that element
+/// first: C4H10N before C2H5) — then more atoms first, then greater
+/// periodic numbers first, then longer connection tables first, then
+/// fewer total H first.
 fn compare_components(a: &Engine, b: &Engine) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let hill_no_h = |formula: &str| -> String {
-        // Strip the H terms from a Hill formula: "C2H4O2" -> "C2O2",
-        // "H2O" -> "O", "Na" -> "Na".
-        let mut out = String::new();
+    // The Hill formula parsed into (element, count) terms, bare H
+    // terms dropped (CompareHillFormulasNoH's num_H accumulation).
+    let terms = |formula: &str| -> Vec<(String, u32)> {
+        let mut out = Vec::new();
         let mut rest = formula;
         while !rest.is_empty() {
-            // A term: the uppercase element letter (two-letter elements
-            // take the following lowercase too), then its count digits.
-            let element_len = rest[1..]
-                .find(|c: char| c.is_ascii_uppercase())
-                .map(|position| position + 1)
-                .unwrap_or(rest.len());
-            let (element, remainder) = rest.split_at(element_len);
-            let element = element.trim_end_matches(|c: char| c.is_ascii_digit());
-            let element = element.strip_prefix('H').unwrap_or(element);
-            // Two-letter elements: an uppercase followed by a lowercase
-            // belongs together ("Cl", "Na"); the strip above already
-            // handled bare H.
-            if !element.is_empty() {
-                out.push_str(element);
+            let bytes = rest.as_bytes();
+            let mut end = 1;
+            if end < bytes.len() && bytes[end].is_ascii_lowercase() {
+                end += 1;
             }
-            rest = remainder;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            let term = &rest[..end];
+            let name = term.trim_end_matches(|c: char| c.is_ascii_digit());
+            let count: u32 = term[name.len()..].parse().unwrap_or(1);
+            if name != "H" {
+                out.push((name.to_string(), count));
+            }
+            rest = &rest[end..];
         }
         out
     };
-    let (fa, fb) = (
-        hill_no_h(&a.structure.hill_formula()),
-        hill_no_h(&b.structure.hill_formula()),
+    let (ta, tb) = (
+        terms(&a.structure.hill_formula()),
+        terms(&b.structure.hill_formula()),
     );
-    // Lexicographic; a strict prefix sorts LAST (the shorter one is
-    // greater — the reference's CH2O < CH2 rule).
-    let ordering = if fa.starts_with(&fb) && fa != fb {
-        Ordering::Greater
-    } else if fb.starts_with(&fa) && fa != fb {
-        Ordering::Less
-    } else {
-        fa.cmp(&fb)
-    };
-    if ordering != Ordering::Equal {
-        return ordering;
+    // Element name lexicographic, count inverse (ichimake.c 338-345),
+    // with GetElementAndCount's carbon trick (ichimake.c 188-192): a
+    // BARE "C" reads as "A" — less than any element — so
+    // carbon-containing components sort first.
+    fn key(element: &str) -> &str {
+        if element == "C" {
+            "A"
+        } else {
+            element
+        }
     }
-    // More atoms first.
-    let ordering = b.structure.atoms.len().cmp(&a.structure.atoms.len());
+    for index in 0..ta.len().min(tb.len()) {
+        let (element_a, count_a) = &ta[index];
+        let (element_b, count_b) = &tb[index];
+        if key(element_a) != key(element_b) {
+            return key(element_a).cmp(key(element_b));
+        }
+        if count_a != count_b {
+            return count_b.cmp(count_a);
+        }
+    }
+    // More atoms first — nNumberOfAtoms counts TERMINAL H too (the
+    // bare O of the permanganate recording sorts AFTER its waters:
+    // 1 atom against H2O's 3).
+    let atoms_with_h = |s: &Engine| -> usize {
+        s.structure.atoms.len() + s.structure.hydrogens().iter().sum::<u32>() as usize
+    };
+    let ordering = atoms_with_h(b).cmp(&atoms_with_h(a));
     if ordering != Ordering::Equal {
         return ordering;
     }
@@ -780,7 +841,18 @@ fn compare_components(a: &Engine, b: &Engine) -> std::cmp::Ordering {
     }
     // Fewer total H first.
     let hydrogens = |s: &Engine| -> u32 { s.structure.hydrogens().iter().sum() };
-    hydrogens(b).cmp(&hydrogens(a))
+    let ordering = hydrogens(b).cmp(&hydrogens(a));
+    if ordering != Ordering::Equal {
+        return ordering;
+    }
+    // Charges last: uncharged first, then ascending charges
+    // (ichimake.c 2020-2033 — the permanganate recording's neutral O
+    // sorts before the −1 one).
+    let (charge_a, charge_b) = (a.structure.total_charge(), b.structure.total_charge());
+    if charge_a != 0 && charge_b != 0 {
+        return charge_a.cmp(&charge_b);
+    }
+    (charge_a != 0).cmp(&(charge_b != 0))
 }
 
 /// Splits an AuxInfo line into its `/tag:` fields; the empty tag is
@@ -854,6 +926,9 @@ mod tests {
                 kind: None,
                 text: "H2O",
             })],
+            salt_disconnected: false,
+            metal_disconnected: false,
+            reconnected: None,
         };
         let error = engine.inchi_string().unwrap_err();
         assert!(error.message().contains("mandatory layer kind"));
@@ -953,6 +1028,9 @@ mod tests {
                     text: "H2O",
                 }),
             ],
+            salt_disconnected: false,
+            metal_disconnected: false,
+            reconnected: None,
         };
         assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H2O/c1-2/p+1");
     }

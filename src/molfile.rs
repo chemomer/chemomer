@@ -45,13 +45,20 @@ pub fn parse(input: &str) -> Result<Structure> {
         if element.is_empty() {
             return err(format!("{CONTEXT}: atom {index} has no element symbol"));
         }
-        let code: u32 = line.get(42..45).unwrap_or("").trim().parse().unwrap_or(0);
         let x: f64 = line.get(0..10).unwrap_or("").trim().parse().unwrap_or(0.0);
         let y: f64 = line.get(10..20).unwrap_or("").trim().parse().unwrap_or(0.0);
         positions.push((x, y));
         atoms.push(AtomRecord {
             element,
-            h_count: code.saturating_sub(1),
+            // The H-count code field is NEVER read by the release
+            // engine: mol_fmt1.c walks it only under MOL_FMT_QUERY,
+            // and mol_fmt.h:79 sets MOL_FMT_QUERY = MOL_FMT_ABSENT —
+            // inp_num_H reaches get_num_H (util.c:862) as zero and
+            // the implicit H derive purely from the chemical valence
+            // (an over-bonded atom's stale code is thereby ignored:
+            // the sodium-citrate quaternary C carrying code 2 reads
+            // zero H).
+            h_count: 0,
             charge: 0,
             h_pinned: false,
             isotope: 0,
@@ -151,8 +158,12 @@ mod tests {
         let molfile = "ammonium\n  AsciiChem\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 N   0  0  0  5  0  0  0  0  0  0  0\nM  CHG  1   1   1\nM  END\n";
         let structure = parse(molfile).expect("parses");
         assert_eq!(structure.atoms[0].element, "N");
-        // MDL code 5 means 4 explicit hydrogens.
-        assert_eq!(structure.atoms[0].h_count, 4);
+        // The H-count code field is NEVER read (mol_fmt.h:79
+        // MOL_FMT_QUERY = MOL_FMT_ABSENT — the reader jumps the
+        // field): the implicit H derive at materialization from the
+        // charge-shifted valence rows instead. Code 5 on a bare N+
+        // derives the same 4 hydrogens there.
+        assert_eq!(structure.atoms[0].h_count, 0);
         assert_eq!(structure.atoms[0].charge, 1);
     }
 
