@@ -23,6 +23,10 @@ pub struct Engine {
     /// layers consult them at emit, the hydrogen perception obeys
     /// `do_not_add_h`, and the assembler reads the version prefix.
     options: Options,
+    /// The Fixed-H analysis under `options.fixed_h`: the pre-taut
+    /// snapshot's canonical numbering, H deltas, formula and charge
+    /// (the /f layer and the aux /F: block read it).
+    fixed_h: Option<crate::canonical::fixedh::FixedH>,
     layers: Vec<Box<dyn LayerEmitter>>,
 }
 
@@ -59,6 +63,10 @@ impl Engine {
                 atom.h_pinned = true;
             }
         }
+        // The Fixed-H SNAPSHOT (ichimake.c:3904): the preprocessed
+        // structure copied BEFORE the taut pass — the (DE)PROTONATION
+        // and the hard group-H removal never touch it.
+        let snapshot = options.fixed_h.then(|| structure.clone());
         // The (DE)PROTONATION normalization: charged structures read
         // as their conjugate form before any layer runs; the pinned
         // H/charge state is final.
@@ -110,12 +118,29 @@ impl Engine {
         if options.chiral_flag_stereo && !structure.chiral_flag {
             options = options.with_relative_stereo();
         }
+        // The Fixed-H analysis (ichican2.c 6246-6400): deltas,
+        // CanonGraph07 numbering seeded by (nSymmRankBase, NumHfixed),
+        // the snapshot's formula and charge.
+        let fixed_h = match &snapshot {
+            Some(snapshot) => {
+                let centers = fixed_h_centers(&structure);
+                let main_inverted = fixed_h_main_inverted(&structure, &options);
+                Some(crate::canonical::fixedh::analyze(
+                    snapshot,
+                    &structure,
+                    &centers,
+                    main_inverted,
+                )?)
+            }
+            None => None,
+        };
         Ok(Engine {
             structure,
             original,
             proton_shift,
             options: options.clone(),
-            layers: default_layers(&options, proton_shift),
+            fixed_h: fixed_h.clone(),
+            layers: default_layers(&options, proton_shift, fixed_h),
         })
     }
 
@@ -227,15 +252,52 @@ impl Engine {
     /// The AuxInfo line beside the identifier: canonical numbering,
     /// equivalence classes, charges, and the echo of the submitted
     /// structure (see [`crate::aux`]). The options ride along — SNon
-    /// clears the inverted-stereo block.
+    /// clears the inverted-stereo block; the Fixed-H analysis appends
+    /// the `/F:` repetition block when the identifier's /f carried
+    /// non-isotopic content.
     pub fn aux_string(&self) -> Result<String> {
+        let fixed_block = self
+            .fixed_h
+            .as_ref()
+            .map(|fixed| {
+                crate::layers::fixedh::FixedHLayer::new(fixed.clone(), self.options.clone())
+                    .non_iso_content(&self.structure)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
         crate::aux::aux_info(
             &self.original,
             &self.structure,
             self.proton_shift,
             &self.options,
+            self.fixed_h.as_ref(),
+            fixed_block,
         )
     }
+}
+
+/// The wedge-defined stereo centers over the working structure — the
+/// Fixed-H stereo refinement's input (the main pass's center inputs).
+fn fixed_h_centers(working: &Structure) -> Vec<(usize, Vec<usize>, u32)> {
+    let counts = standardization::adjusted_hydrogens(working);
+    let ranks = crate::layers::hydrogen::canonical_ranks_for(working);
+    crate::canonical::stereo::center_inputs(working, &counts, &ranks)
+}
+
+/// Whether the main aux verdict adopted its inverted pass (the aux
+/// `/it:im` condition) — the /F: `it:m` marker mirrors it.
+fn fixed_h_main_inverted(working: &Structure, options: &Options) -> bool {
+    if options.no_stereo {
+        return false;
+    }
+    let counts = standardization::adjusted_hydrogens(working);
+    let ranks = crate::layers::hydrogen::canonical_ranks_for(working);
+    let tautomeric = crate::canonical::tautomer::mobile_groups(working, &counts, &ranks)
+        .iter()
+        .any(|group| group.count > group.charge);
+    crate::canonical::stereo::informed_verdict(working, &counts, &ranks, tautomeric)
+        .map(|verdict| verdict.sign != 0 && crate::canonical::stereo::inverted_marker(&verdict))
+        .unwrap_or(false)
 }
 
 /// The hard group-H removal (the reference's HardRemoveAcidicProtons,
@@ -381,6 +443,7 @@ mod tests {
             original: Structure::default(),
             proton_shift: 0,
             options: Options::default(),
+            fixed_h: None,
             layers: vec![Box::new(FixedSegment {
                 order: order::FORMULA,
                 kind: None,
@@ -466,6 +529,7 @@ mod tests {
             original: Structure::default(),
             proton_shift: 0,
             options: Options::default(),
+            fixed_h: None,
             layers: vec![
                 Box::new(FixedSegment {
                     order: order::P,

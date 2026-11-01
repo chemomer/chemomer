@@ -71,6 +71,12 @@ pub struct Options {
     /// `InChIKey=`/`XHash1=`/`XHash2=` lines (ichiparm.c:455–458,
     /// ichimain.c:1376–1412). An absent extension leaves a bare dash.
     pub merge_hash: bool,
+    /// `FixedH` — the /f layer of the full (non-standard) InChI: the
+    /// pre-normalization structure speaks its own fixed-H numbering,
+    /// H deltas and charges after the standard layers (ichiparm.c
+    /// "FixedH — Include Fixed H layer"; bStdFormat off, ichiparm.c
+    /// 248–253).
+    pub fixed_h: bool,
 }
 
 impl Options {
@@ -158,18 +164,27 @@ impl Options {
         self
     }
 
+    /// `FixedH` — the full-InChI /f layer. Non-standard: the version
+    /// prefix reads `InChI=1/`.
+    #[must_use]
+    pub fn with_fixed_h(mut self) -> Self {
+        self.fixed_h = true;
+        self
+    }
+
     /// Whether the assembled identifier is the standard one
-    /// (`InChI=1S/`): `SRel`/`SRac`/`SUCF`/`SUU`/`SLUUD` each turn the
-    /// std flag off; `SNon` and `DoNotAddH` leave it standing (the
-    /// reference's `bStdFormat`: the perception options "DO NOT TURN
-    /// OFF Std flag", the format options do).
+    /// (`InChI=1S/`): `SRel`/`SRac`/`SUCF`/`SUU`/`SLUUD` and `FixedH`
+    /// each turn the std flag off; `SNon` and `DoNotAddH` leave it
+    /// standing (the reference's `bStdFormat`: the perception options
+    /// "DO NOT TURN OFF Std flag", the format options do).
     #[must_use]
     pub fn is_standard(&self) -> bool {
         !(self.relative_stereo
             || self.racemic_stereo
             || self.chiral_flag_stereo
             || self.include_unknown_stereo
-            || self.distinct_unknown_undefined)
+            || self.distinct_unknown_undefined
+            || self.fixed_h)
     }
 
     /// Whether the identifier speaks a stereo TYPE segment (`/s`) with
@@ -215,6 +230,7 @@ mod tests {
             Options::default().with_chiral_flag_stereo(),
             Options::default().with_include_unknown_stereo(),
             Options::default().with_distinct_unknown_undefined(),
+            Options::default().with_fixed_h(),
         ] {
             assert!(!options.is_standard(), "{options:?}");
         }

@@ -96,14 +96,23 @@ struct Blocks {
     major: String,
     minor: String,
     proton: Option<String>,
+    /// The calculation flag character: S standard, N full (the
+    /// FixedH /f layer).
+    flag: char,
 }
 
 fn split_blocks(inchi: &str) -> Result<Blocks> {
-    const PREFIX: &str = "InChI=1S/";
-    let body = inchi
-        .strip_prefix(PREFIX)
-        .ok_or_else(|| error_err("inchikey: not a standard InChI=1S identifier"))?
-        .to_string();
+    // Both identifier flavors hash through the same tables; the flag
+    // character carries which: S standard, N full (the FixedH /f
+    // layer, ichiparm.c "FixedH").
+    let (body, flag) = if let Some(rest) = inchi.strip_prefix("InChI=1S/") {
+        (rest, 'S')
+    } else if let Some(rest) = inchi.strip_prefix("InChI=1/") {
+        (rest, 'N')
+    } else {
+        return error_err("inchikey: not an InChI=1[S/] identifier");
+    };
+    let body = body.to_string();
     let segments: Vec<&str> = body.split('/').collect();
     let mut major: Vec<&str> = Vec::new();
     let mut proton: Option<&str> = None;
@@ -137,6 +146,7 @@ fn split_blocks(inchi: &str) -> Result<Blocks> {
         format!("/{}", minor.join("/"))
     };
     Ok(Blocks {
+        flag,
         major: smajor,
         minor: sminor,
         proton: proton.map(str::to_string),
@@ -166,7 +176,7 @@ fn assemble_key(proton: Option<&str>, digest_major: &[u8; 32], digest_minor: &[u
     key.push_str(&triplet(digest_minor, 0));
     key.push_str(&triplet(digest_minor, 14));
     key.push_str(&dublet(digest_minor, 28));
-    key.push('S'); // the calculation flag: standard
+    key.push(blocks.flag); // the calculation flag: S standard, N full
     key.push('A'); // the base subversion flag
     key.push('-');
     key.push_str(&proton_flag(proton));
