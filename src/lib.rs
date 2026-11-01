@@ -31,6 +31,7 @@ pub mod key;
 pub mod layers;
 mod molfile;
 pub mod options;
+pub mod reverse;
 pub mod rinchi;
 
 pub use engine::Engine;
@@ -42,6 +43,12 @@ pub use rinchi::{parse_rxn, RinchiComponent, RinchiReaction};
 /// Parses the V2000 molfile subset into a [`Structure`].
 pub fn parse_molfile(input: &str) -> Result<Structure> {
     molfile::parse(input)
+}
+
+/// Reconstructs a [`Structure`] from a standard InChI string — the
+/// reverse direction (see [`reverse::structure_from_inchi`]).
+pub fn structure_from_inchi(inchi: &str) -> Result<Structure> {
+    reverse::structure_from_inchi(inchi)
 }
 
 /// Parses an MDL V2000 RXNfile into a [`RinchiReaction`] — the
