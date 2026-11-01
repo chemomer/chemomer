@@ -28,6 +28,12 @@ pub struct Structure {
     /// V2000 bond types: 1 single, 2 double, 3 triple, 4 aromatic
     /// (aromatic counts as 1.5 in valence sums).
     pub bonds: Vec<(usize, usize, u32)>,
+    /// The experimental tautomerism extensions the engine runs under
+    /// (the reference's TG_FLAG_KETO_ENOL_TAUT / TG_FLAG_1_5_TAUT /
+    /// TG_FLAG_PT_* taut flags, stamped from the generation options).
+    /// All off is the standard pipeline — the perception reads this
+    /// only where a flag's pass exists.
+    pub taut_ext: TautExt,
     /// Bond-block stereo codes by bond index (1 = wedge, 6 = dash),
     /// sparse — the tetrahedral layer's input.
     pub stereo_bonds: std::collections::BTreeMap<usize, u8>,
@@ -61,6 +67,31 @@ pub struct Structure {
     /// the structures align index-for-index) — the aux numbering's
     /// exact original-atom map, hydrogen-bearing originals included.
     pub fold_source: Vec<usize>,
+}
+
+/// The experimental tautomerism extension flags (ichiparm.c
+/// 1988–2005): each enables one extra perception pass in the mobile-H
+/// machinery. All off is the reference's default — the standard
+/// pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TautExt {
+    /// `KET` — keto-enol (C/O endpoints, the 1,3 keto-enol pass).
+    pub keto_enol: bool,
+    /// `15T` — 1,5 shifts across alternating paths (one endpoint
+    /// off-ring).
+    pub t15: bool,
+    /// `PT_22_00` — the imine/enamine endpoint pass.
+    pub pt_22_00: bool,
+    /// `PT_16_00` — the N-oxide/oxime endpoint pass.
+    pub pt_16_00: bool,
+    /// `PT_06_00` — the general hetero-ene endpoint pass.
+    pub pt_06_00: bool,
+    /// `PT_39_00` — the nitronic-acid endpoint pass.
+    pub pt_39_00: bool,
+    /// `PT_13_00` — the thio-cumulene/alkyne endpoint pass.
+    pub pt_13_00: bool,
+    /// `PT_18_00` — the cyanic-acid endpoint pass.
+    pub pt_18_00: bool,
 }
 
 impl Structure {
@@ -150,6 +181,7 @@ impl Structure {
                     .collect(),
                 protons_hard_moved: self.protons_hard_moved,
                 ride_marks: Vec::new(),
+                taut_ext: self.taut_ext,
                 chiral_flag: self.chiral_flag,
                 fold_source: members.iter().map(|&a| source(a)).collect(),
             });

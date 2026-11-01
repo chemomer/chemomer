@@ -125,6 +125,7 @@ pub fn parse(input: &str) -> Result<Structure> {
         isotopic_h: Default::default(),
         protons_hard_moved: false,
         ride_marks: Vec::new(),
+        taut_ext: Default::default(),
         fold_source: Vec::new(),
         chiral_flag: chiral_flag != 0,
     })
