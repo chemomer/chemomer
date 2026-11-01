@@ -67,42 +67,36 @@ pub fn aux_info(
     let ranks_aux;
     let symmetry;
     let mut inverted_block = String::new();
-    let stereo_centers = crate::canonical::stereo::center_inputs(working, &counts, &ranks);
-    if !stereo_centers.is_empty() {
-        let groups_rows = if tautomeric {
-            Vec::new()
-        } else {
-            crate::canonical::group_membership(working, &counts)
-        };
-        let hydrogens_aux = if tautomeric {
-            let mask = crate::canonical::tautomer::endpoint_mask(working, &counts);
-            crate::canonical::tautomer::without_mobile_h(&counts, &mask)
-        } else {
-            counts.clone()
-        };
-        let (ranks, classes, (main_pairs, inv_pairs, sign)) =
-            crate::canonical::canonical_ranks_and_symmetry_stereo(
-                &adjacency,
-                &invariants,
-                &hydrogens_aux,
-                &groups_rows,
-                &stereo_centers,
-            );
-        ranks_aux = ranks;
-        symmetry = classes;
+    // Chiral structures number by the STEREO-informed canonicalization
+    // (the reference's nCanonOrdStereo): the terminal compare extends
+    // with the stereo rows, and when the inverted-parity pass wins its
+    // numbering is adopted (nCompInv2Abs = -1) — the verdict also
+    // decides the `/it:` inverted-stereo block. Tautomeric structures
+    // rank the NON-TAUT representation (mobile H stripped, no t-group
+    // rows); the helper mirrors that input assembly.
+    if let Some(verdict) =
+        crate::canonical::stereo::informed_verdict(working, &counts, &ranks, tautomeric)
+    {
+        ranks_aux = verdict.ranks;
+        symmetry = verdict.symmetry;
         // SNon withholds the stereo layers and the inverted-stereo
         // fields alike (ichiparm.c:248–253): the block never prints
         // under that mode.
-        if sign != 0 && !options.no_stereo {
+        if verdict.sign != 0 && !options.no_stereo {
             // The inverted-stereo block: the marker `im` ("main =
             // Inv(main)") when the inverted layer is the pairwise
             // parity-flip of the main over the same centers; the
             // single-component corpus never prints the list form.
-            let flip_pairs = main_pairs.len() == inv_pairs.len()
-                && main_pairs.iter().zip(&inv_pairs).all(|(main, inv)| {
-                    main.0 == inv.0
-                        && (main.1 + inv.1 == 3 || (!matches!(main.1, 1 | 2) && main.1 == inv.1))
-                });
+            let flip_pairs = verdict.main_pairs.len() == verdict.inv_pairs.len()
+                && verdict
+                    .main_pairs
+                    .iter()
+                    .zip(&verdict.inv_pairs)
+                    .all(|(main, inv)| {
+                        main.0 == inv.0
+                            && (main.1 + inv.1 == 3
+                                || (!matches!(main.1, 1 | 2) && main.1 == inv.1))
+                    });
             if flip_pairs {
                 inverted_block = "/it:im".to_string();
             }

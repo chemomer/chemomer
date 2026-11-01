@@ -283,6 +283,68 @@ pub fn terminal_pairs(
     out
 }
 
+/// The stereo-informed ranking verdict — the machinery the AuxInfo
+/// speaks (the reference's nCanonOrdStereo + nCompInv2Abs): the
+/// winning pass's ranks and symmetry, both passes' terminal pairs,
+/// and the inversion sign (`-1` the inverted pass won and its
+/// numbering was adopted, `0` the rows tie, `1` the absolute pass won
+/// on rows alone). `None` when the structure carries no wedge-defined
+/// center. Callers assemble the exact ranking inputs (tautomeric
+/// structures strip the mobile H and drop the group rows) so the aux
+/// and the identifier speak one verdict.
+pub(crate) struct StereoVerdict {
+    pub ranks: Vec<u32>,
+    pub symmetry: Vec<u32>,
+    pub main_pairs: Vec<(u32, u32)>,
+    pub inv_pairs: Vec<(u32, u32)>,
+    pub sign: i32,
+}
+
+/// Computes [`StereoVerdict`] over `counts` (the adjusted hydrogen
+/// counts the centers perceive against) and `ranks` (the base
+/// canonical ranks [`crate::layers::hydrogen::canonical_ranks_for`]
+/// supplies). `strip_mobile_h` mirrors the aux's tautomeric branch:
+/// the ranking reads the mobile-H-stripped counts and no group rows.
+pub(crate) fn informed_verdict(
+    structure: &Structure,
+    counts: &[u32],
+    ranks: &[u32],
+    strip_mobile_h: bool,
+) -> Option<StereoVerdict> {
+    let centers = center_inputs(structure, counts, ranks);
+    if centers.is_empty() {
+        return None;
+    }
+    let (adjacency, invariants) = crate::canonical::graph_of(structure);
+    let (hydrogens, groups): (Vec<u32>, Vec<(u32, Vec<usize>)>) = if strip_mobile_h {
+        let mask = crate::canonical::tautomer::endpoint_mask(structure, counts);
+        (
+            crate::canonical::tautomer::without_mobile_h(counts, &mask),
+            Vec::new(),
+        )
+    } else {
+        (
+            counts.to_vec(),
+            crate::canonical::group_membership(structure, counts),
+        )
+    };
+    let (ranks, symmetry, (main_pairs, inv_pairs, sign)) =
+        crate::canonical::canonical_ranks_and_symmetry_stereo(
+            &adjacency,
+            &invariants,
+            &hydrogens,
+            &groups,
+            &centers,
+        );
+    Some(StereoVerdict {
+        ranks,
+        symmetry,
+        main_pairs,
+        inv_pairs,
+        sign,
+    })
+}
+
 /// One terminal's stereo rows over `ranks`: per center (ascending
 /// canonical number) the center's rank, the parity number (1 = odd,
 /// 2 = even — the geometry bit composed with the ligand permutation
