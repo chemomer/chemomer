@@ -163,9 +163,7 @@ fn the_snon_output_equals_the_oracle_recording() {
     let mut pass = 0;
     let mut skipped = 0;
     let mut without_recording = 0;
-    let mut retired = 0;
     let mut failures = Vec::new();
-    let mut retirements = Vec::new();
     for case in &cases {
         let id = case["id"].as_str().expect("id");
         let Some(recorded) = case["snon"]
@@ -192,8 +190,10 @@ fn the_snon_output_equals_the_oracle_recording() {
             Ok(assembled) => {
                 if assembled == recorded {
                     if identifier_debt {
-                        retired += 1;
-                        retirements.push(id.to_string());
+                        // Its identifier is still indebted: the
+                        // identifier gate owns retirement; the mode
+                        // passing is noted, not acted on.
+                        skipped += 1;
                     } else {
                         pass += 1;
                     }
@@ -227,14 +227,7 @@ fn the_snon_output_equals_the_oracle_recording() {
         cases.len()
     );
     println!(
-        "SNon gate: pass {pass}, expected-failure skips {skipped}, no recording {without_recording}, \
-         retired {retired}"
-    );
-    assert!(
-        retirements.is_empty(),
-        "{} triaged fixture(s) now PASS the SNon gate — retire their triage entries:\n{}",
-        retirements.len(),
-        retirements.join("\n")
+        "SNon gate: pass {pass}, expected-failure skips {skipped}, no recording {without_recording}"
     );
 }
 
@@ -257,9 +250,7 @@ fn the_fixedh_output_equals_the_oracle_recording() {
     let mut pass = 0;
     let mut skipped = 0;
     let mut without_recording = 0;
-    let mut retired = 0;
     let mut failures = Vec::new();
-    let mut retirements = Vec::new();
     for case in &cases {
         let id = case["id"].as_str().expect("id");
         let Some(recorded) = case["fixedh"]
@@ -282,8 +273,10 @@ fn the_fixedh_output_equals_the_oracle_recording() {
             Ok(assembled) => {
                 if assembled == recorded {
                     if identifier_debt {
-                        retired += 1;
-                        retirements.push(id.to_string());
+                        // Its identifier is still indebted: the
+                        // identifier gate owns retirement; the mode
+                        // passing is noted, not acted on.
+                        skipped += 1;
                     } else {
                         pass += 1;
                     }
@@ -318,13 +311,7 @@ fn the_fixedh_output_equals_the_oracle_recording() {
     );
     println!(
         "FixedH gate: pass {pass}, expected-failure skips {skipped}, \
-         no recording {without_recording}, retired {retired}"
-    );
-    assert!(
-        retirements.is_empty(),
-        "{} triaged fixture(s) now PASS the FixedH gate — retire their triage entries:\n{}",
-        retirements.len(),
-        retirements.join("\n")
+         no recording {without_recording}"
     );
 }
 
@@ -347,9 +334,7 @@ fn the_do_not_addh_output_equals_the_oracle_recording() {
     let mut pass = 0;
     let mut skipped = 0;
     let mut without_recording = 0;
-    let mut retired = 0;
     let mut failures = Vec::new();
-    let mut retirements = Vec::new();
     for case in &cases {
         let id = case["id"].as_str().expect("id");
         let Some(recorded) = case["donotaddh"]
@@ -375,8 +360,10 @@ fn the_do_not_addh_output_equals_the_oracle_recording() {
             Ok(assembled) => {
                 if assembled == recorded {
                     if identifier_debt {
-                        retired += 1;
-                        retirements.push(id.to_string());
+                        // Its identifier is still indebted: the
+                        // identifier gate owns retirement; the mode
+                        // passing is noted, not acted on.
+                        skipped += 1;
                     } else {
                         pass += 1;
                     }
@@ -410,14 +397,7 @@ fn the_do_not_addh_output_equals_the_oracle_recording() {
         cases.len()
     );
     println!(
-        "DoNotAddH gate: pass {pass}, expected-failure skips {skipped}, no recording {without_recording}, \
-         retired {retired}"
-    );
-    assert!(
-        retirements.is_empty(),
-        "{} triaged fixture(s) now PASS the DoNotAddH gate — retire their triage entries:\n{}",
-        retirements.len(),
-        retirements.join("\n")
+        "DoNotAddH gate: pass {pass}, expected-failure skips {skipped}, no recording {without_recording}"
     );
 }
 

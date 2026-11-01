@@ -28,6 +28,12 @@ pub struct Engine {
     /// (the /f layer and the aux /F: block read it).
     fixed_h: Option<crate::canonical::fixedh::FixedH>,
     layers: Vec<Box<dyn LayerEmitter>>,
+    /// Disconnected sibling components, each a fully-piped Engine of
+    /// its own. Empty on the single-component path — today's shape,
+    /// bit-for-bit. The identifier and the aux assemble over the
+    /// siblings per the reference's component sort (ichimake.c
+    /// CompINChI2) when this is non-empty.
+    siblings: Vec<Engine>,
 }
 
 impl Engine {
@@ -44,6 +50,34 @@ impl Engine {
     /// reproduce the standard identifier bit-for-bit.
     pub fn with_options(input: &str, options: Options) -> Result<Self> {
         let original = molfile::parse(input)?;
+        let fragments = original.split_components();
+        if fragments.len() > 1 {
+            // Disconnected components pipe independently (the
+            // reference's GetOneComponent, runichi.c:1307): each is a
+            // full single-component Engine whose fold_source already
+            // speaks the submitted numbering. The assembly sorts by
+            // the reference's component comparator and joins the
+            // layers with the component separator.
+            let siblings = fragments
+                .into_iter()
+                .map(|fragment| Self::from_original(fragment, options.clone()))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Engine {
+                structure: Structure::default(),
+                original,
+                proton_shift: 0,
+                options,
+                fixed_h: None,
+                layers: Vec::new(),
+                siblings,
+            });
+        }
+        Self::from_original(original, options)
+    }
+
+    /// The single-component pipeline: everything [`Engine::with_options`]
+    /// does after the parse, over one submitted structure.
+    fn from_original(original: Structure, options: Options) -> Result<Self> {
         let mut structure = original.clone();
         // The H-count codes as read (the reader maps MDL code n to
         // n-1 hydrogen): DoNotAddH subtracts them again after the
@@ -141,6 +175,7 @@ impl Engine {
             options: options.clone(),
             fixed_h: fixed_h.clone(),
             layers: default_layers(&options, proton_shift, fixed_h),
+            siblings: Vec::new(),
         })
     }
 
@@ -178,6 +213,9 @@ impl Engine {
     /// mandatory kinds (formula + connection): a partial layer set
     /// must never present itself as an identifier.
     pub fn inchi_string(&self) -> Result<String> {
+        if !self.siblings.is_empty() {
+            return self.assemble_identifier();
+        }
         let registered: Vec<Option<char>> = self.layers.iter().map(|l| l.segment_kind()).collect();
         for mandatory in &MANDATORY_KINDS {
             if !registered.contains(mandatory) {
@@ -249,6 +287,173 @@ impl Engine {
         })
     }
 
+    /// The multi-component identifier: the siblings' identifiers
+    /// sorted by the reference's component comparator (ichimake.c
+    /// CompINChI2 — Hill formula WITHOUT terminal H, prefix-goes-last,
+    /// then more atoms first, greater periodic numbers first), then
+    /// assembled: dot-joined formulas, `;`-joined per-component layer
+    /// segments, identical adjacent components multiplied `n*`, and
+    /// the /p layer one NET segment (the sum of the components'
+    /// shifts). The version prefix reads `1S` only when every
+    /// component is standard.
+    fn assemble_identifier(&self) -> Result<String> {
+        // Each sibling identifier splits into (kind, segment) pairs —
+        // the formula carries no letter, the layers do. The assembly
+        // joins BY KIND (components carry different layer sets; the
+        // sodium's /q must not swallow the acid's /p), the /p excluded
+        // from the per-component join and emitted once as the NET
+        // shift.
+        let mut parts: Vec<Vec<(char, String)>> = Vec::new();
+        let mut standard = true;
+        for sibling in &self.siblings {
+            let id = sibling.inchi_string()?;
+            standard = standard && id.starts_with("InChI=1S/");
+            let body = id
+                .strip_prefix("InChI=1S/")
+                .or_else(|| id.strip_prefix("InChI=1/"))
+                .expect("a sibling identifier carries a version prefix");
+            parts.push(
+                body.split('/')
+                    .enumerate()
+                    .map(|(index, segment)| {
+                        (
+                            if index == 0 {
+                                '\0'
+                            } else {
+                                segment.chars().next().unwrap_or('\0')
+                            },
+                            segment.to_string(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        let mut order: Vec<usize> = (0..parts.len()).collect();
+        order.sort_by(|&a, &b| compare_components(&self.siblings[a], &self.siblings[b]));
+        // Identical adjacent components group under a multiplier.
+        let mut groups: Vec<(Vec<usize>, usize)> = Vec::new();
+        for &index in &order {
+            match groups.last_mut() {
+                Some((members, _))
+                    if parts[members[0]] == parts[index]
+                        && self.siblings[members[0]].inchi_string()
+                            == self.siblings[index].inchi_string() =>
+                {
+                    members.push(index);
+                }
+                _ => groups.push((vec![index], 1)),
+            }
+        }
+        let mut out = String::from(if standard { "InChI=1S/" } else { "InChI=1/" });
+        let formulas: Vec<String> = groups
+            .iter()
+            .map(|(members, _)| {
+                let formula = parts[members[0]][0].1.clone();
+                // The formula multiplier is a bare count (the
+                // recording's `K.Mn.2H2O.2O`); the asterisk belongs to
+                // the layer segments only.
+                if members.len() > 1 {
+                    format!("{}{}", members.len(), formula)
+                } else {
+                    formula
+                }
+            })
+            .collect();
+        out.push_str(&formulas.join("."));
+        // The layer kinds in the reference's order (formula, c, h, q,
+        // b, t, m, s, i — the /p comes last as the net).
+        let kinds = ['c', 'h', 'q', 'b', 't', 'm', 's', 'i'];
+        for kind in kinds {
+            let mut present = false;
+            let mut segments: Vec<String> = Vec::new();
+            for (members, _) in &groups {
+                let first = &parts[members[0]];
+                let segment = first
+                    .iter()
+                    .find(|(k, _)| *k == kind)
+                    .map(|(_, v)| v[1..].to_string())
+                    .unwrap_or_default();
+                present = present || !segment.is_empty();
+                // A group with a NON-EMPTY segment renders one
+                // `n*segment` slot; an empty-segment group renders n
+                // individual empty slots (the decahydrate recording:
+                // `/q;2*+1;;;;;;;;;;` — one multiplied slot for the
+                // two sodiums, ten bare slots for the waters).
+                if !segment.is_empty() {
+                    segments.push(if members.len() > 1 {
+                        format!("{}*{}", members.len(), segment)
+                    } else {
+                        segment
+                    });
+                } else {
+                    segments.extend(std::iter::repeat_n(String::new(), members.len()));
+                }
+            }
+            if present {
+                out.push('/');
+                out.push_str(kind.to_string().as_str());
+                out.push_str(&segments.join(";"));
+            }
+        }
+        // The proton layer: one NET segment, the sum of the
+        // components' shifts, omitted when nothing moved.
+        let net: i32 = self.siblings.iter().map(|s| s.proton_shift).sum();
+        if net != 0 {
+            let sign = if net > 0 { '+' } else { '-' };
+            out.push('/');
+            out.push_str(&format!("p{sign}{}", net.abs()));
+        }
+        Ok(out)
+    }
+
+    /// The multi-component AuxInfo: the per-component canonical fields
+    /// `;`-joined over the sorted component order, the echo
+    /// (`/rA /rB /rC`) whole-structure over the submitted input.
+    fn assemble_aux(&self) -> Result<String> {
+        let mut order: Vec<usize> = (0..self.siblings.len()).collect();
+        order.sort_by(|&a, &b| compare_components(&self.siblings[a], &self.siblings[b]));
+        let mut field_aux: Vec<Vec<(String, String)>> = Vec::new();
+        for &index in &order {
+            let aux = self.siblings[index].aux_string()?;
+            field_aux.push(split_aux_fields(&aux));
+        }
+        let norm: i32 = field_aux
+            .iter()
+            .filter_map(|fields| {
+                fields
+                    .iter()
+                    .find(|(tag, _)| tag.is_empty())
+                    .and_then(|(_, v)| v.split('/').nth(1))
+                    .and_then(|v| v.parse::<i32>().ok())
+            })
+            .max()
+            .unwrap_or(0);
+        // CRV never appears in the multi-component aux: the charges
+        // speak through the identifier's per-component /q.
+        let canonical_tags = ["N:", "E:", "gE:", "it:", "iN:"];
+        let mut out = format!("AuxInfo=1/{norm}");
+        for tag in canonical_tags {
+            let mut present = false;
+            let mut segments: Vec<String> = Vec::new();
+            for fields in &field_aux {
+                let value = fields
+                    .iter()
+                    .find(|(t, _)| t == tag)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                present = present || !value.is_empty();
+                segments.push(value);
+            }
+            if present {
+                out.push('/');
+                out.push_str(tag);
+                out.push_str(&segments.join(";"));
+            }
+        }
+        out.push_str(&crate::aux::reversibility_block(&self.original));
+        Ok(out)
+    }
+
     /// The AuxInfo line beside the identifier: canonical numbering,
     /// equivalence classes, charges, and the echo of the submitted
     /// structure (see [`crate::aux`]). The options ride along — SNon
@@ -256,6 +461,9 @@ impl Engine {
     /// the `/F:` repetition block when the identifier's /f carried
     /// non-isotopic content.
     pub fn aux_string(&self) -> Result<String> {
+        if !self.siblings.is_empty() {
+            return self.assemble_aux();
+        }
         let fixed_block = self
             .fixed_h
             .as_ref()
@@ -402,6 +610,103 @@ fn rem_proton_route_for(structure: &Structure, holder: usize, acceptor: usize) -
     crate::canonical::protons::rem_proton_route(&context, &donors, &acids, holder, acceptor).0
 }
 
+/// The reference's component comparator (ichimake.c CompINChI2): the
+/// Hill formula WITHOUT terminal H compares lexicographically with the
+/// PREFIX-GOES-LAST rule, then more atoms first, then greater periodic
+/// numbers first, then longer connection tables first, then fewer
+/// total H first.
+fn compare_components(a: &Engine, b: &Engine) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let hill_no_h = |formula: &str| -> String {
+        // Strip the H terms from a Hill formula: "C2H4O2" -> "C2O2",
+        // "H2O" -> "O", "Na" -> "Na".
+        let mut out = String::new();
+        let mut rest = formula;
+        while !rest.is_empty() {
+            // A term: the uppercase element letter (two-letter elements
+            // take the following lowercase too), then its count digits.
+            let element_len = rest[1..]
+                .find(|c: char| c.is_ascii_uppercase())
+                .map(|position| position + 1)
+                .unwrap_or(rest.len());
+            let (element, remainder) = rest.split_at(element_len);
+            let element = element.trim_end_matches(|c: char| c.is_ascii_digit());
+            let element = element.strip_prefix('H').unwrap_or(element);
+            // Two-letter elements: an uppercase followed by a lowercase
+            // belongs together ("Cl", "Na"); the strip above already
+            // handled bare H.
+            if !element.is_empty() {
+                out.push_str(element);
+            }
+            rest = remainder;
+        }
+        out
+    };
+    let (fa, fb) = (
+        hill_no_h(&a.structure.hill_formula()),
+        hill_no_h(&b.structure.hill_formula()),
+    );
+    // Lexicographic; a strict prefix sorts LAST (the shorter one is
+    // greater — the reference's CH2O < CH2 rule).
+    let ordering = if fa.starts_with(&fb) && fa != fb {
+        Ordering::Greater
+    } else if fb.starts_with(&fa) && fa != fb {
+        Ordering::Less
+    } else {
+        fa.cmp(&fb)
+    };
+    if ordering != Ordering::Equal {
+        return ordering;
+    }
+    // More atoms first.
+    let ordering = b.structure.atoms.len().cmp(&a.structure.atoms.len());
+    if ordering != Ordering::Equal {
+        return ordering;
+    }
+    // Greater periodic numbers first, canonical order per component.
+    let ranks = |s: &Engine| -> Vec<u32> {
+        let mut elements: Vec<u32> = s
+            .structure
+            .atoms
+            .iter()
+            .map(|atom| crate::canonical::protons::el_number(&atom.element).unwrap_or(0) as u32)
+            .collect();
+        elements.sort_unstable();
+        elements
+    };
+    let (ra, rb) = (ranks(a), ranks(b));
+    let ordering = rb.cmp(&ra);
+    if ordering != Ordering::Equal {
+        return ordering;
+    }
+    // Fewer total H first.
+    let hydrogens = |s: &Engine| -> u32 { s.structure.hydrogens().iter().sum() };
+    hydrogens(b).cmp(&hydrogens(a))
+}
+
+/// Splits an AuxInfo line into its `/tag:` fields; the empty tag is
+/// the `AuxInfo=1/<norm>` header.
+fn split_aux_fields(aux: &str) -> Vec<(String, String)> {
+    let body = aux.strip_prefix("AuxInfo=").unwrap_or(aux);
+    let mut fields = Vec::new();
+    let mut parts = body.split('/').peekable();
+    if let Some(header) = parts.next() {
+        fields.push((String::new(), header.to_string()));
+    }
+    for part in parts {
+        match part.split_once(':') {
+            Some((tag, value)) => fields.push((format!("{tag}:"), value.to_string())),
+            None => {
+                if let Some(last) = fields.last_mut() {
+                    last.1.push('/');
+                    last.1.push_str(part);
+                }
+            }
+        }
+    }
+    fields
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +749,7 @@ mod tests {
             proton_shift: 0,
             options: Options::default(),
             fixed_h: None,
+            siblings: Vec::new(),
             layers: vec![Box::new(FixedSegment {
                 order: order::FORMULA,
                 kind: None,
@@ -530,6 +836,7 @@ mod tests {
             proton_shift: 0,
             options: Options::default(),
             fixed_h: None,
+            siblings: Vec::new(),
             layers: vec![
                 Box::new(FixedSegment {
                     order: order::P,

@@ -80,12 +80,9 @@ pub fn parse(input: &str) -> Result<Structure> {
             .trim()
             .parse()
             .map_err(|_| bad(line))?;
-        let stereo: u8 = line
-            .get(9..12)
-            .unwrap_or("")
-            .trim()
-            .parse()
-            .map_err(|_| bad(line))?;
+        // The stereo column may be absent (9-char bond lines — the
+        // corpus's merged molfiles): absent reads as none.
+        let stereo: u8 = line.get(9..12).unwrap_or("0").trim().parse().unwrap_or(0);
         if stereo != 0 {
             stereo_bonds.insert(index, stereo);
         }
