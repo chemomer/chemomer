@@ -7,6 +7,15 @@
 //! a nitro nitrogen (bond sum 4 over N's 3) keeps its aci hydrogens
 //! fixed and a sulfone/sulfate sulfur (bond sum ≥ 3 over S's 2)
 //! never participates — only thiocarbonyl =S and S-H do.
+//!
+//! The experimental extension flags (`TautExt`, stamped from the
+//! generation options) add passes on top: the keto-enol C/O anchors
+//! (`-KET`, the generic [`anchor_round`] family over the per-flag
+//! [`Predicate`]s), the 1,5 alternating-path shift walk (`-15T`,
+//! [`walk_15t_round`]), and the six PT endpoint families. Each pass
+//! mirrors its block in the reference's MarkTautomerGroups
+//! (ichitaut.c 4569–5790); the flags-off path stays the standard
+//! pipeline byte-for-byte.
 //! Endpoints link through a shared anchor that holds both a donor and
 //! an acceptor (the 1,3 template, the donor's bond to the anchor a
 //! real single bond carrying its H), and along alternating
