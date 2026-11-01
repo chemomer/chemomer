@@ -33,26 +33,46 @@ pub const BEYOND_M1: &str = "beyond the ±1 corpus gate";
 /// so none can silently half-decide an untypable structure.
 ///
 /// The guard is the reference's GetAtomChargeType guard
-/// (ichi_bns.c): a PER-ATOM charge beyond ±1 is untypable — the C
-/// function exits without a class and every charge-exchange quota
-/// skips the atom — so no M1 layer may decide such a structure. The
-/// TOTAL is deliberately unbounded: the reference's quota arithmetic
-/// sums ATTOT_TOT_CHARGE as a plain signed total, and the corpus
-/// records the multi-charge families assembling byte-identically
-/// through the declined-(DE)PROTONATION pinned path — the double
-/// quaternary ammonium `/q+2` (breadth-433), the tetrakis-onium
-/// `/q+4` (breadth3-27) and the polyanions `/q-2` `/q-3` `/q-4`
-/// (breadth-1072, breadth2-1593, breadth2-1076). The former
-/// `|total| > 1` rejection was the M1-era corpus scope, not a rule
-/// of the reference: the 2026-10-31 census of the 29 recorded-but-
-/// uncounted fixtures found per-atom `|charge|` = 1 on every one.
+/// (ichi_bns.c): the (DE)PROTONATION charge-exchange never classes
+/// two kinds of atom — METALS (the `is_el_a_metal` exit precedes
+/// everything) and per-atom charges beyond ±1 — they keep their
+/// charges and the /q layer writes them plainly. The refusal below
+/// therefore covers only atoms the reference WOULD class had their
+/// charge been within ±1: a bonded non-metal beyond ±1 (the corpus
+/// census's polyanion family stays per-atom-±1 clean). Two exemptions
+/// carry the recorded metal families: metal atoms at any charge (the
+/// reference classes them never — Fe³⁺ emits `/q+3` in the recorded
+/// iron-trichloride), and a BARE non-metal ion — no bonds, no
+/// hydrogens, no chemistry left to mis-decide (the recorded
+/// zinc-oxide `O.Zn/q-2;+2`). The TOTAL charge is deliberately
+/// unbounded: the reference's quota arithmetic sums
+/// ATTOT_TOT_CHARGE as a plain signed total, and the corpus records
+/// the multi-charge families assembling byte-identically through the
+/// declined-(DE)PROTONATION pinned path — the double quaternary
+/// ammonium `/q+2` (breadth-433), the tetrakis-onium `/q+4`
+/// (breadth3-27) and the polyanions `/q-2` `/q-3` `/q-4` (breadth-1072,
+/// breadth2-1593, breadth2-1076). The former `|total| > 1` rejection
+/// was the M1-era corpus scope, not a rule of the reference.
 pub fn ensure_typable_charges(structure: &Structure) -> Result<()> {
-    if let Some((index, charge)) = structure
+    let degrees = structure.degrees();
+    let hydrogens = structure.hydrogens();
+    let offending = structure
         .atoms
         .iter()
         .enumerate()
-        .find_map(|(index, atom)| (atom.charge.abs() > 1).then_some((index, atom.charge)))
-    {
+        .find_map(|(index, atom)| {
+            if atom.charge.abs() <= 1 {
+                return None;
+            }
+            // The two exemptions: metals never class (any charge), and a
+            // bare non-metal ion has no chemistry left to mis-decide.
+            let metal = crate::canonical::metals::is_metal_el(
+                crate::canonical::protons::el_number(&atom.element).unwrap_or(-1),
+            );
+            let bare = degrees[index] == 0 && hydrogens[index] == 0;
+            (!metal && !bare).then_some((index, atom.charge))
+        });
+    if let Some((index, charge)) = offending {
         return err(format!(
             "standardization: atom {index} charge {charge:+} {BEYOND_M1}"
         ));

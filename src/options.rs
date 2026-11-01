@@ -75,8 +75,17 @@ pub struct Options {
     /// pre-normalization structure speaks its own fixed-H numbering,
     /// H deltas and charges after the standard layers (ichiparm.c
     /// "FixedH — Include Fixed H layer"; bStdFormat off, ichiparm.c
-    /// 248–253).
+    /// 248-253).
     pub fixed_h: bool,
+    /// `RecMet` — append the reconnected identifier (`/r` + the
+    /// identifier over the metal-BONDED structure) after the main
+    /// (disconnected) one (ichiparm.c 972-990, mode.h:586
+    /// RECONNECT_METALS). Non-standard: the version prefix reads
+    /// `InChI=1/`. The /r part exists ONLY when the standard pass
+    /// actually disconnected a coordination metal (the reference's
+    /// TG_FLAG_DISCONNECT_COORD_DONE + RECONNECT_COORD pair,
+    /// runichi.c:980) — a salt-only disconnection never reconnects.
+    pub rec_met: bool,
 }
 
 impl Options {
@@ -172,11 +181,20 @@ impl Options {
         self
     }
 
+    /// `RecMet` — the reconnected identifier rides after the main
+    /// one. Non-standard: the version prefix reads `InChI=1/`.
+    #[must_use]
+    pub fn with_rec_met(mut self) -> Self {
+        self.rec_met = true;
+        self
+    }
+
     /// Whether the assembled identifier is the standard one
-    /// (`InChI=1S/`): `SRel`/`SRac`/`SUCF`/`SUU`/`SLUUD` and `FixedH`
-    /// each turn the std flag off; `SNon` and `DoNotAddH` leave it
-    /// standing (the reference's `bStdFormat`: the perception options
-    /// "DO NOT TURN OFF Std flag", the format options do).
+    /// (`InChI=1S/`): `SRel`/`SRac`/`SUCF`/`SUU`/`SLUUD`, `FixedH`
+    /// and `RecMet` each turn the std flag off; `SNon` and
+    /// `DoNotAddH` leave it standing (the reference's `bStdFormat`:
+    /// the perception options "DO NOT TURN OFF Std flag", the format
+    /// options do).
     #[must_use]
     pub fn is_standard(&self) -> bool {
         !(self.relative_stereo
@@ -184,7 +202,8 @@ impl Options {
             || self.chiral_flag_stereo
             || self.include_unknown_stereo
             || self.distinct_unknown_undefined
-            || self.fixed_h)
+            || self.fixed_h
+            || self.rec_met)
     }
 
     /// Whether the identifier speaks a stereo TYPE segment (`/s`) with
@@ -231,6 +250,7 @@ mod tests {
             Options::default().with_include_unknown_stereo(),
             Options::default().with_distinct_unknown_undefined(),
             Options::default().with_fixed_h(),
+            Options::default().with_rec_met(),
         ] {
             assert!(!options.is_standard(), "{options:?}");
         }

@@ -34,6 +34,18 @@ pub struct Engine {
     /// siblings per the reference's component sort (ichimake.c
     /// CompINChI2) when this is non-empty.
     siblings: Vec<Engine>,
+    /// The salt disconnection (the reference's
+    /// TG_FLAG_DISCONNECT_SALTS_DONE) ran on this structure.
+    salt_disconnected: bool,
+    /// The coordination-metal disconnection (the reference's
+    /// TG_FLAG_DISCONNECT_COORD_DONE) ran on this structure — the /r
+    /// RecMet layer speaks ONLY when this is set; a salt-only
+    /// disconnection never reconnects.
+    metal_disconnected: bool,
+    /// The RECONNECTED identifier's engine (options.rec_met, built
+    /// over the salt-disconnected but metal-BONDED copy — the
+    /// reference's prep_inp_data[1], runichi3.c:673-683).
+    reconnected: Option<Box<Engine>>,
 }
 
 impl Engine {
@@ -50,14 +62,82 @@ impl Engine {
     /// reproduce the standard identifier bit-for-bit.
     pub fn with_options(input: &str, options: Options) -> Result<Self> {
         let original = molfile::parse(input)?;
-        let fragments = original.split_components();
+        // The whole-structure preprocessing (the reference's read +
+        // PreprocessOneStructure, runichi3.c:540-720): the ion-pair
+        // normalization and the explicit-H fold run over the WHOLE
+        // structure (they never cross components), then the drawn-H
+        // pinning of DoNotAddH, the hydrogen materialization, the
+        // salt disconnection, the RecMet copy, the coordination
+        // disconnection — and only THEN the components split and
+        // pipe. The transforms must precede the split: a
+        // coordination center is ONE submitted component whose
+        // disconnection CREATES the components (cisplatin: Pt(NH3)2
+        // Cl2 reads whole, emits five).
+        let mut base = original.clone();
+        let h_codes: Vec<u32> = base.atoms.iter().map(|atom| atom.h_count).collect();
+        standardization::normalize_internal_salts(&mut base);
+        base.fold_explicit_hydrogens();
+        if options.do_not_add_h {
+            // DoNotAddH: only drawn hydrogens exist — every atom is
+            // pinned at its drawn count (the folded explicit H atoms
+            // minus the H-count codes, which the reference's
+            // calculate_valences gate also ignores), so the
+            // valence-gap inference never runs and the transforms
+            // materialize nothing.
+            for (atom, source) in base.atoms.iter_mut().zip(base.fold_source.iter()) {
+                atom.h_count = atom.h_count.saturating_sub(h_codes[*source]);
+                atom.h_pinned = true;
+            }
+        } else {
+            // The read-time materialization: the reference's num_H
+            // was fixed at read time and the disconnect never
+            // re-derives it — the ammine ligand the reader gave its
+            // two hydrogens keeps them as a bare NH2(-) component,
+            // the bare =O stays a bare O.
+            crate::canonical::metals::materialize_hydrogens(&mut base);
+        }
+        let salt_disconnected = crate::canonical::metals::disconnect_salts(&mut base);
+        let metal_pending = crate::canonical::metals::may_disconnect_metals(&base);
+        // The RECONNECTED copy (runichi3.c:673-683): the
+        // salt-disconnected but metal-BONDED structure, piped
+        // separately for the /r layer.
+        let reconnected = if options.rec_met && metal_pending {
+            let rec_base = base.clone();
+            let rec_salt = salt_disconnected;
+            Some(Box::new(
+                Self::from_prepared(rec_base, rec_base.clone(), options.clone(), rec_salt, false, None)?,
+            )?)
+        } else {
+            None
+        };
+        let metal_disconnected = crate::canonical::metals::disconnect_metals(&mut base);
+        Self::from_prepared(
+            base,
+            original,
+            options,
+            salt_disconnected,
+            metal_disconnected,
+            reconnected,
+        )
+    }
+
+    /// The assembly over a PREPARED whole structure: the transforms
+    /// have run, the components split and pipe independently (the
+    /// reference's GetOneComponent, runichi.c:1307), each a full
+    /// single-component Engine whose fold_source speaks the
+    /// submitted numbering. The assembly sorts by the reference's
+    /// component comparator and joins the layers with the component
+    /// separator.
+    fn from_prepared(
+        base: Structure,
+        original: Structure,
+        options: Options,
+        salt_disconnected: bool,
+        metal_disconnected: bool,
+        reconnected: Option<Box<Engine>>,
+    ) -> Result<Self> {
+        let fragments = base.split_components();
         if fragments.len() > 1 {
-            // Disconnected components pipe independently (the
-            // reference's GetOneComponent, runichi.c:1307): each is a
-            // full single-component Engine whose fold_source already
-            // speaks the submitted numbering. The assembly sorts by
-            // the reference's component comparator and joins the
-            // layers with the component separator.
             let siblings = fragments
                 .into_iter()
                 .map(|fragment| Self::from_original(fragment, options.clone()))
@@ -70,33 +150,29 @@ impl Engine {
                 fixed_h: None,
                 layers: Vec::new(),
                 siblings,
+                salt_disconnected,
+                metal_disconnected,
+                reconnected,
             });
         }
-        Self::from_original(original, options)
+        let mut engine = Self::from_original(base, options)?;
+        engine.original = original;
+        engine.salt_disconnected = salt_disconnected;
+        engine.metal_disconnected = metal_disconnected;
+        engine.reconnected = reconnected;
+        Ok(engine)
     }
 
     /// The single-component pipeline: everything [`Engine::with_options`]
-    /// does after the parse, over one submitted structure.
+    /// does after the parse and the whole-structure preprocessing,
+    /// over one (already-prepared) structure.
     fn from_original(original: Structure, options: Options) -> Result<Self> {
         let mut structure = original.clone();
-        // The H-count codes as read (the reader maps MDL code n to
-        // n-1 hydrogen): DoNotAddH subtracts them again after the
-        // fold so only DRAWN hydrogens survive.
-        let h_codes: Vec<u32> = structure.atoms.iter().map(|atom| atom.h_count).collect();
+        // The whole-structure pass already normalized and folded; the
+        // re-runs here are idempotent no-ops (no H atoms, no live
+        // ion pairs survive them).
         standardization::normalize_internal_salts(&mut structure);
         structure.fold_explicit_hydrogens();
-        if options.do_not_add_h {
-            // DoNotAddH: only drawn hydrogens exist — every atom is
-            // pinned at its drawn count (the folded explicit H atoms
-            // minus the H-count codes, which the reference's
-            // calculate_valences gate also ignores), so the
-            // valence-gap inference never runs and the (DE)PROTONATION
-            // standardization reads the drawn-only state from here on.
-            for (atom, code) in structure.atoms.iter_mut().zip(&h_codes) {
-                atom.h_count = atom.h_count.saturating_sub(*code);
-                atom.h_pinned = true;
-            }
-        }
         // The Fixed-H SNAPSHOT (ichimake.c:3904): the preprocessed
         // structure copied BEFORE the taut pass — the (DE)PROTONATION
         // and the hard group-H removal never touch it.
@@ -257,6 +333,29 @@ impl Engine {
     /// SHA-256 key, computed natively (see [`crate::key`]).
     pub fn inchikey(&self) -> Result<String> {
         crate::key::inchikey(&self.inchi_string()?)
+    }
+
+    /// The `-RecMet` output line: the main (disconnected) identifier
+    /// under the non-standard prefix, followed — ONLY when the
+    /// standard pass actually disconnected a coordination metal — by
+    /// `/r` and the reconnected identifier's layers (the reference's
+    /// two-part line, FAQ 7.3: the pipeline runs twice, disconnected
+    /// then over the original bonds). A salt-only disconnection never
+    /// reconnects (TECHMAN 6.1), so the line is then the bare
+    /// identifier.
+    pub fn recmet_string(&self) -> Result<String> {
+        let main = self.inchi_string()?;
+        match &self.reconnected {
+            None => Ok(main),
+            Some(reconnected) => {
+                let identifier = reconnected.inchi_string()?;
+                let layers = identifier
+                    .strip_prefix("InChI=1S/")
+                    .or_else(|| identifier.strip_prefix("InChI=1/"))
+                    .unwrap_or(&identifier);
+                Ok(format!("{main}/r{layers}"))
+            }
+        }
     }
 
     /// The key output the reference CLI prints for the assembled
