@@ -37,7 +37,11 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
     let symmetry = canonical::base_symmetry(&adjacency, &invariants);
     let groups = canonical::group_membership(structure, &counts);
     let ranks = canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
-    let segments = canonical::stereo::segments(structure, &counts, &ranks, &symmetry);
+    let emission = canonical::stereo::Emission {
+        keep_undefined: options.include_unknown_stereo,
+        label_unknown: options.distinct_unknown_undefined,
+    };
+    let segments = canonical::stereo::segments(structure, &counts, &ranks, &symmetry, emission);
     let stereo_type = options.requested_stereo_type();
     if stereo_type.is_none() {
         return segments;
@@ -173,9 +177,15 @@ impl LayerEmitter for BLayer {
             &canonical::tautomer::without_mobile_h(&counts, &mask),
             &groups,
         );
-        Ok(canonical::bond_stereo::segments(structure, &counts, &ranks)
-            .into_iter()
-            .next()
-            .map(|(_, segment)| segment))
+        let emission = canonical::stereo::Emission {
+            keep_undefined: self.options.include_unknown_stereo,
+            label_unknown: self.options.distinct_unknown_undefined,
+        };
+        Ok(
+            canonical::bond_stereo::segments(structure, &counts, &ranks, emission)
+                .into_iter()
+                .next()
+                .map(|(_, segment)| segment),
+        )
     }
 }

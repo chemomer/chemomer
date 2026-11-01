@@ -3,7 +3,9 @@
 //! source read, never compiled or called). Input contract: a wedge
 //! (1) or dash (6) bond-stereo code whose FIRST atom is the
 //! stereocenter — the gem writer's shape; the atom-parity field is
-//! ignored for 2D input, and degenerate coordinates void wedges.
+//! ignored for 2D input, and degenerate coordinates void wedges. A
+//! wiggly bond (code 4) marks its center UNKNOWN — the parity the
+//! standard reads `?` and the SLUUD option reads `u`.
 //!
 //! Per center: the heavy ligands in neighbor order are lifted to 3D
 //! (the wedge carries z = ± its drawn length), the implicit hydrogen
@@ -13,12 +15,22 @@
 //! input→canonical ligand permutation and one global convention
 //! constant. Emission: the first defined center's `/t` char is
 //! normalized `-`, other defined centers show `p_i ⊕ p_first`
-//! (`-` same, `+` differ), unwedged candidate centers `?`; `/m` is
+//! (`-` same, `+` differ), undefined candidate centers `?`; `/m` is
 //! the first center's parity and `/s1` rides it; two same-orbit
 //! centers with opposite parity are the meso case — bare `/t`, no
-//! `/m` `/s`.
+//! `/m` `/s`. A group with no defined parity at all drops unless the
+//! SUU option keeps it (then the bare `/t` prints, no `/m` `/s`).
 
 use crate::graph::Structure;
+
+/// The emission knobs the generation options map onto: whether a
+/// stereo group with no well-defined parity still prints (SUU) and
+/// whether unknown (wiggly) stereo carries its own label `u` (SLUUD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Emission {
+    pub keep_undefined: bool,
+    pub label_unknown: bool,
+}
 
 /// One center's derived state.
 struct Center {
@@ -26,6 +38,9 @@ struct Center {
     /// Heavy-neighbor atom indices in input order (atom-index order).
     neighbors: Vec<usize>,
     parity: Option<u32>,
+    /// A wiggly bond (code 4) points at this center: UNKNOWN parity,
+    /// labelled `u` under SLUUD and `?` otherwise.
+    unknown: bool,
 }
 
 impl Center {
@@ -66,20 +81,28 @@ const PARITY_CONSTANT: u32 = 1;
 const AUX_PARITY_CONSTANT: u32 = 0;
 
 /// The derived segments in `/t`, `/m`, `/s` order; empty when the
-/// structure carries no wedge parity at all.
+/// structure carries no wedge parity at all and the SUU knob does not
+/// keep the undefined group.
 pub fn segments(
     structure: &Structure,
     hydrogens: &[u32],
     ranks: &[u32],
     symmetry: &[u32],
+    emission: Emission,
 ) -> Vec<(char, String)> {
     let wedged = wedged_centers(structure);
-    if wedged.is_empty() {
+    let defined_exists = wedged.iter().any(|&(_, _, down)| down.is_some());
+    if !defined_exists && !emission.keep_undefined {
         return Vec::new();
     }
     let mut centers = candidates(structure, hydrogens, ranks);
     for &(atom, bond_index, down) in &wedged {
         if let Some(center) = centers.iter_mut().find(|c| c.atom == atom) {
+            let Some(down) = down else {
+                // The wiggly bond: UNKNOWN parity, no geometry read.
+                center.unknown = true;
+                continue;
+            };
             // Heavy ligands in the reference's neighbor order, the
             // implicit H appended last — the list the atom parity is
             // defined over.
@@ -92,7 +115,16 @@ pub fn segments(
         }
     }
     let Some(first) = centers.iter().find(|c| c.parity.is_some()) else {
-        return Vec::new();
+        // No defined parity anywhere — wedges all degenerate, wiggly
+        // or absent: the group drops unless the SUU knob keeps it
+        // (then the bare `/t` prints over every candidate — unknown
+        // centres labelled, undefined ones `?` — with no `/m` `/s`:
+        // all-non-well-def rows leave nCompInv2Abs at 0, SP3_ONLY).
+        // No perceivable center at all is SP3_NONE: nothing prints.
+        if centers.is_empty() || !emission.keep_undefined {
+            return Vec::new();
+        }
+        return vec![('t', render_t(&centers, ranks, None, emission.label_unknown))];
     };
     let first_parity = first.parity.expect("checked");
 
@@ -109,24 +141,44 @@ pub fn segments(
         }
     }
 
+    let mut out = vec![(
+        't',
+        render_t(&centers, ranks, Some(first_parity), emission.label_unknown),
+    )];
+    if !meso {
+        out.push(('m', format!("m{first_parity}")));
+        out.push(('s', "s1".to_string()));
+    }
+    out
+}
+
+/// The `/t` text: per center its rank and mark — defined centers
+/// relative to `first` (None renders every defined center `-`, the
+/// all-undefined bare group), unknown centers `u`/`?` by the SLUUD
+/// knob, undefined candidates `?`.
+fn render_t(centers: &[Center], ranks: &[u32], first: Option<u32>, label_unknown: bool) -> String {
     let mut t = String::from("t");
     for (index, center) in centers.iter().enumerate() {
         let mark = match center.parity {
+            None if center.unknown => {
+                if label_unknown {
+                    'u'
+                } else {
+                    '?'
+                }
+            }
             None => '?',
-            Some(p) if index > 0 && p != first_parity => '+',
-            Some(_) => '-',
+            Some(p) => match first {
+                Some(first_parity) if index > 0 && p != first_parity => '+',
+                _ => '-',
+            },
         };
         if index > 0 {
             t.push(',');
         }
         t.push_str(&format!("{}{}", ranks[center.atom], mark));
     }
-    let mut out = vec![('t', t)];
-    if !meso {
-        out.push(('m', format!("m{first_parity}")));
-        out.push(('s', "s1".to_string()));
-    }
-    out
+    t
 }
 
 /// Permutation parity (1 = odd) of the sequence that orders the heavy
@@ -206,16 +258,18 @@ fn atom_parity(
     Some(u32::from(triple < 0.0) ^ 1)
 }
 /// Atoms the wedge codes point FROM (the code's first atom), with the
-/// bond index and the direction (1 = dash).
-fn wedged_centers(structure: &Structure) -> Vec<(usize, usize, u32)> {
+/// bond index and the direction (`Some(1)` = dash, `Some(0)` = up,
+/// `None` = the wiggly code 4 — the UNKNOWN parity mark).
+fn wedged_centers(structure: &Structure) -> Vec<(usize, usize, Option<u32>)> {
     let mut out = Vec::new();
     for (&bond_index, &code) in &structure.stereo_bonds {
         let Some(&(from, _, _)) = structure.bonds.get(bond_index) else {
             continue;
         };
         let down = match code {
-            6 => 1,
-            1 => 0,
+            6 => Some(1),
+            1 => Some(0),
+            4 => None,
             _ => continue,
         };
         out.push((from, bond_index, down));
@@ -228,7 +282,8 @@ fn wedged_centers(structure: &Structure) -> Vec<(usize, usize, u32)> {
 /// ligands (neighbor order) — the per-terminal stereo-row inputs the
 /// aux numbering's informed search compares. The geometry bit is
 /// terminal-independent; only the ligand permutation composes with
-/// the canonical ranks.
+/// the canonical ranks. Wiggly-marked centers carry no geometry bit
+/// and stay out (the rows speak defined parity only).
 pub fn center_inputs(
     structure: &Structure,
     hydrogens: &[u32],
@@ -240,6 +295,9 @@ pub fn center_inputs(
     }
     let mut out = Vec::new();
     for &(atom, bond_index, down) in &wedged {
+        let Some(down) = down else {
+            continue;
+        };
         let Some(center) = candidates(structure, hydrogens, ranks)
             .into_iter()
             .find(|c| c.atom == atom)
@@ -411,6 +469,7 @@ fn candidates(structure: &Structure, hydrogens: &[u32], ranks: &[u32]) -> Vec<Ce
             atom,
             neighbors,
             parity: None,
+            unknown: false,
         });
     }
     out.sort_by_key(|center| ranks[center.atom]);
@@ -461,7 +520,13 @@ mod tests {
         let (adjacency, invariants) = crate::canonical::graph_of(structure);
         let symmetry = crate::canonical::base_symmetry(&adjacency, &invariants);
         let ranks = crate::canonical::canonical_ranks(&adjacency, &invariants, &hydrogens, &[]);
-        let got = segments(structure, &hydrogens, &ranks, &symmetry);
+        let got = segments(
+            structure,
+            &hydrogens,
+            &ranks,
+            &symmetry,
+            Emission::default(),
+        );
         let want: Vec<(char, String)> = expected
             .iter()
             .map(|(k, v)| (k.chars().next().unwrap(), v.to_string()))
@@ -541,12 +606,30 @@ mod tests {
             (72.0, 12.0),
             (132.0, 62.0),
         ];
+        // Default emission drops the all-undefined group...
         assert!(segments(
-            &butanol(0, layout, 1),
+            &butanol(0, layout.clone(), 1),
             &[3, 1, 2, 2, 3],
             &[5, 4, 2, 3, 1],
-            &[1, 2, 3, 4, 5]
+            &[1, 2, 3, 4, 5],
+            Emission::default()
         )
         .is_empty());
+        // ...while the SUU knob keeps it as the bare /t of undefined
+        // candidates (the oracle's -SUU recording on the flat probe:
+        // t4?).
+        assert_eq!(
+            segments(
+                &butanol(0, layout, 1),
+                &[3, 1, 2, 2, 3],
+                &[5, 4, 2, 3, 1],
+                &[1, 2, 3, 4, 5],
+                Emission {
+                    keep_undefined: true,
+                    label_unknown: false,
+                }
+            ),
+            vec![('t', "t4?".to_string())]
+        );
     }
 }

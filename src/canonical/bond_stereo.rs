@@ -7,25 +7,61 @@
 //! on OPPOSITE sides of the drawn double bond, − when on the same
 //! side (the probes' E/Z mapping). The segment lists each pair with
 //! the endpoint ranks descending; /b comes between /p and /t.
+//!
+//! Non-defined members: a crossed/either code (3 or 4) on the double
+//! bond marks UNKNOWN parity — labelled `u` under the SLUUD knob and
+//! `?` otherwise; a stereogerm whose drawn sides are degenerate is
+//! UNDEFINED (`?`). Both ride along a group that holds at least one
+//! well-defined bond, and an all-non-defined group drops unless the
+//! SUU knob keeps it (the probes: `-SUU` on the collinear/crossed
+//! butene records `b4-3?`, `-SUU -SLUUD` records `b4-3u`).
 
+use super::stereo::Emission;
 use crate::graph::Structure;
 
 /// One ligand: its canonical rank (0 for the implicit hydrogen) and,
 /// for heavy ligands, its drawn position.
 type Ligand = (u32, Option<(f64, f64)>);
 
-/// The derived `/b` segment; empty when no double bond carries
-/// stereo.
-pub fn segments(structure: &Structure, counts: &[u32], ranks: &[u32]) -> Vec<(char, String)> {
-    let mut bonds: Vec<(u32, u32, char)> = Vec::new();
-    for &(from, to, kind) in &structure.bonds {
+/// The derived `/b` segment; empty when no double bond carries stereo.
+pub fn segments(
+    structure: &Structure,
+    counts: &[u32],
+    ranks: &[u32],
+    emission: Emission,
+) -> Vec<(char, String)> {
+    let mut defined: Vec<(u32, u32, char)> = Vec::new();
+    let mut unknown: Vec<(u32, u32, char)> = Vec::new();
+    let mut undefined: Vec<(u32, u32)> = Vec::new();
+    for (index, &(from, to, kind)) in structure.bonds.iter().enumerate() {
         if kind != 2 {
             continue;
         }
-        if let Some((sign, hi, lo)) = bond_sign(structure, counts, ranks, from, to) {
-            bonds.push((hi, lo, sign));
+        if matches!(structure.stereo_bonds.get(&index).copied(), Some(3 | 4)) {
+            // The crossed/either code: UNKNOWN parity, never geometry.
+            unknown.push((
+                ranks[from].max(ranks[to]),
+                ranks[from].min(ranks[to]),
+                if emission.label_unknown { 'u' } else { '?' },
+            ));
+            continue;
+        }
+        let Some(bonds_geometry) = stereogerm(structure, counts, ranks, from, to) else {
+            continue;
+        };
+        match bond_sign(ranks, from, to, bonds_geometry) {
+            Some((sign, hi, lo)) => defined.push((hi, lo, sign)),
+            None => undefined.push((ranks[from].max(ranks[to]), ranks[from].min(ranks[to]))),
         }
     }
+    if defined.is_empty() && !emission.keep_undefined {
+        // No well-defined bond parity: the group drops unless SUU
+        // keeps the unknown/undefined members.
+        return Vec::new();
+    }
+    let mut bonds: Vec<(u32, u32, char)> = defined;
+    bonds.extend(unknown);
+    bonds.extend(undefined.into_iter().map(|(hi, lo)| (hi, lo, '?')));
     if bonds.is_empty() {
         return Vec::new();
     }
@@ -38,14 +74,19 @@ pub fn segments(structure: &Structure, counts: &[u32], ranks: &[u32]) -> Vec<(ch
     vec![('b', format!("b{text}"))]
 }
 
-/// The sign for one double bond, with its endpoint ranks descending.
-fn bond_sign(
+/// The stereogerm verdict for one double bond: distinct ligands at
+/// both ends, not small-ring, and the reference ligands' drawn
+/// positions present — with the coordinates the side product reads
+/// (bond direction, left and right reference ligands).
+type Geometry = ((f64, f64), (f64, f64), (f64, f64), (f64, f64));
+
+fn stereogerm(
     structure: &Structure,
     counts: &[u32],
     ranks: &[u32],
     a: usize,
     b: usize,
-) -> Option<(char, u32, u32)> {
+) -> Option<Geometry> {
     if in_small_ring(structure, a, b) {
         return None;
     }
@@ -102,6 +143,14 @@ fn bond_sign(
     let (bx, by) = structure.positions.get(b).copied()?;
     let (lx, ly) = left_at?;
     let (rx, ry) = right_at?;
+    Some(((ax, ay), (bx, by), (lx, ly), (rx, ry)))
+}
+
+/// The sign for one stereogerm double bond, with its endpoint ranks
+/// descending; `None` when the drawn sides carry no stereo
+/// information (the UNDEFINED parity the SUU knob prints as `?`).
+fn bond_sign(ranks: &[u32], a: usize, b: usize, geometry: Geometry) -> Option<(char, u32, u32)> {
+    let ((ax, ay), (bx, by), (lx, ly), (rx, ry)) = geometry;
     // A degenerate layout cannot carry stereo — the oracle ignores
     // it exactly the same way (coordinate-free fixtures record no
     // /b at all).
@@ -209,7 +258,12 @@ mod tests {
             (168.0, 15.0),
         ]);
         assert_eq!(
-            segments(&trans, &[3, 1, 1, 3], &ranks),
+            segments(
+                &trans,
+                &[3, 1, 1, 3],
+                &ranks,
+                crate::canonical::stereo::Emission::default()
+            ),
             vec![('b', "b4-3+".to_string())]
         );
         let cis = butene(vec![
@@ -219,7 +273,12 @@ mod tests {
             (168.0, 15.0),
         ]);
         assert_eq!(
-            segments(&cis, &[3, 1, 1, 3], &ranks),
+            segments(
+                &cis,
+                &[3, 1, 1, 3],
+                &ranks,
+                crate::canonical::stereo::Emission::default()
+            ),
             vec![('b', "b4-3-".to_string())]
         );
     }
@@ -236,7 +295,13 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
         };
-        assert!(segments(&structure, &[3, 1, 2], &[1, 2, 3]).is_empty());
+        assert!(segments(
+            &structure,
+            &[3, 1, 2],
+            &[1, 2, 3],
+            crate::canonical::stereo::Emission::default()
+        )
+        .is_empty());
     }
 
     #[test]
@@ -262,6 +327,12 @@ mod tests {
             protons_hard_moved: false,
             ride_marks: Vec::new(),
         };
-        assert!(segments(&structure, &[1, 2, 1, 2, 1, 2], &[1, 2, 3, 4, 5, 6]).is_empty());
+        assert!(segments(
+            &structure,
+            &[1, 2, 1, 2, 1, 2],
+            &[1, 2, 3, 4, 5, 6],
+            crate::canonical::stereo::Emission::default()
+        )
+        .is_empty());
     }
 }
