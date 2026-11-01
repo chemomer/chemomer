@@ -13,6 +13,14 @@
 //! dash, and the proton flag (N = none, else the ±1..±12 letter,
 //! A beyond). The base-26 tables skip the E** and TAA..TTV triplets
 //! and take the first 512 doublets.
+//!
+//! The 256-bit hash extensions (`XHash1`/`XHash2`, ikey_base26.c
+//! `get_xtra_hash_{major,minor}_hex`) carry the digest bits the
+//! truncated key did not consume: the major extension reads from the
+//! first unconsumed bit (65) — 48 lowercase hex characters; the minor
+//! extension from bit 37 — 56 characters. `-MergeHash` (ichimain.c)
+//! renames the line to `InChIHash=` and dash-joins the requested
+//! extensions behind the key.
 
 use crate::error::{err, Result};
 
@@ -23,6 +31,74 @@ fn error_err(message: impl Into<String>) -> crate::error::Error {
 
 /// The InChIKey for a standard identifier.
 pub fn inchikey(inchi: &str) -> Result<String> {
+    key_extensions(inchi).map(|(key, _, _)| key)
+}
+
+/// The key plus both 256-bit hash extensions: `(standard key, XHash1,
+/// XHash2)`. The extensions ride the same SHA-256 digests the
+/// truncated key reads — they are the un-consumed digest bits rendered
+/// in lowercase hex (see [`xhash_major_hex`] / [`xhash_minor_hex`]).
+pub fn key_extensions(inchi: &str) -> Result<(String, String, String)> {
+    let blocks = split_blocks(inchi)?;
+    let (digest_major, digest_minor) = digests(&blocks);
+    let key = assemble_key(blocks.proton.as_deref(), &digest_major, &digest_minor);
+    Ok((
+        key,
+        xhash_major_hex(&digest_major),
+        xhash_minor_hex(&digest_minor),
+    ))
+}
+
+/// The XHash1 extension of the FIRST key block (the reference's
+/// `get_xtra_hash_major_hex`, ikey_base26.c): the major digest bits
+/// the 65-bit truncated key did not consume — byte 8 with bit 64 (the
+/// dublet's last bit) masked off `0xfe`, then bytes 9..31 — as 48
+/// lowercase hex characters (191 bits).
+pub fn xhash_major_hex(digest: &[u8; 32]) -> String {
+    let mut out = format!("{:02x}", digest[8] & 0xfe);
+    for byte in &digest[9..] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// The XHash2 extension of the SECOND key block (the reference's
+/// `get_xtra_hash_minor_hex`, ikey_base26.c): the minor digest bits
+/// the 37-bit truncated key did not consume — byte 4 with bits 32..36
+/// (the dublet's tail) masked off `0xe0`, then bytes 5..31 — as 56
+/// lowercase hex characters (219 bits).
+pub fn xhash_minor_hex(digest: &[u8; 32]) -> String {
+    let mut out = format!("{:02x}", digest[4] & 0xe0);
+    for byte in &digest[5..] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// The MergeHash composition (ichimain.c): the key line renames to
+/// `InChIHash=` and each requested extension dash-joins behind the
+/// key — an absent extension leaves a bare dash in its slot.
+pub fn merged_line(key: &str, xtra1: Option<&str>, xtra2: Option<&str>) -> String {
+    format!(
+        "InChIHash={}-{}-{}",
+        key,
+        xtra1.unwrap_or(""),
+        xtra2.unwrap_or("")
+    )
+}
+
+/// The identifier's split blocks: the MAJOR layers (formula, c, h, q
+/// — joined with their slashes), the MINOR block (everything from the
+/// first other layer, leading slash included — the reference's
+/// `sminor` copy starts at the block's own slash), and the PROTON
+/// segment (`/p±n`).
+struct Blocks {
+    major: String,
+    minor: String,
+    proton: Option<String>,
+}
+
+fn split_blocks(inchi: &str) -> Result<Blocks> {
     const PREFIX: &str = "InChI=1S/";
     let body = inchi
         .strip_prefix(PREFIX)
@@ -60,28 +136,41 @@ pub fn inchikey(inchi: &str) -> Result<String> {
     } else {
         format!("/{}", minor.join("/"))
     };
+    Ok(Blocks {
+        major: smajor,
+        minor: sminor,
+        proton: proton.map(str::to_string),
+    })
+}
 
-    let digest_major = sha256(smajor.as_bytes());
-    let mut minor_bytes = sminor.as_bytes().to_vec();
+/// The truncated SHA-256 digests over both blocks. The minor block —
+/// concatenated with itself once (the reference's quirk,
+/// ikey_dll.c:410–415) — hashes to the minor digest.
+fn digests(blocks: &Blocks) -> ([u8; 32], [u8; 32]) {
+    let digest_major = sha256(blocks.major.as_bytes());
+    let mut minor_bytes = blocks.minor.as_bytes().to_vec();
     if !minor_bytes.is_empty() && minor_bytes.len() < 255 {
         minor_bytes.extend_from_slice(&minor_bytes.clone());
     }
     let digest_minor = sha256(&minor_bytes);
+    (digest_major, digest_minor)
+}
 
+fn assemble_key(proton: Option<&str>, digest_major: &[u8; 32], digest_minor: &[u8; 32]) -> String {
     let mut key = String::new();
     for chunk in 0..4 {
-        key.push_str(&triplet(&digest_major, chunk * 14));
+        key.push_str(&triplet(digest_major, chunk * 14));
     }
-    key.push_str(&dublet(&digest_major, 56));
+    key.push_str(&dublet(digest_major, 56));
     key.push('-');
-    key.push_str(&triplet(&digest_minor, 0));
-    key.push_str(&triplet(&digest_minor, 14));
-    key.push_str(&dublet(&digest_minor, 28));
+    key.push_str(&triplet(digest_minor, 0));
+    key.push_str(&triplet(digest_minor, 14));
+    key.push_str(&dublet(digest_minor, 28));
     key.push('S'); // the calculation flag: standard
     key.push('A'); // the base subversion flag
     key.push('-');
     key.push_str(&proton_flag(proton));
-    Ok(key)
+    key
 }
 
 /// The proton flag: N for none, else the ±1..±12 letters, A beyond.
@@ -299,5 +388,65 @@ mod tests {
         let key =
             inchikey("InChI=1S/C3H7NO2/c1-2(4)3(5)6/h2H,4H2,1H3,(H,5,6)/t2-/m1/s1").expect("keys");
         assert_eq!(key, "QNAYBMKLOCPYGJ-UWTATZPHSA-N");
+    }
+
+    #[test]
+    fn the_extensions_match_the_oracle_for_water() {
+        // The clean 1.07.5 oracle's `-Key -XHash1 -XHash2` output for
+        // InChI=1S/H2O/h1H2: the major digest over "H2O/h1H2", the
+        // minor digest over the empty block (sha256("")). The minor
+        // extension's leading `80` is byte 4 of e3b0c44298.. masked
+        // 0xe0 — the empty-minor shape, visible right in the recording.
+        let (key, xhash1, xhash2) = key_extensions("InChI=1S/H2O/h1H2").expect("keys");
+        assert_eq!(key, "XLYOFNOQVPJJNP-UHFFFAOYSA-N");
+        assert_eq!(xhash1.len(), 48);
+        assert_eq!(xhash1, "e014f429aafac730dc565eecf4ec4d2c4263e05c04ae2ef6");
+        assert_eq!(xhash2.len(), 56);
+        assert_eq!(
+            xhash2,
+            "80fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn the_merged_line_composes_like_the_oracle() {
+        // ichimain.c: the line renames to InChIHash= and the requested
+        // extensions dash-join; an absent extension leaves a bare dash.
+        let line = merged_line(
+            "XLYOFNOQVPJJNP-UHFFFAOYSA-N",
+            Some("e014f429aafac730dc565eecf4ec4d2c4263e05c04ae2ef6"),
+            Some("80fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        );
+        assert_eq!(
+            line,
+            "InChIHash=XLYOFNOQVPJJNP-UHFFFAOYSA-N-\
+             e014f429aafac730dc565eecf4ec4d2c4263e05c04ae2ef6-\
+             80fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            merged_line("XLYOFNOQVPJJNP-UHFFFAOYSA-N", None, None),
+            "InChIHash=XLYOFNOQVPJJNP-UHFFFAOYSA-N--"
+        );
+        assert_eq!(
+            merged_line("XLYOFNOQVPJJNP-UHFFFAOYSA-N", Some("ab"), None),
+            "InChIHash=XLYOFNOQVPJJNP-UHFFFAOYSA-N-ab-"
+        );
+    }
+
+    #[test]
+    fn the_extension_lengths_follow_the_reference_comments() {
+        // ikey_base26.c: major extension 256-65 = 191 bits, minor
+        // 256-37 = 219 bits — hex-rendered as 48 and 56 characters.
+        let (_, xhash1, xhash2) =
+            key_extensions("InChI=1S/C3H7NO2/c1-2(4)3(5)6/h2H,4H2,1H3,(H,5,6)/t2-/m1/s1")
+                .expect("keys");
+        assert_eq!(xhash1.len(), 48);
+        assert_eq!(xhash2.len(), 56);
+        assert!(xhash1
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(xhash2
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }

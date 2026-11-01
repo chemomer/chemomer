@@ -538,3 +538,77 @@ fn the_rinchi_equals_the_oracle_recording() {
     );
     println!("rinchi gate: pass {pass}, total {}", cases.len());
 }
+
+/// The key-extension gate: the corpus tranche records the oracle's
+/// 256-bit hash extensions (`inchikey_xhash1`, `inchikey_xhash2`) and
+/// the merged `InChIHash=` line (`inchikey_merged`) for a family-
+/// spanning subset of fixtures. The native computation reads the SAME
+/// digests the truncated key reads — every recorded field must equal
+/// our extension byte-for-byte, and the recorded standard key must
+/// still match the native key over the recorded identifier (the
+/// per-record invariant the recording script checks). Fixtures without
+/// the fields skip — no triage interplay: the gate is hash-level over
+/// the recorded identifiers, so the engine's milestone state never
+/// enters it.
+#[test]
+fn the_key_extensions_match_the_oracle() {
+    let dir = suite_dir();
+    let cases = load_cases(&dir);
+
+    let mut pass = 0;
+    let mut without_recording = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let Some(recorded_xhash1) = case["inchikey_xhash1"].as_str() else {
+            without_recording += 1;
+            continue;
+        };
+        let id = case["id"].as_str().expect("id");
+        let recorded_inchi = case["inchi"].as_str().expect("inchi");
+        let recorded_xhash2 = case["inchikey_xhash2"].as_str().expect("xhash2 field");
+        let recorded_merged = case["inchikey_merged"].as_str().expect("merged field");
+        let recorded_key = case["inchikey"].as_str().expect("standard key");
+
+        let (key, xhash1, xhash2) = match chemomer::key::key_extensions(recorded_inchi) {
+            Ok(parts) => parts,
+            Err(error) => {
+                failures.push(format!("{id}: {error}"));
+                continue;
+            }
+        };
+        // The invariant: the extensions ride the same digests, so the
+        // standard key must come out identical to the recorded one.
+        if key != recorded_key {
+            failures.push(format!("{id}: key {key} != recorded {recorded_key}"));
+            continue;
+        }
+        if xhash1 != recorded_xhash1 {
+            failures.push(format!("{id}: xhash1 {xhash1} != oracle {recorded_xhash1}"));
+        }
+        if xhash2 != recorded_xhash2 {
+            failures.push(format!("{id}: xhash2 {xhash2} != oracle {recorded_xhash2}"));
+        }
+        let merged = chemomer::key::merged_line(&key, Some(&xhash1), Some(&xhash2));
+        if merged != recorded_merged {
+            failures.push(format!(
+                "{id}: merged {merged:?} != oracle {recorded_merged:?}"
+            ));
+        }
+        if xhash1 == recorded_xhash1 && xhash2 == recorded_xhash2 && merged == recorded_merged {
+            pass += 1;
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} key-extension mismatch(es):\n{}\n(key-extension pass: {pass}, \
+         no recording: {without_recording}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "key-extension gate: pass {pass}, no recording {without_recording}, total {}",
+        cases.len()
+    );
+}
