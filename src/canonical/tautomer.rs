@@ -2634,21 +2634,235 @@ struct Partitioned {
 /// last entry of a ring path is the closure bond).
 type DfsCheck<'ck> = &'ck mut dyn FnMut(&mut Registration, &[usize], &[BondType]) -> bool;
 
+/// One 15T DFS pass's collection (the caller arrays of the
+/// reference's 1,5 block: EndPoint/BondPos, deduplicated by
+/// AddEndPoints/AddBondsPos, registered once per seed).
+#[derive(Default)]
+struct T15Find {
+    endpoints: Vec<usize>,
+    bonds: Vec<usize>,
+    found: i32,
+}
+
+/// TAUT_15_NON_RING: for every base-predicate seed, the DFS over
+/// 4-bond alternating paths (5 atoms) — interiors registered-or-strict-
+/// centerpoints, at least one endpoint off-ring — collecting every
+/// BNS-confirmed pair per seed, then registering the seed's whole
+/// collection (the reference's DFS_FindTautAltPath +
+/// Check15TautPath, ichiqueu.c 616–800, dispatched ichitaut.c
+/// 5841–5860).
+fn walk_15t_round(context: &Context, state: &mut Registration) -> bool {
+    let n = context.structure.atoms.len();
+    let mut changed = false;
+    for seed in 0..n {
+        if context.endpoint(state, seed).is_none() {
+            continue;
+        }
+        let mut found = T15Find::default();
+        let mut path = vec![seed];
+        let mut bonds: Vec<BondType> = Vec::new();
+        let mut on_path = vec![false; n];
+        on_path[seed] = true;
+        walk_15t_path(
+            context,
+            state,
+            &mut path,
+            &mut bonds,
+            &mut on_path,
+            &mut found,
+        );
+        if found.found > 0 {
+            changed |= state.register(&found.endpoints);
+            for &index in &found.bonds {
+                changed |= state.marks.insert(index);
+            }
+        }
+    }
+    changed
+}
+
+/// The DFS: `path` holds 1..5 atoms, `bonds[i]` joins atom i and
+/// atom i+1; the check fires when the path carries 4 atoms and the
+/// next neighbor closes the fifth.
+fn walk_15t_path(
+    context: &Context,
+    state: &mut Registration,
+    path: &mut Vec<usize>,
+    bonds: &mut Vec<BondType>,
+    on_path: &mut [bool],
+    found: &mut T15Find,
+) {
+    let level = path.len() - 1;
+    let atom = path[level];
+    for &(next, _) in &context.neighbors[atom] {
+        if on_path[next] {
+            // visited: the C's nDfsPathPos ring-closure skip (a plain
+            // path never closes).
+            continue;
+        }
+        let bond = context.bond_type(state, atom, next);
+        if level == 3 {
+            // One endpoint must be off-ring (nNumAtInRingSystem == 1):
+            // the far terminal or the seed.
+            if context.rings.size[next] == 1 || context.rings.size[path[0]] == 1 {
+                check_15t(context, state, path, bonds, bond, next, found);
+            }
+            continue;
+        }
+        // Advance gate (Check15TautPathCenterpoint): a registered
+        // endpoint — the comment there names the keto-enol -CH<
+        // endpoints — or a strict centerpoint.
+        if !(state.registered(next) || context.is_centerpoint_strict(next)) {
+            continue;
+        }
+        on_path[next] = true;
+        path.push(next);
+        bonds.push(bond);
+        walk_15t_path(context, state, path, bonds, on_path, found);
+        bonds.pop();
+        path.pop();
+        on_path[next] = false;
+    }
+}
+
+/// Check15TautPath (ichiqueu.c 1434–1638): the parity classes, the
+/// endpoint roles, the shift feasibility, the balanced-network
+/// confirmation, and the collection. `path` holds the four seeded
+/// atoms, `bonds` the three bonds between them, `last_bond` joins the
+/// last seeded atom to `far`.
+fn check_15t(
+    context: &Context,
+    state: &mut Registration,
+    path: &[usize],
+    bonds: &[BondType],
+    last_bond: BondType,
+    far: usize,
+    found: &mut T15Find,
+) {
+    let a1 = path[0];
+    let a2 = far;
+    if state.group_of[a1].is_some() && state.group_of[a1] == state.group_of[a2] {
+        return; // start & end already belong to the same taut group
+    }
+    // The parity classes of the four path bonds (IS_ALT_OR_DBLBOND,
+    // ichiqueu.c 179–181: single = bit 1, double = bit 2, the
+    // alternating classes = ALTERN, everything else = BOND_WRONG).
+    let mut class = [0i32; 2];
+    for (index, bond) in bonds
+        .iter()
+        .copied()
+        .chain(std::iter::once(last_bond))
+        .enumerate()
+    {
+        class[index % 2] |= match bond {
+            BondType::Single => 1,
+            BondType::Double => 2,
+            BondType::Altern | BondType::Tautom | BondType::Alt12ns => 4,
+            BondType::Triple | BondType::Alt23 => 64,
+        };
+    }
+    if (class[0] & class[1] & 3) != 0 || (class[0] & 64) != 0 || (class[1] & 64) != 0 {
+        return; // incompatible with an alt path or wrong bonds
+    }
+    // Both endpoints must be base heteroatoms ("require both
+    // endpoints be heteroatoms" — the keto-enol C-terminal use is
+    // compiled out, ichiqueu.c 1527 NEVER).
+    let Some(e1) = context.endpoint_info(state, a1) else {
+        return;
+    };
+    let Some(e2) = context.endpoint_info(state, a2) else {
+        return;
+    };
+    // A parity class carrying a real single demands its ungrouped
+    // terminal be a donor, a real double an acceptor
+    // (ichiqueu.c 1531–1546).
+    if !state.registered(a1) {
+        if (class[0] & 1) != 0 && e1.role != Role::Donor {
+            return;
+        }
+        if (class[0] & 2) != 0 && e1.role != Role::Acceptor {
+            return;
+        }
+    }
+    if !state.registered(a2) {
+        if (class[1] & 1) != 0 && e2.role != Role::Donor {
+            return;
+        }
+        if (class[1] & 2) != 0 && e2.role != Role::Acceptor {
+            return;
+        }
+    }
+    // Can the mobile group shift either way? (ichiqueu.c 1548–1568.)
+    let mut mobile = 0;
+    mobile += ((state.registered(a1) || e1.role == Role::Donor)
+        && (class[0] & 2) == 0
+        && (state.registered(a2) || e2.neutral_bonds_valence > context.neighbors[a2].len() as i32))
+        as i32;
+    mobile += ((state.registered(a2) || e2.role == Role::Donor)
+        && (class[1] & 2) == 0
+        && (state.registered(a1) || e1.neutral_bonds_valence > context.neighbors[a1].len() as i32))
+        as i32;
+    if mobile == 0 {
+        return;
+    }
+    // The balanced network confirms the pair unless both already
+    // share one group (ichiqueu.c 1570–1584). The C's following
+    // valence-fill check is an identity (cNeutralBondsValence was
+    // built as endpoint_valence - nMobile).
+    if !(state.group_of[a1].is_some() && state.group_of[a1] == state.group_of[a2])
+        && !context.alt_path_exists(state, a1, a2, Predicate::Base)
+    {
+        return;
+    }
+    // Collect: the endpoints, and the path bonds of the
+    // REPLACE_THE_BOND classes (single/double/alternating/alt12ns).
+    let mut added = false;
+    for &endpoint in &[a1, a2] {
+        if !found.endpoints.contains(&endpoint) {
+            found.endpoints.push(endpoint);
+            added = true;
+        }
+    }
+    let mut chain: Vec<(usize, usize, BondType)> = Vec::new();
+    for (window, bond) in path.windows(2).zip(bonds) {
+        chain.push((window[0], window[1], *bond));
+    }
+    chain.push((path[3], a2, last_bond));
+    for (from, to, bond) in chain {
+        if !matches!(
+            bond,
+            BondType::Single | BondType::Double | BondType::Altern | BondType::Alt12ns
+        ) {
+            continue;
+        }
+        let index = context.bond_index[&(from.min(to), from.max(to))];
+        if !found.bonds.contains(&index) {
+            found.bonds.push(index);
+            added = true;
+        }
+    }
+    if added {
+        found.found += 1;
+    }
+}
+
 /// The shift-walk templates, run only on a pass whose 1,3 phase
 /// registered nothing (the reference's `!tot_changes` gate: one
-/// MarkTautomerGroups call does the anchors, and only a no-change
-/// call falls through to the TAUT_OTHER block). Four template
+/// call falls through to the TAUT_OTHER block). Five template
 /// families, in the reference's order: the 1,5 alt path
-/// (TAUT_15_NON_RING), 6-member alt rings (TAUT_4PYRIDINOL_RINGS),
-/// pyrazole 5-rings (TAUT_PYRAZOLE_RINGS), and the 1,4 tropolone
-/// pattern (TAUT_TROPOLONE_5/7).
+/// (TAUT_15_NON_RING, under `15T`), 6-member alt rings
+/// (TAUT_4PYRIDINOL_RINGS), pyrazole 5-rings (TAUT_PYRAZOLE_RINGS),
+/// and the 1,4 tropolone pattern (TAUT_TROPOLONE_5/7).
 fn walk_round(context: &Context, state: &mut Registration) -> bool {
     let n = context.structure.atoms.len();
     let mut changed = false;
 
-    // TAUT_15_NON_RING is runtime-gated in the reference
-    // (TG_FLAG_1_5_TAUT, off for the standard InChI flow), so the
-    // non-ring 1,5 walk never runs here.
+    // TAUT_15_NON_RING under TG_FLAG_1_5_TAUT: the 1,5 shift-walk
+    // across alternating paths, at least one endpoint off-ring
+    // (ichitaut.c 5808–5877).
+    if context.structure.taut_ext.t15 {
+        changed |= walk_15t_round(context, state);
+    }
 
     // TAUT_4PYRIDINOL_RINGS: a ring N (endpoint valence 3, two ring
     // bonds) walks 6-member cycles to the para ring atom bearing an
