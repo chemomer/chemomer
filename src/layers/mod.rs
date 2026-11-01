@@ -59,20 +59,25 @@ pub trait LayerEmitter {
     fn emit(&self, structure: &Structure) -> Result<Option<String>>;
 }
 
-/// The engine's default layer set; `proton_shift` is the net proton
+/// The engine's default layer set. `proton_shift` is the net proton
 /// change the (DE)PROTONATION normalization applied (see
-/// [`crate::canonical::protons`]).
-pub fn default_layers(proton_shift: i32) -> Vec<Box<dyn LayerEmitter>> {
+/// [`crate::canonical::protons`]); `options` ride into the layers
+/// that consult them at emit (the stereo layers, per
+/// [`crate::options::Options`]).
+pub fn default_layers(
+    options: &crate::options::Options,
+    proton_shift: i32,
+) -> Vec<Box<dyn LayerEmitter>> {
     vec![
         Box::new(formula::FormulaLayer),
         Box::new(connection::ConnectionLayer),
         Box::new(hydrogen::HydrogenLayer),
         Box::new(charge::ChargeLayer),
         Box::new(proton::ProtonLayer::with_shift(proton_shift)),
-        Box::new(stereo::BLayer),
-        Box::new(stereo::TLayer),
-        Box::new(stereo::MLayer),
-        Box::new(stereo::SLayer),
+        Box::new(stereo::BLayer::with_options(options.clone())),
+        Box::new(stereo::TLayer::with_options(options.clone())),
+        Box::new(stereo::MLayer::with_options(options.clone())),
+        Box::new(stereo::SLayer::with_options(options.clone())),
         Box::new(isotope::IsotopeLayer),
     ]
 }

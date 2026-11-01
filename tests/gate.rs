@@ -131,13 +131,211 @@ fn the_identifier_equals_the_oracle_recording() {
     );
 }
 
-/// The RInChI gate: the reaction tranche (corpus/fixtures/
-/// rinchi-reactions.json, recorded by the RInChI oracle) must
-/// reproduce byte-for-byte — the assembled identifier, the RAuxInfo
-/// line, all three RInChIKey shapes, and each component's standard
-/// InChI. Skips quietly when the tranche has not landed in the
-/// corpus checkout (it ships through its own PR); no triage
-/// interplay — a reaction fixture either matches or fails.
+/// The SNon gate: the corpus records every fixture's `-SNon` oracle
+/// run (`snon.inchi` — stereo layers withheld, version stays
+/// `InChI=1S/`). The engine under [`chemomer::Options::with_no_stereo`]
+/// must equal the recording byte-for-byte. Expected failures are the
+/// union of the two dated ledgers (the identifier triage and the aux
+/// ledger, whose debts share machinery the stereo-off path also
+/// touches); a triaged identifier-ledger fixture that passes is a
+/// retirement to act on, never a silent skip. Fixtures without the
+/// field (a corpus carrying no SNon tranche yet) are skipped, the way
+/// the aux gate skips missing aux recordings.
+#[test]
+fn the_snon_output_equals_the_oracle_recording() {
+    let dir = suite_dir();
+    let fixtures = dir.join("corpus/fixtures");
+    let mut cases = Vec::new();
+    let mut files: Vec<PathBuf> = fs::read_dir(&fixtures)
+        .expect("corpus fixtures dir")
+        .filter_map(|entry| {
+            let path = entry.expect("dir entry").path();
+            let name = path
+                .file_name()
+                .expect("name")
+                .to_string_lossy()
+                .to_string();
+            (name.starts_with("identity") && name.ends_with(".json")).then_some(path)
+        })
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no identity fixture files");
+    for file in files {
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(&file).expect("read fixtures"))
+                .expect("valid fixtures");
+        cases.extend(parsed);
+    }
+    let triage: serde_json::Value = match fs::read_to_string(dir.join("corpus/triage.json")) {
+        Ok(text) => serde_json::from_str(&text).expect("valid triage"),
+        Err(_) => serde_json::Value::Null,
+    };
+    let aux_triage: serde_json::Value = match fs::read_to_string(dir.join("corpus/aux-triage.json"))
+    {
+        Ok(text) => serde_json::from_str(&text).expect("valid aux triage"),
+        Err(_) => serde_json::Value::Null,
+    };
+
+    let mut pass = 0;
+    let mut skipped = 0;
+    let mut without_recording = 0;
+    let mut retired = 0;
+    let mut failures = Vec::new();
+    let mut retirements = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let Some(recorded) = case["snon"]
+            .as_object()
+            .and_then(|s| s.get("inchi"))
+            .and_then(|v| v.as_str())
+        else {
+            without_recording += 1;
+            continue;
+        };
+        // Expected failure: either dated ledger marks the id. The
+        // RETIREMENT check reads the identifier ledger only — an
+        // aux-ledger fixture passing the SNon identifier says nothing
+        // about its aux debt.
+        let identifier_debt = triage.get(id).map(|_| ()).is_some();
+        let aux_debt = aux_triage.get(id).map(|_| ()).is_some();
+        let expected_failure = identifier_debt || aux_debt;
+        let molfile = case["molfile"].as_str().expect("molfile");
+
+        let assembled =
+            chemomer::Engine::with_options(molfile, chemomer::Options::default().with_no_stereo())
+                .and_then(|engine| engine.inchi_string());
+        match assembled {
+            Ok(assembled) => {
+                if assembled == recorded {
+                    if identifier_debt {
+                        retired += 1;
+                        retirements.push(id.to_string());
+                    } else {
+                        pass += 1;
+                    }
+                } else if !expected_failure {
+                    failures.push(format!(
+                        "{id}: assembled {assembled:?} != oracle {recorded:?}"
+                    ));
+                } else {
+                    skipped += 1;
+                }
+            }
+            Err(error) => {
+                if error.message().contains("beyond the ±1 corpus gate") {
+                    continue;
+                }
+                if !expected_failure {
+                    failures.push(format!("{id}: {error}"));
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} SNon mismatch(es):\n{}\n(SNon pass: {pass}, expected-failure skips: {skipped}, \
+         no snon recording: {without_recording}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "SNon gate: pass {pass}, expected-failure skips {skipped}, no recording {without_recording}, \
+         retired {retired}"
+    );
+    assert!(
+        retirements.is_empty(),
+        "{} triaged fixture(s) now PASS the SNon gate — retire their triage entries:\n{}",
+        retirements.len(),
+        retirements.join("\n")
+    );
+}
+
+/// The AuxInfo gate: the engine's auxiliary line — canonical
+/// numbering, equivalence classes, charges, reversibility echo — must
+/// equal the oracle's recording byte-for-byte on the same corpus.
+#[test]
+fn the_aux_info_equals_the_oracle_recording() {
+    let dir = suite_dir();
+    let fixtures = dir.join("corpus/fixtures");
+    let mut cases = Vec::new();
+    let mut files: Vec<PathBuf> = fs::read_dir(&fixtures)
+        .expect("corpus fixtures dir")
+        .filter_map(|entry| {
+            let path = entry.expect("dir entry").path();
+            let name = path
+                .file_name()
+                .expect("name")
+                .to_string_lossy()
+                .to_string();
+            (name.starts_with("identity") && name.ends_with(".json")).then_some(path)
+        })
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no identity fixture files");
+    for file in files {
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(&file).expect("read fixtures"))
+                .expect("valid fixtures");
+        cases.extend(parsed);
+    }
+    // The aux debts live in their own dated ledger: an entry here
+    // marks an EXPECTED aux failure only — the identifier gate's
+    // triage.json must not learn about them, or their passing
+    // identifiers read as retirements.
+    let triage: serde_json::Value = match fs::read_to_string(dir.join("corpus/aux-triage.json")) {
+        Ok(text) => serde_json::from_str(&text).expect("valid aux triage"),
+        Err(_) => serde_json::Value::Null,
+    };
+
+    let mut pass = 0;
+    let mut skipped = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let expected_failure = triage.get(id).map(|_| ()).is_some();
+        let Some(recorded) = case["aux"].as_str() else {
+            continue;
+        };
+        let molfile = case["molfile"].as_str().expect("molfile");
+        match chemomer::Engine::from_molfile(molfile).and_then(|engine| engine.aux_string()) {
+            Ok(assembled) => {
+                if assembled == recorded {
+                    pass += 1;
+                } else if !expected_failure {
+                    failures.push(format!(
+                        "{id}: assembled {assembled:?} != oracle {recorded:?}"
+                    ));
+                } else {
+                    skipped += 1;
+                }
+            }
+            Err(error) => {
+                if error.message().contains("beyond the ±1 corpus gate") {
+                    continue;
+                }
+                if !expected_failure {
+                    failures.push(format!("{id}: {error}"));
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} aux mismatch(es):\n{}\n(aux pass: {pass}, expected-failure skips: {skipped}, total with aux: {})",
+        failures.len(),
+        failures.join("\n"),
+        pass + skipped + failures.len()
+    );
+    println!("aux gate: pass {pass}, expected-failure skips {skipped}");
+}
+
 #[test]
 fn the_rinchi_equals_the_oracle_recording() {
     let dir = suite_dir();
@@ -286,86 +484,4 @@ fn the_rinchi_equals_the_oracle_recording() {
         cases.len()
     );
     println!("rinchi gate: pass {pass}, total {}", cases.len());
-}
-
-/// The AuxInfo gate: the engine's auxiliary line — canonical
-/// numbering, equivalence classes, charges, reversibility echo — must
-/// equal the oracle's recording byte-for-byte on the same corpus.
-#[test]
-fn the_aux_info_equals_the_oracle_recording() {
-    let dir = suite_dir();
-    let fixtures = dir.join("corpus/fixtures");
-    let mut cases = Vec::new();
-    let mut files: Vec<PathBuf> = fs::read_dir(&fixtures)
-        .expect("corpus fixtures dir")
-        .filter_map(|entry| {
-            let path = entry.expect("dir entry").path();
-            let name = path
-                .file_name()
-                .expect("name")
-                .to_string_lossy()
-                .to_string();
-            (name.starts_with("identity") && name.ends_with(".json")).then_some(path)
-        })
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no identity fixture files");
-    for file in files {
-        let parsed: Vec<serde_json::Value> =
-            serde_json::from_str(&fs::read_to_string(&file).expect("read fixtures"))
-                .expect("valid fixtures");
-        cases.extend(parsed);
-    }
-    // The aux debts live in their own dated ledger: an entry here
-    // marks an EXPECTED aux failure only — the identifier gate's
-    // triage.json must not learn about them, or their passing
-    // identifiers read as retirements.
-    let triage: serde_json::Value = match fs::read_to_string(dir.join("corpus/aux-triage.json")) {
-        Ok(text) => serde_json::from_str(&text).expect("valid aux triage"),
-        Err(_) => serde_json::Value::Null,
-    };
-
-    let mut pass = 0;
-    let mut skipped = 0;
-    let mut failures = Vec::new();
-    for case in &cases {
-        let id = case["id"].as_str().expect("id");
-        let expected_failure = triage.get(id).map(|_| ()).is_some();
-        let Some(recorded) = case["aux"].as_str() else {
-            continue;
-        };
-        let molfile = case["molfile"].as_str().expect("molfile");
-        match chemomer::Engine::from_molfile(molfile).and_then(|engine| engine.aux_string()) {
-            Ok(assembled) => {
-                if assembled == recorded {
-                    pass += 1;
-                } else if !expected_failure {
-                    failures.push(format!(
-                        "{id}: assembled {assembled:?} != oracle {recorded:?}"
-                    ));
-                } else {
-                    skipped += 1;
-                }
-            }
-            Err(error) => {
-                if error.message().contains("beyond the ±1 corpus gate") {
-                    continue;
-                }
-                if !expected_failure {
-                    failures.push(format!("{id}: {error}"));
-                } else {
-                    skipped += 1;
-                }
-            }
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "{} aux mismatch(es):\n{}\n(aux pass: {pass}, expected-failure skips: {skipped}, total with aux: {})",
-        failures.len(),
-        failures.join("\n"),
-        pass + skipped + failures.len()
-    );
-    println!("aux gate: pass {pass}, expected-failure skips {skipped}");
 }
