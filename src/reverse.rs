@@ -46,45 +46,7 @@ fn standard_mass(element: &str) -> Option<u16> {
     })
 }
 
-/// The allowed valences per element and charge — the reference's
-/// charged-valence rows (ichirvr1.c:118-469: anions read V−1,
-/// group-13/14 cations read V−1, onium group-15/16/17 cations read
-/// V+1), with the hypervalent chalcogen/pnictogen sets the oracle's
-/// reconstructions realize (nitrate's N(V), sulfate's S(VI)).
-fn charged_valences(element: &str, charge: i32) -> Option<Vec<f64>> {
-    let mut base: Vec<f64> = match element {
-        "H" => vec![1.0],
-        "B" => vec![3.0],
-        "C" => vec![4.0],
-        "N" => vec![3.0, 5.0],
-        "O" => vec![2.0],
-        "F" | "Cl" | "Br" | "I" => vec![1.0],
-        "Si" => vec![4.0],
-        "P" => vec![3.0, 5.0],
-        "S" | "Se" | "Te" => vec![2.0, 4.0, 6.0],
-        _ => return None,
-    };
-    if charge == 0 {
-        return Some(base);
-    }
-    // Anions shift every valence down; cations shift by the onium
-    // direction: group-15/16/17 gain a bond site, group-13/14 (and H)
-    // lose one.
-    let onium = matches!(
-        element,
-        "N" | "P" | "O" | "S" | "Se" | "Te" | "F" | "Cl" | "Br" | "I"
-    );
-    let delta = if charge < 0 || onium { charge } else { -charge };
-    for value in &mut base {
-        *value += delta as f64;
-    }
-    base.retain(|value| *value >= 0.0);
-    if base.is_empty() {
-        None
-    } else {
-        Some(base)
-    }
-}
+use crate::graph::{charged_valences, valence_admits, valence_needed};
 
 /// A parsed `(Hn,atoms)` mobile-H group (ichiread.c's t-group record).
 #[derive(Debug, Clone)]
@@ -780,29 +742,6 @@ fn parse_exchanged_hydrogen(segment: &str, layers: &mut Layers) -> Result<()> {
     Ok(())
 }
 
-/// The smallest allowed valence that can still absorb `used` bond
-/// orders plus hydrogens (the reference's valence-gap read).
-fn valence_ceiling(range: &[f64], used: f64) -> f64 {
-    for allowed in range {
-        if *allowed + 1e-9 >= used {
-            return *allowed;
-        }
-    }
-    *range.last().expect("non-empty")
-}
-
-/// The valence floor: the smallest allowed valence at or above the
-/// atom's mandatory hydrogens.
-fn valence_floor(range: &[f64], hydrogens: u32) -> f64 {
-    let mandatory = hydrogens as f64;
-    for allowed in range {
-        if *allowed + 1e-9 >= mandatory {
-            return *allowed;
-        }
-    }
-    *range.last().expect("non-empty")
-}
-
 /// A single atom's reconstruction state during assembly.
 #[derive(Debug, Clone)]
 struct AtomState {
@@ -820,14 +759,24 @@ impl AtomState {
         })
     }
 
-    /// Whether the atom can absorb one more bond order given its
-    /// charge and hydrogens.
+    /// Whether the atom's current state (the caller's probe already
+    /// carries any added hydrogen) is an admitted valence.
     fn can_absorb(&self, sum: f64) -> bool {
+        match self.allowed() {
+            Ok(range) => valence_admits(&range, sum + self.hydrogens as f64),
+            Err(_) => false,
+        }
+    }
+
+    /// Whether one more bond order can still reach an admitted
+    /// valence — intermediate steps may pass through unadmitted
+    /// states (neutral N walks 3 → 4 → 5 to reach nitrate's N(V));
+    /// the final admits-check in `kekulize` disciplines the result.
+    fn can_take_order(&self, sum: f64) -> bool {
         match self.allowed() {
             Ok(range) => {
                 let used = sum + self.hydrogens as f64;
-                let ceiling = valence_ceiling(&range, used);
-                used <= ceiling + 1e-9 || used + 1.0 <= *range.last().expect("non-empty") + 1e-9
+                *range.last().expect("non-empty set") >= used + 1.0 - 1e-6
             }
             Err(_) => false,
         }
@@ -973,24 +922,42 @@ fn reconstruct(layers: Layers) -> Result<Structure> {
     }
 
     // Mobile-H placement: the pool spreads across the group's
-    // endpoints, one each per round, while the site's charged valence
-    // has room (the BNS's observable hydroxylation pattern).
+    // endpoints round-robin, each endpoint taking hydrogens up to its
+    // capacity — the smallest admitted valence minus its bond orders
+    // (the BNS's observable hydroxylation pattern: hydroxyls take one
+    // H, amide nitrogens two).
+    let bond_sums = bond_sums_of(&layers.bonds, n);
     for group in &groups {
         let mut pool = group.hydrogens;
-        while pool > 0 {
+        let mut capacity = vec![0u32; group.endpoints.len()];
+        for (slot, &endpoint) in group.endpoints.iter().enumerate() {
+            let range = atoms[endpoint].allowed()?;
+            let bonds = bond_sums[endpoint];
+            // Smallest admitted count c >= 0 with bonds + c admitted.
+            let mut c = 0u32;
+            while c < 8 && !valence_admits(&range, bonds + f64::from(c)) {
+                c += 1;
+            }
+            capacity[slot] = if valence_admits(&range, bonds + f64::from(c)) {
+                c
+            } else {
+                0
+            };
+        }
+        loop {
             let mut placed = false;
-            let bond_sums = bond_sums_of(&layers.bonds, n);
-            for &endpoint in &group.endpoints {
+            for (slot, &endpoint) in group.endpoints.iter().enumerate() {
                 if pool == 0 {
                     break;
                 }
-                let mut probe = atoms[endpoint].clone();
-                probe.hydrogens += 1;
-                if probe.can_absorb(bond_sums[endpoint]) {
+                if atoms[endpoint].hydrogens < capacity[slot] {
                     atoms[endpoint].hydrogens += 1;
                     pool -= 1;
                     placed = true;
                 }
+            }
+            if pool == 0 {
+                break;
             }
             if !placed {
                 return err(format!(
@@ -1058,10 +1025,29 @@ fn reconstruct(layers: Layers) -> Result<Structure> {
     }
 
     // Bond orders: single everywhere, then raise orders while any
-    // atom sits under its charged valence floor — matching the
-    // deficient atoms pairwise over existing bonds (the observable
-    // Kekulé rule), one raise at a time.
-    let orders = kekulize(&layers.bonds, &atoms)?;
+    // atom sits under its charged valence — matching the deficient
+    // atoms pairwise over existing bonds (the observable Kekulé
+    // rule), one raise at a time. When the neutral assignment is
+    // infeasible and the identifier carries no charge layers, the
+    // reference's internal-salt read applies: one charge pair (+1 on
+    // the over-bonded heteroatom, −1 on an acceptor) restores
+    // feasibility (N-methylisatogen's N⁺/O⁻, the betaines).
+    let orders = match kekulize(&layers.bonds, &atoms) {
+        Ok(orders) => orders,
+        Err(neutral_error) => {
+            let neutral = atoms.iter().all(|atom| atom.charge == 0);
+            if !neutral {
+                return Err(neutral_error);
+            }
+            let repaired = zwitterion_pair(&layers.bonds, &atoms).ok_or_else(|| {
+                crate::error::Error::new(format!(
+                    "{CONTEXT}: no valence-feasible bond assignment exists for the /c skeleton"
+                ))
+            })?;
+            atoms = repaired;
+            kekulize(&layers.bonds, &atoms)?
+        }
+    };
 
     // Formula consistency: the placed hydrogens (plus D/T) must
     // account for the formula's H count. The reference tolerates the
@@ -1156,6 +1142,48 @@ fn fold_isotopic_h(
     Ok(())
 }
 
+/// The internal-salt repair: with no charge layers in the identifier
+/// and the neutral assignment infeasible, try the charge pair — +1 on
+/// a candidate cation (the over-bonded heteroatom first: the onium
+/// series), −1 on a candidate anion (the under-valent heteroatom) —
+/// committing the first pair whose charged assignment proves
+/// valence-feasible. At net charge zero the charge positions do not
+/// reach the identifier; feasibility is the only contract.
+fn zwitterion_pair(bonds: &[(usize, usize)], atoms: &[AtomState]) -> Option<Vec<AtomState>> {
+    let cation_priority = |element: &str| match element {
+        "N" | "P" => 0,
+        "O" | "S" | "Se" | "Te" => 1,
+        "F" | "Cl" | "Br" | "I" => 2,
+        _ => 3,
+    };
+    let mut cations: Vec<usize> = (0..atoms.len())
+        .filter(|&index| {
+            atoms[index].charge == 0 && charged_valences(&atoms[index].element, 1).is_some()
+        })
+        .collect();
+    cations.sort_by_key(|&index| (cation_priority(&atoms[index].element), index));
+    let mut anions: Vec<usize> = (0..atoms.len())
+        .filter(|&index| {
+            atoms[index].charge == 0 && charged_valences(&atoms[index].element, -1).is_some()
+        })
+        .collect();
+    anions.sort_by_key(|&index| (cation_priority(&atoms[index].element), index));
+    for &plus in &cations {
+        for &minus in &anions {
+            if plus == minus {
+                continue;
+            }
+            let mut trial = atoms.to_vec();
+            trial[plus].charge += 1;
+            trial[minus].charge -= 1;
+            if kekulize(bonds, &trial).is_ok() {
+                return Some(trial);
+            }
+        }
+    }
+    None
+}
+
 /// The Kekulé assignment: raise bond orders while any atom is under
 /// its charged valence floor, pairing deficient atoms over existing
 /// bonds. A maximum matching pass covers rings (benzene needs a
@@ -1175,9 +1203,7 @@ fn assign_orders(bonds: &[(usize, usize)], orders: &mut [u32], atoms: &[AtomStat
         let mut deficient: Vec<bool> = vec![false; atoms.len()];
         let mut any = false;
         for (index, atom) in atoms.iter().enumerate() {
-            let range = atom.allowed()?;
-            let floor = valence_floor(&range, atom.hydrogens);
-            if sums[index] + atom.hydrogens as f64 + 1e-9 < floor {
+            if is_short(atom, sums[index]) {
                 deficient[index] = true;
                 any = true;
             }
@@ -1243,10 +1269,8 @@ fn assign_orders(bonds: &[(usize, usize)], orders: &mut [u32], atoms: &[AtomStat
                 }) {
                     if orders[position] < 3 {
                         orders[position] += 1;
-                        let order = f64::from(orders[position]);
                         sums[*atom] += 1.0;
                         sums[*other] += 1.0;
-                        let _ = order;
                         raised = true;
                     }
                 }
@@ -1259,12 +1283,8 @@ fn assign_orders(bonds: &[(usize, usize)], orders: &mut [u32], atoms: &[AtomStat
             if orders[position] >= 3 {
                 continue;
             }
-            let range_from = atoms[from].allowed()?;
-            let range_to = atoms[to].allowed()?;
-            let floor_from = valence_floor(&range_from, atoms[from].hydrogens);
-            let floor_to = valence_floor(&range_to, atoms[to].hydrogens);
-            let short_from = sums[from] + atoms[from].hydrogens as f64 + 1e-9 < floor_from;
-            let short_to = sums[to] + atoms[to].hydrogens as f64 + 1e-9 < floor_to;
+            let short_from = is_short(&atoms[from], sums[from]);
+            let short_to = is_short(&atoms[to], sums[to]);
             if short_from && short_to {
                 orders[position] += 1;
                 sums[from] += 1.0;
@@ -1282,16 +1302,12 @@ fn assign_orders(bonds: &[(usize, usize)], orders: &mut [u32], atoms: &[AtomStat
                     continue;
                 }
                 let raise_helps = |short_side: usize, absorber: usize| -> bool {
-                    let Ok(range) = atoms[short_side].allowed() else {
-                        return false;
-                    };
-                    let floor = valence_floor(&range, atoms[short_side].hydrogens);
-                    let short =
-                        sums[short_side] + atoms[short_side].hydrogens as f64 + 1e-9 < floor;
-                    short
-                        && atoms[absorber].can_absorb(sums[absorber])
+                    is_short(&atoms[short_side], sums[short_side])
+                        && atoms[absorber].can_take_order(sums[absorber])
+                        // The raised side must land admitted (progress);
+                        // the absorber may pass through an intermediate
+                        // state (nitrate's N walks 3 → 4 → 5).
                         && valid_after(&atoms[short_side], sums[short_side] + 1.0)
-                        && valid_after(&atoms[absorber], sums[absorber] + 1.0)
                 };
                 if raise_helps(from, to) || raise_helps(to, from) {
                     orders[position] += 1;
@@ -1313,11 +1329,17 @@ fn assign_orders(bonds: &[(usize, usize)], orders: &mut [u32], atoms: &[AtomStat
 /// its charged valence range.
 fn valid_after(atom: &AtomState, used: f64) -> bool {
     match atom.allowed() {
+        Ok(range) => valence_admits(&range, used + atom.hydrogens as f64),
+        Err(_) => false,
+    }
+}
+
+/// Whether the atom sits under its charged valence (needs more order).
+fn is_short(atom: &AtomState, sum: f64) -> bool {
+    match atom.allowed() {
         Ok(range) => {
-            let total = used + atom.hydrogens as f64;
-            let floor = valence_floor(&range, atom.hydrogens);
-            let ceiling = *range.last().expect("non-empty");
-            total >= floor - 1e-9 && total <= ceiling + 1e-9
+            let used = sum + atom.hydrogens as f64;
+            !valence_admits(&range, used) && valence_needed(&range, used) > used + 1e-6
         }
         Err(_) => false,
     }
