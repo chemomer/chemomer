@@ -437,7 +437,7 @@ fn kept_ion_pair_charges(original: &Structure) -> Option<std::collections::HashM
 
 /// The `/rA` `/rB` `/rC` echo of the submitted structure, in the
 /// input's own atom order, explicit hydrogens included.
-fn reversibility_block(original: &Structure) -> String {
+pub(crate) fn reversibility_block(original: &Structure) -> String {
     let n = original.atoms.len();
     // The atom-block prefix letter records the counts-line chiral
     // flag (the reference's WriteOrigAtoms: `c` chiral, `n`

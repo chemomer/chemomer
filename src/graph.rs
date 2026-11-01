@@ -63,6 +63,101 @@ pub struct Structure {
     pub fold_source: Vec<usize>,
 }
 
+impl Structure {
+    /// The disconnected fragments as independent structures, in
+    /// first-appearance order. Each fragment's `fold_source` carries
+    /// the fragment-internal index -> WHOLE-structure index map, so a
+    /// fragment's aux numbering speaks the submitted numbering
+    /// directly. A single-component structure splits into one
+    /// fragment identical to itself.
+    pub fn split_components(&self) -> Vec<Structure> {
+        let n = self.atoms.len();
+        let mut component = vec![usize::MAX; n];
+        let mut count = 0;
+        for start in 0..n {
+            if component[start] != usize::MAX {
+                continue;
+            }
+            let mut queue = vec![start];
+            component[start] = count;
+            while let Some(atom) = queue.pop() {
+                for &(from, to, _) in &self.bonds {
+                    let other = if from == atom {
+                        Some(to)
+                    } else if to == atom {
+                        Some(from)
+                    } else {
+                        None
+                    };
+                    if let Some(other) = other {
+                        if component[other] == usize::MAX {
+                            component[other] = count;
+                            queue.push(other);
+                        }
+                    }
+                }
+            }
+            count += 1;
+        }
+        if count <= 1 && self.fold_source.is_empty() {
+            return vec![self.clone()];
+        }
+        let source = |index: usize| -> usize {
+            if self.fold_source.is_empty() {
+                index
+            } else {
+                self.fold_source[index]
+            }
+        };
+        let mut fragments = Vec::with_capacity(count);
+        for id in 0..count {
+            let members: Vec<usize> = (0..n).filter(|&a| component[a] == id).collect();
+            let remap: std::collections::HashMap<usize, usize> = members
+                .iter()
+                .enumerate()
+                .map(|(internal, &whole)| (whole, internal))
+                .collect();
+            let bond_order: Vec<usize> = self
+                .bonds
+                .iter()
+                .enumerate()
+                .filter(|(_, (from, to, _))| remap.contains_key(from) && remap.contains_key(to))
+                .map(|(new_index, _)| new_index)
+                .collect();
+            fragments.push(Structure {
+                atoms: members.iter().map(|&a| self.atoms[a].clone()).collect(),
+                bonds: bond_order
+                    .iter()
+                    .map(|&old| {
+                        let (from, to, kind) = self.bonds[old];
+                        (remap[&from], remap[&to], kind)
+                    })
+                    .collect(),
+                stereo_bonds: self
+                    .stereo_bonds
+                    .iter()
+                    .filter_map(|(old, &code)| {
+                        let position = bond_order.iter().position(|&b| b == *old)?;
+                        Some((position, code))
+                    })
+                    .collect(),
+                positions: members.iter().map(|&a| self.positions[a]).collect(),
+                isotopic_h: self
+                    .isotopic_h
+                    .iter()
+                    .filter(|(carrier, _)| remap.contains_key(carrier))
+                    .map(|(carrier, counts)| (remap[carrier], *counts))
+                    .collect(),
+                protons_hard_moved: self.protons_hard_moved,
+                ride_marks: Vec::new(),
+                chiral_flag: self.chiral_flag,
+                fold_source: members.iter().map(|&a| source(a)).collect(),
+            });
+        }
+        fragments
+    }
+}
+
 /// Allowed valences of the organic subset; the implicit hydrogen
 /// count is the smallest allowed valence that absorbs the bond-order
 /// sum, so hypervalent S/P chemistry (sulfate's S, phosphate's P)
@@ -269,6 +364,46 @@ impl Structure {
                 }
             })
             .collect()
+    }
+
+    /// The Hill formula: C first, H second, the remaining elements
+    /// alphabetically (the identifier's formula-layer convention).
+    pub fn hill_formula(&self) -> String {
+        let composition = self.composition();
+        let mut carbon = 0u32;
+        let mut hydrogen = 0u32;
+        let mut rest: Vec<(String, u32)> = Vec::new();
+        for (element, count) in composition {
+            match element.as_str() {
+                "C" => carbon = count,
+                "H" => hydrogen = count,
+                _ => rest.push((element, count)),
+            }
+        }
+        rest.sort();
+        let mut out = String::new();
+        {
+            let mut push = |element: &str, count: u32| {
+                if count == 0 {
+                    return;
+                }
+                out.push_str(element);
+                if count > 1 {
+                    out.push_str(&count.to_string());
+                }
+            };
+            push("C", carbon);
+            if carbon > 0 {
+                push("H", hydrogen);
+            }
+            for (element, count) in &rest {
+                push(element, *count);
+            }
+            if carbon == 0 {
+                push("H", hydrogen);
+            }
+        }
+        out
     }
 
     /// Element → count, with the hydrogens from [`Self::hydrogens`].
