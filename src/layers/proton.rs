@@ -69,6 +69,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            chiral_flag: false,
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -87,6 +88,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            chiral_flag: false,
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -112,6 +114,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            chiral_flag: false,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
     }
@@ -136,6 +139,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            chiral_flag: false,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
 
@@ -153,6 +157,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            chiral_flag: false,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
     }
@@ -174,6 +179,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            chiral_flag: false,
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -193,6 +199,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            chiral_flag: false,
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -218,6 +225,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            chiral_flag: false,
         };
         let hydrogens = s.hydrogens();
         assert_eq!(hydrogens[2], 0);

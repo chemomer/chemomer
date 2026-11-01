@@ -243,3 +243,63 @@ fn sluud_relabels_printed_unknown_stereo_without_keeping_it() {
         );
     }
 }
+
+const BUTANOL_CHIRAL1: &str = "\n  AsciiChem\n\n  5  4  0  0  1  0  0  0  0  0999 V2000\n   12.0000   17.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   72.0000   17.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n  132.0000   17.0000    0.0000 C   0  0  1  2  0  0  0  0  0  0  0  0  0\n  192.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n  192.0000   62.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0  0  0  0  0  0  0  0\n  3  2  1  1  0  0  0  0  0  0  0\n  3  4  1  0  0  0  0  0  0  0  0\n  3  5  1  0  0  0  0  0  0  0  0\nM  END\n";
+
+fn butanol_chiral0() -> String {
+    BUTANOL_CHIRAL1.replace("  5  4  0  0  1  0", "  5  4  0  0  0  0")
+}
+
+#[test]
+fn sucf_resolves_per_molfile_chiral_flag() {
+    // Oracle (-SUCF on the flag-set probe): ABSOLUTE — the stereo tail
+    // keeps /m and /s1 while the version turns non-standard.
+    let body = "C4H10O/c1-3-4(2)5/h4-5H,3H2,1-2H3";
+    assert_eq!(
+        identifier(BUTANOL_CHIRAL1, Options::default()),
+        format!("InChI=1S/{body}/t4-/m0/s1")
+    );
+    assert_eq!(
+        identifier(
+            BUTANOL_CHIRAL1,
+            Options::default().with_chiral_flag_stereo()
+        ),
+        format!("InChI=1/{body}/t4-/m0/s1")
+    );
+    // The flag outranks an earlier -SRel (the reference's SUCF branch
+    // clears the relative bit when the flag is set).
+    assert_eq!(
+        identifier(
+            BUTANOL_CHIRAL1,
+            Options::default()
+                .with_relative_stereo()
+                .with_chiral_flag_stereo()
+        ),
+        format!("InChI=1/{body}/t4-/m0/s1")
+    );
+    // Oracle (-SUCF on the flag-clear probe): RELATIVE — /s2 replaces
+    // the /m /s1 pair.
+    assert_eq!(
+        identifier(
+            &butanol_chiral0(),
+            Options::default().with_chiral_flag_stereo()
+        ),
+        format!("InChI=1/{body}/t4-/s2")
+    );
+}
+
+#[test]
+fn the_aux_letter_speaks_the_chiral_flag() {
+    // The /rA prefix letter records the counts-line flag: `c` chiral,
+    // `n` non-chiral — the oracle writes both (rA:5cCCCCO / rA:5nCCCCO).
+    let chiral = chemomer::Engine::from_molfile(BUTANOL_CHIRAL1)
+        .expect("parses")
+        .aux_string()
+        .expect("aux");
+    assert!(chiral.contains("/rA:5cCCCCO"), "{chiral}");
+    let plain = chemomer::Engine::from_molfile(&butanol_chiral0())
+        .expect("parses")
+        .aux_string()
+        .expect("aux");
+    assert!(plain.contains("/rA:5nCCCCO"), "{plain}");
+}
