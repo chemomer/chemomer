@@ -41,16 +41,21 @@ impl Engine {
     pub fn with_options(input: &str, options: Options) -> Result<Self> {
         let original = molfile::parse(input)?;
         let mut structure = original.clone();
+        // The H-count codes as read (the reader maps MDL code n to
+        // n-1 hydrogen): DoNotAddH subtracts them again after the
+        // fold so only DRAWN hydrogens survive.
+        let h_codes: Vec<u32> = structure.atoms.iter().map(|atom| atom.h_count).collect();
         standardization::normalize_internal_salts(&mut structure);
         structure.fold_explicit_hydrogens();
         if options.do_not_add_h {
             // DoNotAddH: only drawn hydrogens exist — every atom is
-            // pinned at its explicit count (drawn H folded above,
-            // H-count codes ignored exactly like the reference's
-            // calculate_valences gate), so the valence-gap inference
-            // never runs and the (DE)PROTONATION standardization reads
-            // the explicit-only state from here on.
-            for atom in &mut structure.atoms {
+            // pinned at its drawn count (the folded explicit H atoms
+            // minus the H-count codes, which the reference's
+            // calculate_valences gate also ignores), so the
+            // valence-gap inference never runs and the (DE)PROTONATION
+            // standardization reads the drawn-only state from here on.
+            for (atom, code) in structure.atoms.iter_mut().zip(&h_codes) {
+                atom.h_count = atom.h_count.saturating_sub(*code);
                 atom.h_pinned = true;
             }
         }
