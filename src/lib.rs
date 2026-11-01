@@ -30,12 +30,20 @@ pub mod graph;
 pub mod key;
 pub mod layers;
 mod molfile;
+pub mod rinchi;
 
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use graph::{AtomRecord, Structure};
+pub use rinchi::{parse_rxn, RinchiComponent, RinchiReaction};
 
 /// Parses the V2000 molfile subset into a [`Structure`].
 pub fn parse_molfile(input: &str) -> Result<Structure> {
     molfile::parse(input)
+}
+
+/// Parses an MDL V2000 RXNfile into a [`RinchiReaction`] — the
+/// reaction-identity layer's input edge.
+pub fn parse_rxnfile(input: &str) -> Result<RinchiReaction> {
+    rinchi::parse_rxn(input)
 }
