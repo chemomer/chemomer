@@ -750,3 +750,87 @@ fn the_fixedh_aux_equals_the_oracle_recording() {
          no recording {without_recording}"
     );
 }
+
+/// The reverse-reconstruction gate: for every recorded fixture, the
+/// oracle's InChI2Struct reconstruction — its SDfile, verbatim —
+/// parsed and re-forwarded by this engine must reproduce the oracle's
+/// re-forward InChI byte-for-byte, and this engine's own
+/// reconstruction of the source InChI must forward to the same
+/// identifier. The reference's mobile-H/charge restore is
+/// deliberately lossy (ichirvr1..7.c); the ground truth is the
+/// oracle's own recorded reconstruction, never a chemistry argument.
+/// Skipped entirely when the tranche file is absent (no triage
+/// interplay — the reverse slice records its own corpus).
+#[test]
+fn the_reverse_reconstruction_matches_the_oracle() {
+    let dir = suite_dir();
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/reverse-reconstruction.json"))
+    else {
+        println!("reverse gate: no reverse-reconstruction tranche recorded; skipped");
+        return;
+    };
+    let cases: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid reverse tranche");
+
+    /// Forwards a structure through the engine path and returns the
+    /// assembled identifier.
+    fn forward(structure: chemomer::Structure) -> Result<String, String> {
+        let molfile = chemomer::reverse::structure_to_molfile(&structure);
+        chemomer::Engine::from_molfile(&molfile)
+            .and_then(|engine| engine.inchi_string())
+            .map_err(|error| error.to_string())
+    }
+
+    let mut pass = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let inchi = case["inchi"].as_str().expect("inchi");
+        let sdf = case["sdf"].as_str().expect("sdf");
+        let recorded_forward = case["forward_inchi"].as_str().expect("forward_inchi");
+
+        // The oracle's own reconstruction re-forwards identically.
+        if let Err(line) = chemomer::Engine::from_molfile(sdf)
+            .and_then(|engine| engine.inchi_string())
+            .map_err(|error| error.to_string())
+            .and_then(|assembled| {
+                if assembled == recorded_forward {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "sdf forward {assembled:?} != oracle {recorded_forward:?}"
+                    ))
+                }
+            })
+        {
+            failures.push(format!("{id}: {line}"));
+            continue;
+        }
+
+        // Our reconstruction of the source InChI forwards to the same
+        // identifier — the reverse direction's contract.
+        match chemomer::structure_from_inchi(inchi) {
+            Err(error) => failures.push(format!("{id}: reverse error: {error}")),
+            Ok(structure) => match forward(structure) {
+                Err(line) => failures.push(format!("{id}: reverse forward error: {line}")),
+                Ok(assembled) => {
+                    if assembled != recorded_forward {
+                        failures.push(format!(
+                            "{id}: reverse forward {assembled:?} != oracle {recorded_forward:?}"
+                        ));
+                        continue;
+                    }
+                    pass += 1;
+                }
+            },
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} reverse-reconstruction mismatch(es):\n{}\n(pass: {pass}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!("reverse gate: pass {pass}, total {}", cases.len());
+}

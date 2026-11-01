@@ -204,6 +204,60 @@ pub fn cation_valence_gap(element: &str, bond_order_sum: f64) -> u32 {
     0
 }
 
+/// The charged-valence range: the reference's charged-valence rows
+/// (ichirvr1.c:118-469). Neutral atoms admit the whole span between
+/// their valence points — N reads [3, 5] (4 is the not-yet-
+/// standardized onium state the charge standardization walks to N⁺,
+/// 5 the nitro/nitrate N(V)), S reads [2, 6] with S-OH's 3 and 5 real
+/// (sulfate reads 5). A charged atom reads the reference's shifted
+/// primary valence alone — anions V−1, onium group-15/16/17 cations
+/// V+1, group-13/14 (and H) cations V−1: N⁺ is exactly 4, O⁻ exactly
+/// 1, C⁺ exactly 3 — a charged N(V) or S(VII) is no valence at all.
+pub fn charged_valences(element: &str, charge: i32) -> Option<Vec<f64>> {
+    let base: Vec<f64> = match element {
+        "H" => vec![1.0],
+        "B" => vec![3.0],
+        "C" => vec![4.0],
+        "N" => vec![3.0, 5.0],
+        "O" => vec![2.0],
+        "F" | "Cl" | "Br" | "I" => vec![1.0],
+        "Si" => vec![4.0],
+        "P" => vec![3.0, 5.0],
+        "S" | "Se" | "Te" => vec![2.0, 3.0, 4.0, 5.0, 6.0],
+        _ => return None,
+    };
+    if charge == 0 {
+        return Some(base);
+    }
+    let onium = matches!(
+        element,
+        "N" | "P" | "O" | "S" | "Se" | "Te" | "F" | "Cl" | "Br" | "I"
+    );
+    let delta = if charge < 0 || onium { charge } else { -charge };
+    let value = base[0] + delta as f64;
+    if value < 0.0 {
+        None
+    } else {
+        Some(vec![value])
+    }
+}
+
+/// Whether a bond-order sum plus hydrogens lands in the admitted
+/// span (the set's first..last interval).
+pub fn valence_admits(set: &[f64], used: f64) -> bool {
+    used >= set[0] - 1e-6 && used <= set[set.len() - 1] + 1e-6
+}
+
+/// The next admitted valence at or above `used` — the count an
+/// under-valent atom still needs (clamped to the span's top).
+pub fn valence_needed(set: &[f64], used: f64) -> f64 {
+    if used <= set[0] + 1e-6 {
+        set[0]
+    } else {
+        set[set.len() - 1].min(used).max(set[0])
+    }
+}
+
 pub fn bond_order(kind: u32) -> f64 {
     match kind {
         2 => 2.0,
@@ -344,9 +398,10 @@ impl Structure {
     /// Implicit/explicit hydrogen count per atom: MDL H-count codes
     /// win, otherwise the valence gap (the oracle does the same for
     /// code-0 atoms — a bare `O` line derives H2O). Charged atoms read
-    /// their charge-shifted table: anionic heteroatoms take zero
-    /// (standardization crosses the `/p` layer), cations read the
-    /// onium gap.
+    /// their charge-shifted table: anions take the next admitted
+    /// charged valence (a bond-less O⁻ reads hydroxide's one H, a
+    /// carboxylate's bonded O⁻ reads none; see
+    /// [`Self::charged_valences`]), cations read the onium gap.
     pub fn hydrogens(&self) -> Vec<u32> {
         let sums = self.bond_order_sums();
         self.atoms
@@ -355,8 +410,13 @@ impl Structure {
             .map(|(atom, sum)| {
                 if atom.h_count > 0 {
                     atom.h_count
-                } else if atom.h_pinned || atom.charge < 0 {
+                } else if atom.h_pinned {
                     0
+                } else if atom.charge < 0 {
+                    match charged_valences(&atom.element, atom.charge) {
+                        Some(set) => (valence_needed(&set, *sum) - sum).round().max(0.0) as u32,
+                        None => 0,
+                    }
                 } else if atom.charge > 0 {
                     cation_valence_gap(&atom.element, *sum)
                 } else {
