@@ -18,11 +18,9 @@ fn suite_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("../inchi-tests"))
 }
 
-#[test]
-fn the_identifier_equals_the_oracle_recording() {
-    let dir = suite_dir();
+/// Every identity fixture record, files in name order.
+fn load_cases(dir: &std::path::Path) -> Vec<serde_json::Value> {
     let fixtures = dir.join("corpus/fixtures");
-    let mut cases = Vec::new();
     let mut files: Vec<PathBuf> = fs::read_dir(&fixtures)
         .expect("corpus fixtures dir")
         .filter_map(|entry| {
@@ -37,16 +35,30 @@ fn the_identifier_equals_the_oracle_recording() {
         .collect();
     files.sort();
     assert!(!files.is_empty(), "no identity fixture files");
+    let mut cases = Vec::new();
     for file in files {
         let parsed: Vec<serde_json::Value> =
             serde_json::from_str(&fs::read_to_string(&file).expect("read fixtures"))
                 .expect("valid fixtures");
         cases.extend(parsed);
     }
-    let triage: serde_json::Value = match fs::read_to_string(dir.join("corpus/triage.json")) {
-        Ok(text) => serde_json::from_str(&text).expect("valid triage"),
+    cases
+}
+
+/// A dated ledger (triage.json, aux-triage.json); a missing file
+/// reads as an empty one.
+fn load_ledger(dir: &std::path::Path, name: &str) -> serde_json::Value {
+    match fs::read_to_string(dir.join("corpus").join(name)) {
+        Ok(text) => serde_json::from_str(&text).expect("valid ledger"),
         Err(_) => serde_json::Value::Null,
-    };
+    }
+}
+
+#[test]
+fn the_identifier_equals_the_oracle_recording() {
+    let dir = suite_dir();
+    let cases = load_cases(&dir);
+    let triage = load_ledger(&dir, "triage.json");
 
     let mut pass = 0;
     let mut skipped = 0;
@@ -144,37 +156,9 @@ fn the_identifier_equals_the_oracle_recording() {
 #[test]
 fn the_snon_output_equals_the_oracle_recording() {
     let dir = suite_dir();
-    let fixtures = dir.join("corpus/fixtures");
-    let mut cases = Vec::new();
-    let mut files: Vec<PathBuf> = fs::read_dir(&fixtures)
-        .expect("corpus fixtures dir")
-        .filter_map(|entry| {
-            let path = entry.expect("dir entry").path();
-            let name = path
-                .file_name()
-                .expect("name")
-                .to_string_lossy()
-                .to_string();
-            (name.starts_with("identity") && name.ends_with(".json")).then_some(path)
-        })
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no identity fixture files");
-    for file in files {
-        let parsed: Vec<serde_json::Value> =
-            serde_json::from_str(&fs::read_to_string(&file).expect("read fixtures"))
-                .expect("valid fixtures");
-        cases.extend(parsed);
-    }
-    let triage: serde_json::Value = match fs::read_to_string(dir.join("corpus/triage.json")) {
-        Ok(text) => serde_json::from_str(&text).expect("valid triage"),
-        Err(_) => serde_json::Value::Null,
-    };
-    let aux_triage: serde_json::Value = match fs::read_to_string(dir.join("corpus/aux-triage.json"))
-    {
-        Ok(text) => serde_json::from_str(&text).expect("valid aux triage"),
-        Err(_) => serde_json::Value::Null,
-    };
+    let cases = load_cases(&dir);
+    let triage = load_ledger(&dir, "triage.json");
+    let aux_triage = load_ledger(&dir, "aux-triage.json");
 
     let mut pass = 0;
     let mut skipped = 0;
@@ -254,42 +238,111 @@ fn the_snon_output_equals_the_oracle_recording() {
     );
 }
 
+/// The DoNotAddH gate: the corpus records every fixture's
+/// `-DoNotAddH` oracle run (`donotaddh.inchi` — only drawn hydrogens
+/// exist, H-count codes ignored, the valence-gap inference never
+/// runs; version stays `InChI=1S/`). Expected failures and the
+/// retirement check follow the SNon gate's union-of-ledgers pattern.
+/// The tranche recording lives in the inchi-tests PR branch — until
+/// it merges, fixtures without the field skip (the way the aux gate
+/// skips missing aux recordings).
+#[test]
+fn the_do_not_addh_output_equals_the_oracle_recording() {
+    let dir = suite_dir();
+    let cases = load_cases(&dir);
+    let triage = load_ledger(&dir, "triage.json");
+    let aux_triage = load_ledger(&dir, "aux-triage.json");
+    let dna_triage = load_ledger(&dir, "donotaddh-triage.json");
+
+    let mut pass = 0;
+    let mut skipped = 0;
+    let mut without_recording = 0;
+    let mut retired = 0;
+    let mut failures = Vec::new();
+    let mut retirements = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let Some(recorded) = case["donotaddh"]
+            .as_object()
+            .and_then(|s| s.get("inchi"))
+            .and_then(|v| v.as_str())
+        else {
+            without_recording += 1;
+            continue;
+        };
+        let identifier_debt = triage.get(id).map(|_| ()).is_some();
+        let aux_debt = aux_triage.get(id).map(|_| ()).is_some();
+        let dna_debt = dna_triage.get(id).map(|_| ()).is_some();
+        let expected_failure = identifier_debt || aux_debt || dna_debt;
+        let molfile = case["molfile"].as_str().expect("molfile");
+
+        let assembled = chemomer::Engine::with_options(
+            molfile,
+            chemomer::Options::default().with_do_not_add_h(),
+        )
+        .and_then(|engine| engine.inchi_string());
+        match assembled {
+            Ok(assembled) => {
+                if assembled == recorded {
+                    if identifier_debt {
+                        retired += 1;
+                        retirements.push(id.to_string());
+                    } else {
+                        pass += 1;
+                    }
+                } else if !expected_failure {
+                    failures.push(format!(
+                        "{id}: assembled {assembled:?} != oracle {recorded:?}"
+                    ));
+                } else {
+                    skipped += 1;
+                }
+            }
+            Err(error) => {
+                if error.message().contains("beyond the ±1 corpus gate") {
+                    continue;
+                }
+                if !expected_failure {
+                    failures.push(format!("{id}: {error}"));
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} DoNotAddH mismatch(es):\n{}\n(DoNotAddH pass: {pass}, expected-failure skips: {skipped}, \
+         no recording: {without_recording}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "DoNotAddH gate: pass {pass}, expected-failure skips {skipped}, no recording {without_recording}, \
+         retired {retired}"
+    );
+    assert!(
+        retirements.is_empty(),
+        "{} triaged fixture(s) now PASS the DoNotAddH gate — retire their triage entries:\n{}",
+        retirements.len(),
+        retirements.join("\n")
+    );
+}
+
 /// The AuxInfo gate: the engine's auxiliary line — canonical
 /// numbering, equivalence classes, charges, reversibility echo — must
 /// equal the oracle's recording byte-for-byte on the same corpus.
 #[test]
 fn the_aux_info_equals_the_oracle_recording() {
     let dir = suite_dir();
-    let fixtures = dir.join("corpus/fixtures");
-    let mut cases = Vec::new();
-    let mut files: Vec<PathBuf> = fs::read_dir(&fixtures)
-        .expect("corpus fixtures dir")
-        .filter_map(|entry| {
-            let path = entry.expect("dir entry").path();
-            let name = path
-                .file_name()
-                .expect("name")
-                .to_string_lossy()
-                .to_string();
-            (name.starts_with("identity") && name.ends_with(".json")).then_some(path)
-        })
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no identity fixture files");
-    for file in files {
-        let parsed: Vec<serde_json::Value> =
-            serde_json::from_str(&fs::read_to_string(&file).expect("read fixtures"))
-                .expect("valid fixtures");
-        cases.extend(parsed);
-    }
+    let cases = load_cases(&dir);
     // The aux debts live in their own dated ledger: an entry here
     // marks an EXPECTED aux failure only — the identifier gate's
     // triage.json must not learn about them, or their passing
     // identifiers read as retirements.
-    let triage: serde_json::Value = match fs::read_to_string(dir.join("corpus/aux-triage.json")) {
-        Ok(text) => serde_json::from_str(&text).expect("valid aux triage"),
-        Err(_) => serde_json::Value::Null,
-    };
+    let triage = load_ledger(&dir, "aux-triage.json");
 
     let mut pass = 0;
     let mut skipped = 0;
