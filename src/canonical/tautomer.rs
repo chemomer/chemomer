@@ -46,6 +46,57 @@ fn endpoint_valence(element: &str) -> Option<u32> {
     }
 }
 
+/// Endpoint valence per the reference's `get_endpoint_valence_KET`
+/// (util.c:1530): only C and O carry keto-enol endpoints.
+fn endpoint_valence_ket(element: &str) -> Option<u32> {
+    match element {
+        "C" => Some(4),
+        "O" => Some(2),
+        _ => None,
+    }
+}
+
+/// Which endpoint predicate a round consults — the reference's
+/// `nGetEndpointInfo` variant per experimental flag (ichitaut.c 359
+/// base, 452 PT_22_00, 524 PT_16_00, 600 PT_06_00, 677 PT_39_00,
+/// 756 PT_13_00, 832 PT_18_00, 916 KET).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Predicate {
+    /// The standard heteroatom predicate (O/S/Se/Te 2, N 3).
+    Base,
+    /// Keto-enol: C 4, O 2, with the connectivity bands.
+    Ket,
+    /// PT_22_00: C only.
+    Pt22,
+    /// PT_16_00: the KET table with the same bands.
+    Pt16,
+    /// PT_06_00: C 4 plus the base table.
+    Pt06,
+    /// PT_39_00: C 4, N 3.
+    Pt39,
+    /// PT_13_00: C 4, O/S/Se/Te 2 — the role reads the mobile units,
+    /// not the bond arithmetic.
+    Pt13,
+    /// PT_18_00: O 2, N 3 — no connectivity checks at all.
+    Pt18,
+}
+
+/// One predicate verdict's full numbers: the role plus the mobile
+/// units and the neutral-bonds valence the shift checks read (the
+/// reference's `eif.cMobile` / `eif.cNeutralBondsValence`).
+#[derive(Clone, Copy, Debug)]
+struct EndpointInfo {
+    role: Role,
+    /// The endpoint's mobile units (H plus an anionic charge).
+    mobile: i32,
+    /// `endpoint_valence - mobile`: a shift may land here when this
+    /// exceeds the heavy-atom valence (the acceptor-side test).
+    neutral_bonds_valence: i32,
+    /// The endpoint valence itself (the reference's return value);
+    /// the KET/PT gates count endpoints by it.
+    valence: i32,
+}
+
 /// How an endpoint's bond-order sum relates to its heavy-atom valence:
 /// all single bonds = [`Role::Donor`], one double-bond worth =
 /// [`Role::Acceptor`].
@@ -419,6 +470,184 @@ impl<'a> Context<'a> {
         }
     }
 
+    /// The reference's `nGetEndpointInfo` under a flag predicate: the
+    /// valence table, the connectivity bands, and the role arithmetic
+    /// each flag's function carries (ichitaut.c 452–1080). The base
+    /// predicate routes through [`Context::endpoint`] unchanged.
+    fn endpoint_by(&self, state: &Registration, atom: usize, pred: Predicate) -> Option<Role> {
+        match pred {
+            Predicate::Base => self.endpoint(state, atom),
+            _ => self
+                .endpoint_info_ext(state, atom, pred)
+                .map(|info| info.role),
+        }
+    }
+
+    /// [`Context::endpoint`] plus the shift-check numbers: the mobile
+    /// units and the neutral-bonds valence of the base predicate's
+    /// verdict.
+    fn endpoint_info(&self, state: &Registration, atom: usize) -> Option<EndpointInfo> {
+        let role = self.endpoint(state, atom)?;
+        let record = &self.structure.atoms[atom];
+        let valence = endpoint_valence(&record.element)? as i32;
+        let mobile = if record.charge > 0 {
+            self.hydrogens[atom] as i32
+        } else {
+            self.mobile(atom) as i32
+        };
+        Some(EndpointInfo {
+            role,
+            mobile,
+            neutral_bonds_valence: valence - mobile,
+            valence,
+        })
+    }
+
+    /// The flag predicates' full bodies (the reference's per-flag
+    /// `nGetEndpointInfo_*` functions, ichitaut.c 452–1080).
+    fn endpoint_info_ext(
+        &self,
+        state: &Registration,
+        atom: usize,
+        pred: Predicate,
+    ) -> Option<EndpointInfo> {
+        let record = &self.structure.atoms[atom];
+        let element = record.element.as_str();
+        let valence = match pred {
+            Predicate::Ket | Predicate::Pt16 => endpoint_valence_ket(element),
+            Predicate::Pt22 => (element == "C").then_some(4),
+            Predicate::Pt06 => match element {
+                "C" => Some(4),
+                _ => endpoint_valence(element),
+            },
+            Predicate::Pt39 => match element {
+                "C" => Some(4),
+                "N" => Some(3),
+                _ => None,
+            },
+            Predicate::Pt13 => match element {
+                "C" => Some(4),
+                "O" | "S" | "Se" | "Te" => Some(2),
+                _ => None,
+            },
+            Predicate::Pt18 => match element {
+                "O" => Some(2),
+                "N" => Some(3),
+                _ => None,
+            },
+            Predicate::Base => endpoint_valence(element),
+        }? as i32;
+        let heavy = self.neighbors[atom].len() as i32;
+        // PT_18_00 carries NO connectivity checks at all — any O/N
+        // with charge 0/-1 qualifies (ichitaut.c 832–905).
+        if pred == Predicate::Pt18 {
+            let raw = self.hydrogens[atom] as i32;
+            let role = if raw > 0 { Role::Donor } else { Role::Acceptor };
+            return Some(EndpointInfo {
+                role,
+                mobile: raw,
+                neutral_bonds_valence: valence - raw,
+                valence,
+            });
+        }
+        // The connectivity bands: below the endpoint valence, and the
+        // KET/PT_16_00 extra bands on the C/O valences (the "exclude"
+        // checks, ichitaut.c 941–951).
+        if valence <= heavy {
+            return None;
+        }
+        if matches!(pred, Predicate::Ket | Predicate::Pt16) {
+            if valence == 4 && heavy < 2 {
+                return None;
+            }
+            if valence == 2 && heavy > 1 {
+                return None;
+            }
+        }
+        if record.charge > 0 {
+            // The charge-point branch: same c-point arithmetic as the
+            // base predicate.
+            if state.c_point_of[atom].is_some() {
+                if let Some((_, subtype)) = charge_type(self, state, atom) {
+                    let raw = self.hydrogens[atom] as i32;
+                    if subtype & 4 != 0 {
+                        return Some(EndpointInfo {
+                            role: Role::Acceptor,
+                            mobile: raw,
+                            neutral_bonds_valence: valence - raw,
+                            valence,
+                        });
+                    }
+                    if subtype & 8 != 0 {
+                        return Some(EndpointInfo {
+                            role: Role::Donor,
+                            mobile: raw,
+                            neutral_bonds_valence: valence - raw,
+                            valence,
+                        });
+                    }
+                }
+            }
+            return None;
+        }
+        let mobile = self.mobile(atom) as i32;
+        if 2 * mobile + self.bond_sum2[atom] != 2 * valence {
+            return None;
+        }
+        let role = match pred {
+            // PT_13_00 reads the mobile units for the role, not the
+            // bond arithmetic (ichitaut.c 815–823).
+            Predicate::Pt13 => {
+                if mobile > 0 {
+                    Role::Donor
+                } else {
+                    Role::Acceptor
+                }
+            }
+            _ => match self.bond_sum2[atom] - 2 * heavy {
+                0 => Role::Donor,
+                2 => Role::Acceptor,
+                _ => return None,
+            },
+        };
+        Some(EndpointInfo {
+            role,
+            mobile,
+            neutral_bonds_valence: valence - mobile,
+            valence,
+        })
+    }
+
+    /// The BNS build's donor wiring (the reference's AddTGroups2BnStruct,
+    /// ichi_bns.c 9296–9327): the endpoint info for a registered atom
+    /// comes from the FIRST predicate in the flag chain that
+    /// classifies it — the base one, then the enabled flags in the
+    /// C's order (22, 16, 06, 39, 13, 18, KET). With every flag off
+    /// this is the base verdict alone.
+    fn bns_role(&self, state: &Registration, atom: usize) -> Option<Role> {
+        let flags = self.structure.taut_ext;
+        let classify = |pred| self.endpoint_by(state, atom, pred);
+        if let Some(role) = classify(Predicate::Base) {
+            return Some(role);
+        }
+        for (enabled, pred) in [
+            (flags.pt_22_00, Predicate::Pt22),
+            (flags.pt_16_00, Predicate::Pt16),
+            (flags.pt_06_00, Predicate::Pt06),
+            (flags.pt_39_00, Predicate::Pt39),
+            (flags.pt_13_00, Predicate::Pt13),
+            (flags.pt_18_00, Predicate::Pt18),
+            (flags.keto_enol, Predicate::Ket),
+        ] {
+            if enabled {
+                if let Some(role) = classify(pred) {
+                    return Some(role);
+                }
+            }
+        }
+        None
+    }
+
     /// Mobile units the reference's `nMobile = num_H + (charge == -1)`.
     /// Raw structures read the legacy riding-hydrogen model (the
     /// stored count already carries the anion's proton); a fully
@@ -538,7 +767,7 @@ impl<'a> Context<'a> {
             .collect();
         let max_flow: Vec<i32> = (0..n).map(|atom| self.max_flow(atom)).collect();
         let donor: Vec<bool> = (0..n)
-            .map(|atom| self.endpoint(state, atom) == Some(Role::Donor))
+            .map(|atom| self.bns_role(state, atom) == Some(Role::Donor))
             .collect();
         let net = super::bns::Network::build(&super::bns::Build {
             bond_adjacency: &bond_adjacency,
@@ -640,7 +869,7 @@ impl<'a> Context<'a> {
             .collect();
         let max_flow: Vec<i32> = (0..n).map(|atom| self.max_flow(atom)).collect();
         let donor: Vec<bool> = (0..n)
-            .map(|atom| self.endpoint(state, atom) == Some(Role::Donor))
+            .map(|atom| self.bns_role(state, atom) == Some(Role::Donor))
             .collect();
         super::bns::Network::build(&super::bns::Build {
             bond_adjacency: &bond_adjacency,
@@ -655,16 +884,31 @@ impl<'a> Context<'a> {
 
     /// bExistsAnyAltPath over a fresh network for the current
     /// registration state: every template pairing is confirmed by the
-    /// cap-aware balanced search before it registers.
-    fn alt_path_exists(&self, state: &Registration, first: usize, second: usize) -> bool {
-        let result = self.alt_path_exists_traced(state, first, second);
+    /// cap-aware balanced search before it registers. `pred` is the
+    /// confirming round's mode (the reference's ALT_PATH_MODE_*): the
+    /// ungrouped terminals' donor/acceptor precheck consults that
+    /// round's predicate (ichi_bns.c 8403–8533).
+    fn alt_path_exists(
+        &self,
+        state: &Registration,
+        first: usize,
+        second: usize,
+        pred: Predicate,
+    ) -> bool {
+        let result = self.alt_path_exists_traced(state, first, second, pred);
         if std::env::var_os("INCHI_TRACE_BNS").is_some() {
             eprintln!("BNS {first}-{second} -> {result}");
         }
         result
     }
 
-    fn alt_path_exists_traced(&self, state: &Registration, first: usize, second: usize) -> bool {
+    fn alt_path_exists_traced(
+        &self,
+        state: &Registration,
+        first: usize,
+        second: usize,
+        pred: Predicate,
+    ) -> bool {
         let n = self.structure.atoms.len();
         let bond_adjacency: Vec<Vec<(usize, i32, bool)>> = (0..n)
             .map(|atom| {
@@ -702,7 +946,7 @@ impl<'a> Context<'a> {
             .collect();
         let max_flow: Vec<i32> = (0..n).map(|atom| self.max_flow(atom)).collect();
         let donor: Vec<bool> = (0..n)
-            .map(|atom| self.endpoint(state, atom) == Some(Role::Donor))
+            .map(|atom| self.bns_role(state, atom) == Some(Role::Donor))
             .collect();
         let net = super::bns::Network::build(&super::bns::Build {
             bond_adjacency: &bond_adjacency,
@@ -716,12 +960,14 @@ impl<'a> Context<'a> {
         let roles = super::bns::Roles {
             donor_ok: (0..n)
                 .map(|atom| {
-                    state.registered(atom) || self.endpoint(state, atom) == Some(Role::Donor)
+                    state.registered(atom)
+                        || self.endpoint_by(state, atom, pred) == Some(Role::Donor)
                 })
                 .collect(),
             acceptor_ok: (0..n)
                 .map(|atom| {
-                    state.registered(atom) || self.endpoint(state, atom) == Some(Role::Acceptor)
+                    state.registered(atom)
+                        || self.endpoint_by(state, atom, pred) == Some(Role::Acceptor)
                 })
                 .collect(),
         };
@@ -892,7 +1138,15 @@ fn build_links(context: &Context) -> Vec<BTreeSet<usize>> {
     let mut alternated = alternation_round(context, &mut state);
     for pass in 0..8 {
         let mut changed = registration_round(context, &mut state);
-        let (r, mut w, mut c, mut s0, mut s1, mut a) = (changed, false, false, false, false, false);
+        let (r, mut f, mut w, mut c, mut s0, mut s1, mut a) =
+            (changed, false, false, false, false, false, false);
+        // The flag passes sit between the base anchors and the walks
+        // (the C's block order in MarkTautomerGroups); the walks stay
+        // behind the whole call's no-change gate (`!tot_changes`).
+        if !changed {
+            changed = flag_round(context, &mut state);
+            f = changed;
+        }
         if !changed {
             changed = walk_round(context, &mut state);
             w = changed;
@@ -916,7 +1170,7 @@ fn build_links(context: &Context) -> Vec<BTreeSet<usize>> {
         if std::env::var_os("INCHI_TRACE_BNS").is_some() {
             let groups: Vec<usize> = state.group_of.iter().flatten().copied().collect();
             eprintln!(
-                "FIXPOINT pass={pass} reg={r} walk={w} charge={c} salt0={s0} salt2={s1} merge=false alt={a} groups={} marks={} altered={}",
+                "FIXPOINT pass={pass} reg={r} flags={f} walk={w} charge={c} salt0={s0} salt2={s1} merge=false alt={a} groups={} marks={} altered={}",
                 groups.len(),
                 state.marks.len(),
                 state.altered.len()
@@ -1180,7 +1434,7 @@ fn alternation_round(context: &Context, state: &mut Registration) -> bool {
         .collect();
     let max_flow: Vec<i32> = (0..n).map(|atom| context.max_flow(atom)).collect();
     let donor: Vec<bool> = (0..n)
-        .map(|atom| context.endpoint(state, atom) == Some(Role::Donor))
+        .map(|atom| context.bns_role(state, atom) == Some(Role::Donor))
         .collect();
     let net = super::bns::Network::build(&super::bns::Build {
         bond_adjacency: &bond_adjacency,
@@ -1428,7 +1682,7 @@ fn salt_round(context: &Context, state: &mut Registration) -> bool {
                 {
                     continue;
                 }
-                if context.alt_path_exists(state, acceptor, donor) {
+                if context.alt_path_exists(state, acceptor, donor, Predicate::Base) {
                     changed |= state.register(&[donor, acceptor]);
                     break;
                 }
@@ -1730,56 +1984,513 @@ fn registration_round(context: &Context, state: &mut Registration) -> bool {
             if ends.len() <= 1 || possible_mobile == 0 || donors == 0 || acceptors == 0 {
                 continue;
             }
-            let partitioned = find_accessible_end_points(context, state, &ends);
-            if partitioned.ends.is_empty() {
-                continue;
-            }
-            // RegisterEndPoints' gate over the surviving endpoints:
-            // register when the class list introduces a new endpoint
-            // or bridges two groups.
-            let mut sentinel = usize::MAX;
-            let mut diff: i32 = -1;
-            for &atom in &partitioned.ends {
-                let group = state.group_of[atom].unwrap_or(0);
-                if sentinel != group {
-                    diff += 1;
-                    sentinel = group;
+            let partitioned = find_accessible_end_points(context, state, &ends, Predicate::Base);
+            changed |= register_partition(context, state, centerpoint, &partitioned);
+        }
+    }
+    changed
+}
+
+/// RegisterEndPoints + SetTautomericBonds over the FindAccessibleEndPoints
+/// survivors: register when the class list introduces a new endpoint
+/// or bridges two groups, then mark the surviving centerpoint bonds
+/// tautomeric. Shared by the base anchor scan and the flag passes.
+fn register_partition(
+    context: &Context,
+    state: &mut Registration,
+    centerpoint: usize,
+    partitioned: &Partitioned,
+) -> bool {
+    let mut changed = false;
+    if partitioned.ends.is_empty() {
+        return changed;
+    }
+    // RegisterEndPoints' gate over the surviving endpoints:
+    // register when the class list introduces a new endpoint
+    // or bridges two groups.
+    let mut sentinel = usize::MAX;
+    let mut diff: i32 = -1;
+    for &atom in &partitioned.ends {
+        let group = state.group_of[atom].unwrap_or(0);
+        if sentinel != group {
+            diff += 1;
+            sentinel = group;
+        }
+    }
+    if sentinel == 0 || diff > 0 {
+        // Merge each equivalence class into one group,
+        // absorbing every current member of the class's old
+        // groups (the renumbering merge).
+        let mut classes: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (position, &atom) in partitioned.ends.iter().enumerate() {
+            let equ = partitioned.equ[position];
+            let entry = classes.iter_mut().find(|(label, _)| *label == equ);
+            let entry = match entry {
+                Some(entry) => entry,
+                None => {
+                    classes.push((equ, Vec::new()));
+                    classes.last_mut().unwrap()
                 }
-            }
-            if sentinel == 0 || diff > 0 {
-                // Merge each equivalence class into one group,
-                // absorbing every current member of the class's old
-                // groups (the renumbering merge).
-                let mut classes: Vec<(usize, Vec<usize>)> = Vec::new();
-                for (position, &atom) in partitioned.ends.iter().enumerate() {
-                    let equ = partitioned.equ[position];
-                    let entry = classes.iter_mut().find(|(label, _)| *label == equ);
-                    let entry = match entry {
-                        Some(entry) => entry,
-                        None => {
-                            classes.push((equ, Vec::new()));
-                            classes.last_mut().unwrap()
-                        }
-                    };
-                    entry.1.push(atom);
-                    if let Some(group) = state.group_of[atom] {
-                        for (other, membership) in state.group_of.iter().enumerate() {
-                            if membership == &Some(group) && !entry.1.contains(&other) {
-                                entry.1.push(other);
-                            }
-                        }
+            };
+            entry.1.push(atom);
+            if let Some(group) = state.group_of[atom] {
+                for (other, membership) in state.group_of.iter().enumerate() {
+                    if membership == &Some(group) && !entry.1.contains(&other) {
+                        entry.1.push(other);
                     }
                 }
-                for (_, members) in &classes {
-                    changed |= state.register(members);
-                }
-            }
-            // SetTautomericBonds on the surviving centerpoint bonds.
-            for &atom in &partitioned.ends {
-                let bond = context.bond_index[&(centerpoint.min(atom), centerpoint.max(atom))];
-                changed |= state.marks.insert(bond);
             }
         }
+        for (_, members) in &classes {
+            changed |= state.register(members);
+        }
+    }
+    // SetTautomericBonds on the surviving centerpoint bonds.
+    for &atom in &partitioned.ends {
+        let bond = context.bond_index[&(centerpoint.min(atom), centerpoint.max(atom))];
+        changed |= state.marks.insert(bond);
+    }
+    changed
+}
+
+/// The endpoint-scan role arithmetic of one flag family — the C's
+/// donor/acceptor counting after each candidate endpoint passes its
+/// predicate (ichitaut.c 4640–4660 PT_22_00 and friends, 5308–5331
+/// PT_13_00, 5487–5508 PT_18_00, 5688–5706 KET).
+#[derive(Clone, Copy)]
+enum ScanStyle {
+    /// The base arithmetic: a real single bond with mobile units (or
+    /// registration) donates, a real double bond accepts; on
+    /// alternating/tautomeric bonds a registered atom plays either
+    /// role and an unregistered one reads the predicate verdict.
+    /// `seed_verdict_alt` is the KET quirk: its alt-class arithmetic
+    /// reads the SEED's verdict (`eif1`), not the current endpoint's
+    /// (`eif2`) — the reference's variable split, ichitaut.c 5667
+    /// vs 5693–5705.
+    Standard { seed_verdict_alt: bool },
+    /// The PT_13_00/PT_18_00 arithmetic: a real bond's role follows
+    /// the mobile units alone (donor when any, acceptor when none);
+    /// on alt-class bonds the predicate verdict decides, with
+    /// `alt_acceptor_by_neutral` picking PT_13_00's neutral-bonds
+    /// test over PT_18_00's plain acceptor check.
+    Mobile { alt_acceptor_by_neutral: bool },
+}
+
+/// The tail gate's counters: every field `None`/false when the flag
+/// block counts nothing (PT_22_00/16/06), otherwise the exact
+/// populations the C demands (`num_O == 1` everywhere plus the
+/// per-flag extras, ichitaut.c 4693, 4861, 5025, 5194, 5362, 5541,
+/// 5736).
+#[derive(Clone, Copy, Default)]
+struct Gate {
+    /// Admitted endpoints of valence 2 == 1 (KET/PT_13_00/PT_18_00).
+    valence2_equals: Option<u32>,
+    /// Admitted endpoints of valence 4: KET demands at least one,
+    /// PT_13_00 exactly one.
+    valence4: Option<Valence4Gate>,
+    /// Admitted endpoints of valence 3 == 1 (PT_18_00).
+    valence3_equals: Option<u32>,
+    /// PT_39_00's element counts over EVERY centerpoint neighbor at
+    /// scan entry: exactly one O and fewer than two N.
+    pt39_element_gate: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Valence4Gate {
+    AtLeastOne,
+    ExactlyOne,
+}
+
+impl Gate {
+    fn allows(&self, admitted: &Counts, all_neighbors: &Counts) -> bool {
+        if let Some(want) = self.valence2_equals {
+            if admitted.valence2 != want {
+                return false;
+            }
+        }
+        match self.valence4 {
+            Some(Valence4Gate::AtLeastOne) if admitted.valence4 == 0 => return false,
+            Some(Valence4Gate::ExactlyOne) if admitted.valence4 != 1 => return false,
+            _ => {}
+        }
+        if let Some(want) = self.valence3_equals {
+            if admitted.valence3 != want {
+                return false;
+            }
+        }
+        if self.pt39_element_gate && (all_neighbors.oxygen != 1 || all_neighbors.nitrogen >= 2) {
+            return false;
+        }
+        true
+    }
+}
+
+/// The scan's running populations.
+#[derive(Clone, Copy, Default)]
+struct Counts {
+    oxygen: u32,
+    nitrogen: u32,
+    valence2: u32,
+    valence3: u32,
+    valence4: u32,
+}
+
+/// One flag pass's anchor-scan configuration — the per-flag block
+/// parameters of MarkTautomerGroups (ichitaut.c 4569–5790).
+struct AnchorSpec {
+    predicate: Predicate,
+    /// The seed→centerpoint bond classes (the C's first bond-type
+    /// test). The PT_13_00/PT_18_00 blocks also admit real singles;
+    /// the BOND_ALT_13 class (single/triple) never occurs in our
+    /// structures — no ride mark produces it.
+    seed_bonds: &'static [BondType],
+    centerpoint_elements: &'static [&'static str],
+    /// The centerpoint's heavy-atom valence when the flag pins it
+    /// (PT_16_00: 2, PT_39_00: 3, PT_13_00/PT_18_00: 2).
+    centerpoint_valence: Option<usize>,
+    /// PT_16_00 demands a neutral centerpoint.
+    centerpoint_neutral: bool,
+    /// KET's centerpoint: a normal tetravalent carbon — no charge,
+    /// chem_bonds_valence + num_H == 4 (ichitaut.c 5615–5619).
+    ket_normal_carbon: bool,
+    /// PT_16_00's filter: another scan endpoint sharing the seed's
+    /// element is skipped (ichitaut.c 4805–4806).
+    exclude_seed_element: bool,
+    /// PT_18_00's skip: a real double bond onto a valence-3 endpoint
+    /// with no mobile units never counts (ichitaut.c 5493–5494).
+    pt18_double_skip: bool,
+    scan: ScanStyle,
+    gate: Gate,
+}
+
+/// One flag pass: the reference's per-flag anchor blocks. Seeds off
+/// the pass's predicate, walks to centerpoints through the pass's
+/// bond classes, rescans the centerpoint's neighbors under the pass's
+/// arithmetic, and registers through the shared FindAccessibleEndPoints
+/// tail with the pass's BNS mode.
+fn anchor_round(context: &Context, state: &mut Registration, spec: &AnchorSpec) -> bool {
+    let n = context.structure.atoms.len();
+    let mut changed = false;
+    // The PT_13_00/PT_18_00 blocks file real triples under the
+    // non-taut bonds (where they contribute neither role).
+    let wide_bonds = matches!(spec.scan, ScanStyle::Mobile { .. });
+    for seed in 0..n {
+        let Some(seed_info) = (match spec.predicate {
+            Predicate::Base => context.endpoint_info(state, seed),
+            _ => context.endpoint_info_ext(state, seed, spec.predicate),
+        }) else {
+            continue;
+        };
+        for &(centerpoint, _) in &context.neighbors[seed] {
+            if !context.allowed_edge(seed, centerpoint) {
+                continue;
+            }
+            let seed_bond = context.bond_type(state, seed, centerpoint);
+            if !spec.seed_bonds.contains(&seed_bond) {
+                continue;
+            }
+            let cp_record = &context.structure.atoms[centerpoint];
+            if !spec
+                .centerpoint_elements
+                .contains(&cp_record.element.as_str())
+            {
+                continue;
+            }
+            if let Some(want) = spec.centerpoint_valence {
+                if context.neighbors[centerpoint].len() != want {
+                    continue;
+                }
+            }
+            if spec.centerpoint_neutral && cp_record.charge != 0 {
+                continue;
+            }
+            if spec.ket_normal_carbon
+                && (cp_record.charge != 0
+                    || context.bond_sum2[centerpoint] / 2 + context.hydrogens[centerpoint] as i32
+                        != 4)
+            {
+                continue;
+            }
+            let mut ends: Vec<usize> = Vec::new();
+            let mut donors = 0u32;
+            let mut acceptors = 0u32;
+            let mut possible_mobile = 0u32;
+            let mut admitted = Counts::default();
+            let mut all_neighbors = Counts::default();
+            if spec.gate.pt39_element_gate {
+                // PT_39_00 counts its O/N population over every
+                // neighbor at scan entry, admitted or not
+                // (ichitaut.c 5107–5108).
+                for &(neighbor, _) in &context.neighbors[centerpoint] {
+                    match context.structure.atoms[neighbor].element.as_str() {
+                        "O" => all_neighbors.oxygen += 1,
+                        "N" => all_neighbors.nitrogen += 1,
+                        _ => {}
+                    }
+                }
+            }
+            for &(endpoint, _) in &context.neighbors[centerpoint] {
+                if !context.allowed_edge(centerpoint, endpoint) {
+                    continue;
+                }
+                let bond = context.bond_type(state, centerpoint, endpoint);
+                let non_taut = match bond {
+                    BondType::Single | BondType::Double => true,
+                    BondType::Triple if wide_bonds => true,
+                    BondType::Triple | BondType::Alt23 => continue,
+                    _ => false,
+                };
+                let Some(info) = (match spec.predicate {
+                    Predicate::Base => context.endpoint_info(state, endpoint),
+                    _ => context.endpoint_info_ext(state, endpoint, spec.predicate),
+                }) else {
+                    continue;
+                };
+                if spec.exclude_seed_element
+                    && endpoint != seed
+                    && context.structure.atoms[endpoint].element
+                        == context.structure.atoms[seed].element
+                {
+                    continue;
+                }
+                if spec.pt18_double_skip
+                    && bond == BondType::Double
+                    && info.valence == 3
+                    && info.mobile == 0
+                {
+                    continue;
+                }
+                let registered = state.registered(endpoint);
+                let (donor_side, acceptor_side) = match spec.scan {
+                    ScanStyle::Standard { seed_verdict_alt } => {
+                        if non_taut {
+                            (
+                                bond == BondType::Single && (info.mobile > 0 || registered),
+                                bond == BondType::Double,
+                            )
+                        } else {
+                            let verdict = if seed_verdict_alt { seed_info } else { info };
+                            (
+                                registered || verdict.role == Role::Donor,
+                                registered
+                                    || verdict.neutral_bonds_valence
+                                        > context.neighbors[endpoint].len() as i32,
+                            )
+                        }
+                    }
+                    ScanStyle::Mobile {
+                        alt_acceptor_by_neutral,
+                    } => {
+                        if non_taut {
+                            (info.mobile > 0 || registered, info.mobile == 0)
+                        } else {
+                            (
+                                info.role == Role::Donor,
+                                alt_acceptor_by_neutral
+                                    && info.neutral_bonds_valence
+                                        > context.neighbors[endpoint].len() as i32,
+                            )
+                        }
+                    }
+                };
+                if !donor_side && !acceptor_side {
+                    continue;
+                }
+                donors += donor_side as u32;
+                acceptors += acceptor_side as u32;
+                possible_mobile += (info.mobile > 0 || registered) as u32;
+                admitted.valence2 += (info.valence == 2) as u32;
+                admitted.valence3 += (info.valence == 3) as u32;
+                admitted.valence4 += (info.valence == 4) as u32;
+                ends.push(endpoint);
+            }
+            if ends.len() <= 1 || possible_mobile == 0 || donors == 0 || acceptors == 0 {
+                continue;
+            }
+            if !spec.gate.allows(&admitted, &all_neighbors) {
+                continue;
+            }
+            let partitioned = find_accessible_end_points(context, state, &ends, spec.predicate);
+            changed |= register_partition(context, state, centerpoint, &partitioned);
+        }
+    }
+    changed
+}
+
+/// The flag passes in the reference's MarkTautomerGroups order:
+/// PT_22_00, PT_16_00, PT_06_00, PT_39_00, PT_13_00, PT_18_00, KET.
+/// Every enabled flag's block runs (the C does not short-circuit);
+/// the fixpoint loop re-runs the group until nothing changes.
+fn flag_round(context: &Context, state: &mut Registration) -> bool {
+    let flags = context.structure.taut_ext;
+    static DOUBLE_LIKE: [BondType; 4] = [
+        BondType::Double,
+        BondType::Altern,
+        BondType::Alt12ns,
+        BondType::Tautom,
+    ];
+    static WIDE: [BondType; 5] = [
+        BondType::Double,
+        BondType::Single,
+        BondType::Altern,
+        BondType::Alt12ns,
+        BondType::Tautom,
+    ];
+    let mut changed = false;
+    if flags.pt_22_00 {
+        changed |= anchor_round(
+            context,
+            state,
+            &AnchorSpec {
+                predicate: Predicate::Pt22,
+                seed_bonds: &DOUBLE_LIKE,
+                centerpoint_elements: &["N"],
+                centerpoint_valence: None,
+                centerpoint_neutral: false,
+                ket_normal_carbon: false,
+                exclude_seed_element: false,
+                pt18_double_skip: false,
+                scan: ScanStyle::Standard {
+                    seed_verdict_alt: false,
+                },
+                gate: Gate::default(),
+            },
+        );
+    }
+    if flags.pt_16_00 {
+        changed |= anchor_round(
+            context,
+            state,
+            &AnchorSpec {
+                predicate: Predicate::Pt16,
+                seed_bonds: &DOUBLE_LIKE,
+                centerpoint_elements: &["N"],
+                centerpoint_valence: Some(2),
+                centerpoint_neutral: true,
+                ket_normal_carbon: false,
+                exclude_seed_element: true,
+                pt18_double_skip: false,
+                scan: ScanStyle::Standard {
+                    seed_verdict_alt: false,
+                },
+                gate: Gate::default(),
+            },
+        );
+    }
+    if flags.pt_06_00 {
+        changed |= anchor_round(
+            context,
+            state,
+            &AnchorSpec {
+                predicate: Predicate::Pt06,
+                seed_bonds: &DOUBLE_LIKE,
+                centerpoint_elements: &["N", "C", "P"],
+                centerpoint_valence: None,
+                centerpoint_neutral: false,
+                ket_normal_carbon: false,
+                exclude_seed_element: false,
+                pt18_double_skip: false,
+                scan: ScanStyle::Standard {
+                    seed_verdict_alt: false,
+                },
+                gate: Gate::default(),
+            },
+        );
+    }
+    if flags.pt_39_00 {
+        changed |= anchor_round(
+            context,
+            state,
+            &AnchorSpec {
+                predicate: Predicate::Pt39,
+                seed_bonds: &DOUBLE_LIKE,
+                centerpoint_elements: &["N"],
+                centerpoint_valence: Some(3),
+                centerpoint_neutral: false,
+                ket_normal_carbon: false,
+                exclude_seed_element: false,
+                pt18_double_skip: false,
+                scan: ScanStyle::Standard {
+                    seed_verdict_alt: false,
+                },
+                gate: Gate {
+                    pt39_element_gate: true,
+                    ..Gate::default()
+                },
+            },
+        );
+    }
+    if flags.pt_13_00 {
+        changed |= anchor_round(
+            context,
+            state,
+            &AnchorSpec {
+                predicate: Predicate::Pt13,
+                seed_bonds: &WIDE,
+                centerpoint_elements: &["C"],
+                centerpoint_valence: Some(2),
+                centerpoint_neutral: false,
+                ket_normal_carbon: false,
+                exclude_seed_element: false,
+                pt18_double_skip: false,
+                scan: ScanStyle::Mobile {
+                    alt_acceptor_by_neutral: true,
+                },
+                gate: Gate {
+                    valence2_equals: Some(1),
+                    valence4: Some(Valence4Gate::ExactlyOne),
+                    ..Gate::default()
+                },
+            },
+        );
+    }
+    if flags.pt_18_00 {
+        changed |= anchor_round(
+            context,
+            state,
+            &AnchorSpec {
+                predicate: Predicate::Pt18,
+                seed_bonds: &WIDE,
+                centerpoint_elements: &["C"],
+                centerpoint_valence: Some(2),
+                centerpoint_neutral: false,
+                ket_normal_carbon: false,
+                exclude_seed_element: false,
+                pt18_double_skip: true,
+                scan: ScanStyle::Mobile {
+                    alt_acceptor_by_neutral: false,
+                },
+                gate: Gate {
+                    valence2_equals: Some(1),
+                    valence3_equals: Some(1),
+                    ..Gate::default()
+                },
+            },
+        );
+    }
+    if flags.keto_enol {
+        changed |= anchor_round(
+            context,
+            state,
+            &AnchorSpec {
+                predicate: Predicate::Ket,
+                seed_bonds: &DOUBLE_LIKE,
+                centerpoint_elements: &["C"],
+                centerpoint_valence: None,
+                centerpoint_neutral: false,
+                ket_normal_carbon: true,
+                exclude_seed_element: false,
+                pt18_double_skip: false,
+                scan: ScanStyle::Standard {
+                    seed_verdict_alt: true,
+                },
+                gate: Gate {
+                    valence2_equals: Some(1),
+                    valence4: Some(Valence4Gate::AtLeastOne),
+                    ..Gate::default()
+                },
+            },
+        );
     }
     changed
 }
@@ -1788,11 +2499,14 @@ fn registration_round(context: &Context, state: &mut Registration) -> bool {
 /// balanced network's cap-aware connectivity. Endpoints already in
 /// groups merge when their representatives confirm an alt path; new
 /// endpoints pair among themselves and with group members; classes
-/// of one endpoint are dropped (IGNORE_SINGLE_ENDPOINTS).
+/// of one endpoint are dropped (IGNORE_SINGLE_ENDPOINTS). `pred` is
+/// the calling round's mode — the confirmations' terminal prechecks
+/// consult that round's predicate.
 fn find_accessible_end_points(
     context: &Context,
     state: &Registration,
     ends: &[usize],
+    pred: Predicate,
 ) -> Partitioned {
     let mut equ: Vec<usize> = ends
         .iter()
@@ -1812,7 +2526,7 @@ fn find_accessible_end_points(
     let mut merged = false;
     for i in 0..known {
         for j in (i + 1)..known {
-            if context.alt_path_exists(state, reps[i].0, reps[j].0) {
+            if context.alt_path_exists(state, reps[i].0, reps[j].0, pred) {
                 merged = true;
                 let low = slots[i].min(slots[j]);
                 let high = slots[i].max(slots[j]);
@@ -1856,7 +2570,7 @@ fn find_accessible_end_points(
         for j in (i + 1)..members.len() {
             let tested = (slots[i] != slots[j] && (i >= known || j >= known))
                 || (slots[i] == 0 && slots[j] == 0);
-            if !tested || !context.alt_path_exists(state, members[i].0, members[j].0) {
+            if !tested || !context.alt_path_exists(state, members[i].0, members[j].0, pred) {
                 continue;
             }
             let (a, b) = (members[i].1, members[j].1);
@@ -2325,7 +3039,7 @@ fn check_pyrazole(
     // The balanced network confirms the fresh pair (the reference
     // skips it only when both N's already share one group).
     if !(state.group_of[n1].is_some() && state.group_of[n1] == state.group_of[n2])
-        && !context.alt_path_exists(state, n1, n2)
+        && !context.alt_path_exists(state, n1, n2, Predicate::Base)
     {
         return false;
     }
@@ -2422,7 +3136,7 @@ fn check_6memb_ring(
     // The balanced network confirms the pair (the reference skips it
     // only when both already share one group).
     if !(state.group_of[o_at].is_some() && state.group_of[o_at] == state.group_of[n_at])
-        && !context.alt_path_exists(state, n_at, o_at)
+        && !context.alt_path_exists(state, n_at, o_at, Predicate::Base)
     {
         return false;
     }
@@ -2518,7 +3232,7 @@ fn check_tropolone(
         find.found += 1;
         return true;
     }
-    if context.alt_path_exists(state, endpoint2, endpoint1) {
+    if context.alt_path_exists(state, endpoint2, endpoint1, Predicate::Base) {
         find.found += 1;
         true
     } else {
