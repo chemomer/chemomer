@@ -156,8 +156,7 @@ impl Structure {
             let rides = match carrier {
                 None => false,
                 Some(carrier) => {
-                    atom.charge == 0
-                        && (self.atoms[carrier].element != "H" || carrier < index)
+                    atom.charge == 0 && (self.atoms[carrier].element != "H" || carrier < index)
                 }
             };
             if !rides {
