@@ -196,6 +196,34 @@ impl Engine {
         crate::key::inchikey(&self.inchi_string()?)
     }
 
+    /// The key output the reference CLI prints for the assembled
+    /// identifier under the options' key flags (ichimain.c:1334–1412):
+    /// `InChIKey=<key>`, each requested extension on its own
+    /// `XHash1=`/`XHash2=` line (newline-joined); under `MergeHash` the
+    /// single `InChIHash=<key>-<xtra1>-<xtra2>` line with a bare dash
+    /// for an absent extension. Without the flags this is the bare
+    /// `InChIKey=` line. The identifier itself never changes — see
+    /// [`Options`].
+    pub fn inchikey_output(&self) -> Result<String> {
+        let (key, xtra1, xtra2) = crate::key::key_extensions(&self.inchi_string()?)?;
+        let xtra1 = self.options.xhash1.then_some(xtra1);
+        let xtra2 = self.options.xhash2.then_some(xtra2);
+        Ok(if self.options.merge_hash {
+            crate::key::merged_line(&key, xtra1.as_deref(), xtra2.as_deref())
+        } else {
+            let mut out = format!("InChIKey={key}");
+            if let Some(x1) = &xtra1 {
+                out.push_str("\nXHash1=");
+                out.push_str(x1);
+            }
+            if let Some(x2) = &xtra2 {
+                out.push_str("\nXHash2=");
+                out.push_str(x2);
+            }
+            out
+        })
+    }
+
     /// The AuxInfo line beside the identifier: canonical numbering,
     /// equivalence classes, charges, and the echo of the submitted
     /// structure (see [`crate::aux`]). The options ride along — SNon
@@ -367,6 +395,34 @@ mod tests {
     fn water_assembles_from_the_registered_layers() {
         let engine = Engine::from_molfile(WATER).expect("parses");
         assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H2O/h1H2");
+    }
+
+    #[test]
+    fn the_key_output_mirrors_the_oracle_cli_lines() {
+        // ichimain.c: -Key prints InChIKey=; each XHash flag adds its
+        // line; -MergeHash collapses everything onto one InChIHash=
+        // line with a bare dash for an absent extension. The oracle's
+        // recorded water output (clean 1.07.5 binary).
+        let x1 = "e014f429aafac730dc565eecf4ec4d2c4263e05c04ae2ef6";
+        let x2 = "80fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let engine = Engine::from_molfile(WATER).expect("parses");
+        assert_eq!(
+            engine.inchikey_output().unwrap(),
+            "InChIKey=XLYOFNOQVPJJNP-UHFFFAOYSA-N"
+        );
+        let engine = Engine::with_options(WATER, Options::default().with_xhash1().with_xhash2())
+            .expect("parses");
+        assert_eq!(
+            engine.inchikey_output().unwrap(),
+            format!("InChIKey=XLYOFNOQVPJJNP-UHFFFAOYSA-N\nXHash1={x1}\nXHash2={x2}")
+        );
+        let engine =
+            Engine::with_options(WATER, Options::default().with_xhash1().with_merge_hash())
+                .expect("parses");
+        assert_eq!(
+            engine.inchikey_output().unwrap(),
+            format!("InChIHash=XLYOFNOQVPJJNP-UHFFFAOYSA-N-{x1}-")
+        );
     }
 
     const H2: &str = "h2\n  chemomer\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n    1.0000    1.0000    0.0000 H   0  0  0  0  0  0  0  0  0  0  0  0  0\n    2.0000    1.0000    0.0000 H   0  0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0  0  0  0  0  0  0  0\nM  END\n";

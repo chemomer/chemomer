@@ -18,6 +18,11 @@
 //! | `SUU`     | `InChI=1/`  | undefined centers/bonds print (`?`) | default drops the whole group when nothing is well-defined |
 //! | `SLUUD`   | `InChI=1/`  | unknown prints `u` | distinguishes wiggly (unknown) from undefined |
 //! | `DoNotAddH` | `InChI=1S/` | — | only drawn hydrogens exist; H-count codes are ignored too |
+//!
+//! The key-output flags (`XHash1`/`XHash2`/`MergeHash`) sit beside the
+//! table: they never touch the assembled identifier — they extend the
+//! [`crate::key`] composition the engine prints (see
+//! [`crate::Engine::inchikey_output`]).
 
 /// The option flags one generation runs under. Builder methods mirror
 /// the reference's parse-order toggles exactly, so a chain of
@@ -49,6 +54,23 @@ pub struct Options {
     /// hydrogens exist, and the molfile H-count codes are ignored
     /// (ichiparm.c:259–263, mol2atom.c `calculate_valences`).
     pub do_not_add_h: bool,
+    /// `XHash1` — extend the key's FIRST block hash to 256 bits: the
+    /// major digest's un-consumed bits as 48 lowercase hex characters
+    /// (ichiparm.c:236–240, ikey_base26.c `get_xtra_hash_major_hex`).
+    /// Key-output only: it never touches the identifier. The reference
+    /// warns the flag is inert without `Key` ("Hash extension(s) not
+    /// generated: InChIKey not requested", ichiparm.c:2061–2063); the
+    /// engine's key output reads these flags the same way.
+    pub xhash1: bool,
+    /// `XHash2` — extend the key's SECOND block hash to 256 bits: the
+    /// minor digest's un-consumed bits as 56 lowercase hex characters
+    /// (ichiparm.c:241–245, ikey_base26.c `get_xtra_hash_minor_hex`).
+    pub xhash2: bool,
+    /// `MergeHash` — combine the key with the requested extensions
+    /// onto one `InChIHash=` line, dash-joined, instead of the separate
+    /// `InChIKey=`/`XHash1=`/`XHash2=` lines (ichiparm.c:455–458,
+    /// ichimain.c:1376–1412). An absent extension leaves a bare dash.
+    pub merge_hash: bool,
 }
 
 impl Options {
@@ -111,6 +133,28 @@ impl Options {
     #[must_use]
     pub fn with_do_not_add_h(mut self) -> Self {
         self.do_not_add_h = true;
+        self
+    }
+
+    /// `XHash1` — the key's first block hash extends to 256 bits.
+    #[must_use]
+    pub fn with_xhash1(mut self) -> Self {
+        self.xhash1 = true;
+        self
+    }
+
+    /// `XHash2` — the key's second block hash extends to 256 bits.
+    #[must_use]
+    pub fn with_xhash2(mut self) -> Self {
+        self.xhash2 = true;
+        self
+    }
+
+    /// `MergeHash` — key and requested extensions join onto one
+    /// `InChIHash=` line.
+    #[must_use]
+    pub fn with_merge_hash(mut self) -> Self {
+        self.merge_hash = true;
         self
     }
 
