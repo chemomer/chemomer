@@ -193,14 +193,128 @@ impl MetalContext {
     }
 }
 
-/// Freezes the derived implicit hydrogens onto every UNPINNED atom
-/// (`h_count = derived`, `h_pinned = true`): after a disconnection
-/// the reference never re-derives H — the ammine ligand the reader
-/// gave its 2 hydrogens keeps them as a bare NH2⁻ component, and the
-/// bare =O the reader gave none stays a bare O. DoNotAddH pins every
-/// atom drawn-only first, so nothing derives there.
+/// The per-atom read-time implicit-hydrogen count (util.c:862
+/// `get_num_H`): the smallest registered valence at the atom's
+/// CHARGE state that absorbs the chemical valence (anion rows
+/// included — a bare O⁻ reads one H), with the reference's N(IV) and
+/// S(III) special cases. The `bSkipAddingH` elements never derive
+/// (`util.c:912`), charges outside the cValence table keep
+/// inp_num_H — zero (util.c:66-68) — and the H-count code field
+/// never feeds this (`MOL_FMT_QUERY` is absent). Radicals are not
+/// read by the corpus reader, so the radical branch does not arise.
+/// `cbv` is the chemical bond valence INCLUDING one per folded
+/// explicit H (a bonded H atom in the reference).
+pub(crate) fn get_num_h(el: i32, charge: i32, cbv: i32) -> u32 {
+    if skip_adding_h(el) {
+        return 0;
+    }
+    if !(-2..=2).contains(&charge) {
+        return 0;
+    }
+    let mut val = 0i32;
+    for &v in &el_valences(el, charge) {
+        let v = i32::from(v);
+        if v == 0 {
+            break; // row exhausted
+        }
+        if v < cbv {
+            continue; // keep walking to a valence that absorbs cbv
+        }
+        val = v;
+        break;
+    }
+    // do not add H to N(IV), S(III) (util.c 946-950)
+    if el == 7 && charge == 0 && val == 5 {
+        val = 3;
+    }
+    if el == 16 && charge == 0 && val == 4 && cbv == 3 {
+        val = 3;
+    }
+    (val - cbv).max(0) as u32
+}
+
+/// The read-time implicit-hydrogen derivation over a whole structure
+/// (util.c:862 `get_num_H`, fed by mol2atom.c `calculate_valences`).
+pub(crate) fn read_time_hydrogens(structure: &Structure) -> Vec<u32> {
+    let context = MetalContext::new(structure);
+    (0..structure.atoms.len())
+        .map(|i| {
+            let drawn = structure.atoms[i].h_count;
+            let el = context.element[i];
+            let charge = structure.atoms[i].charge;
+            // chem_bonds_valence: the aromatic-blended bond valence
+            // plus one per folded explicit H (a bonded H atom in the
+            // reference).
+            let cbv = context.cbv2[i] / 2 + drawn as i32;
+            drawn + get_num_h(el, charge, cbv)
+        })
+        .collect()
+}
+
+/// The rA echo's unusual-valence digit (ichiprt1.c:2494
+/// `needed_unusual_el_valence`): the chemical valence the read-time
+/// derivation cannot reconstruct unambiguously. Zero when exactly one
+/// registered valence fits the bonds without implicit H; −1 (no
+/// digit) when the chemical valence itself reads zero.
+pub(crate) fn needed_unusual_valence(
+    el: i32,
+    charge: i32,
+    cbv: i32,
+    num_h: u32,
+    _positions: u32,
+) -> i32 {
+    let chem_valence = cbv + num_h as i32;
+    let num_h_expected = get_num_h(el, charge, cbv) as i32;
+    // The `positions` argument mirrors the reference's num_bonds
+    // parameter, consulted only in the bonds_valence !=
+    // actual_bonds_valence gate that never fires here: both read the
+    // same aromatic-blended chemical valence (ichi_bns.c
+    // nBondsValenceInpAt).
+    if !(-2..=2).contains(&charge)
+        || metal_valence(el, charge, 0) == 0
+        || skip_adding_h(el)
+        || num_h_expected != num_h as i32
+    {
+        if num_h as i32 == 0 && num_h_expected == 0 {
+            return 0; // no H
+        }
+        return chem_valence; // needs H atoms added
+    }
+    let mut found_known = 0;
+    let mut found = 0;
+    let mut exact = false;
+    for i in 0..5 {
+        let known = metal_valence(el, charge, i);
+        if known > 0 && cbv <= known {
+            found_known += 1;
+            if known <= chem_valence {
+                found += 1;
+            }
+            if known == chem_valence {
+                exact = true;
+                break;
+            }
+        }
+    }
+    if exact && found == 1 && found_known == 1 {
+        0
+    } else if chem_valence != 0 {
+        chem_valence
+    } else {
+        -1
+    }
+}
+
+/// Freezes the read-time implicit hydrogens onto every UNPINNED atom
+/// (`h_count = derived`, `h_pinned = true`): the reference's num_H
+/// was fixed at read time and the disconnect never re-derives it —
+/// the ammine ligand the reader gave its 2 hydrogens keeps them as a
+/// bare NH2⁻ component, and the bare =O the reader gave none stays a
+/// bare O. DoNotAddH pins every atom drawn-only first, so nothing
+/// derives there. The `bSkipAddingH` elements (util.c:912) never took
+/// read-time implicit H — their drawn count stands, pinned.
 pub fn materialize_hydrogens(structure: &mut Structure) {
-    let derived = structure.hydrogens();
+    let derived = read_time_hydrogens(structure);
     for (atom, h) in structure.atoms.iter_mut().zip(&derived) {
         if !atom.h_pinned {
             atom.h_count = *h;
@@ -225,24 +339,30 @@ fn ammonium_salt_site(context: &MetalContext, structure: &Structure, i: usize) -
     }
     let mut site = None;
     let mut found = 0u32;
-    for &neighbor in neighbors_of(structure, i) {
+    for neighbor in neighbors_of(structure, i) {
         let (degree, charge, el) = (
             context.degrees[neighbor],
             structure.atoms[neighbor].charge,
             context.element[neighbor],
         );
+        // The common per-neighbor reject (strutil.c 2287-2292): any
+        // neighbor carrying implicit H rejects; a charged neighbor
+        // rejects unless the O bridge whose charge cancels the N's.
+        if context.h[neighbor] != 0
+            || (charge != 0 && (el != 8 || charge + structure.atoms[i].charge != 0))
+        {
+            return None;
+        }
         if matches!(el, 9 | 17 | 35 | 53)
             && degree == 1
             && context.cbv2[neighbor] == 2
             && charge == 0
-            && context.h[neighbor] == 0
             && found == 0
         {
             found += 1; // the N-X halogen bridge (first only)
             site = Some(neighbor);
         } else if el == 8
             && degree == 2
-            && charge == 0
             && site.is_none()
             && carbon_side(structure, context, neighbor, i)
         {
@@ -252,7 +372,9 @@ fn ammonium_salt_site(context: &MetalContext, structure: &Structure, i: usize) -
             return None; // any other neighbor rejects
         }
     }
-    if found == 1 {
+    // the final gate (strutil.c 2320-2323): exactly one O/halide
+    // bridge and num_H == 4 — the quaternary ammonium.
+    if found == 1 && context.h[i] == 4 {
         site
     } else {
         None
@@ -268,18 +390,6 @@ fn carbon_side(structure: &Structure, context: &MetalContext, o: usize, n: usize
         .copied()
         .find(|&other| other != n)
         .is_some_and(|carbon| context.element[carbon] == 6 && structure.atoms[carbon].charge == 0)
-}
-
-fn neighbors_of(structure: &Structure, atom: usize) -> Vec<usize> {
-    let mut out = Vec::new();
-    for &(from, to, _) in &structure.bonds {
-        if from == atom {
-            out.push(to);
-        } else if to == atom {
-            out.push(from);
-        }
-    }
-    out
 }
 
 /// Whether the M-X / M-O-C(=) metal-salt pattern holds for metal
@@ -312,7 +422,7 @@ fn is_metal_salt(context: &MetalContext, structure: &Structure, i: usize) -> boo
     if !normal_valence || valence != context.cbv2[i] as u32 / 2 {
         return false; // multi bonds or unregistered valence reject
     }
-    for &neighbor in neighbors_of(structure, i) {
+    for neighbor in neighbors_of(structure, i) {
         let (degree, charge, el) = (
             context.degrees[neighbor],
             structure.atoms[neighbor].charge,
@@ -331,7 +441,7 @@ fn is_metal_salt(context: &MetalContext, structure: &Structure, i: usize) -> boo
             && charge == 0
             && context.h[neighbor] == 0
             && context.cbv2[neighbor] == 4 // two single bonds
-            && carbon_side_multiple(context, neighbor, i);
+            && carbon_side_multiple(structure, context, neighbor, i);
         if !oxide {
             return false;
         }
@@ -362,6 +472,7 @@ fn carbon_side_multiple(
         })
 }
 
+/// The shared neighbor list (bond order irrelevant).
 fn neighbors_of(structure: &Structure, atom: usize) -> Vec<usize> {
     let mut out = Vec::new();
     for &(from, to, _) in &structure.bonds {
@@ -414,7 +525,9 @@ pub fn disconnect_salts(structure: &mut Structure) -> bool {
         // bIsAmmoniumSalt + DisconnectAmmoniumSalt (strutil.c 2300,
         // 2405): break the N-X bridge, annihilate cancelling charges,
         // move one N hydrogen onto the bridge atom.
-        let site = context_fresh(structure, |context| ammonium_salt_site(context, structure, i));
+        let site = context_fresh(structure, |context| {
+            ammonium_salt_site(context, structure, i)
+        });
         if let Some(site) = site {
             let n_charge = structure.atoms[i].charge;
             let site_charge = structure.atoms[site].charge;
@@ -457,8 +570,8 @@ fn metal_marks(context: &MetalContext, structure: &Structure, i: usize) -> bool 
     if context.degrees[i] + context.h[i] == 0 {
         return false; // nothing to disconnect
     }
-    let salt = ammonium_salt_site(context, structure, i).is_some()
-        || is_metal_salt(context, structure, i);
+    let salt =
+        ammonium_salt_site(context, structure, i).is_some() || is_metal_salt(context, structure, i);
     !salt
 }
 
@@ -496,9 +609,7 @@ pub fn disconnect_metals(structure: &mut Structure) -> bool {
                 continue;
             }
             for ligand in neighbors_of(structure, i) {
-                if marked[ligand] == pass
-                    && disconnect_one_ligand(structure, &marked, i, ligand)
-                {
+                if marked[ligand] == pass && disconnect_one_ligand(structure, &marked, i, ligand) {
                     changed = true;
                 }
             }
@@ -554,25 +665,39 @@ fn disconnect_one_ligand(
         9 | 17 | 35 | 53 | 85 | 7 | 15 | 33 | 8 | 16 | 34 | 52 | 5
     );
     let remaining_aromatic = ligand_aromatic_bonds - removed_aromatic;
-    if (remaining_aromatic != 0 && remaining_aromatic != 2 && remaining_aromatic != 3)
-        || !heteroat
+    if (remaining_aromatic != 0 && remaining_aromatic != 2 && remaining_aromatic != 3) || !heteroat
     {
         return true;
     }
-    // The natural-valence search (strutil.c 3221-3250): a valence of
-    // 0 renormalizes a HALOGEN to -1 (any other element stays); a
-    // registered valence at charge -1..1 names the new charge.
-    let cbv: i32 = structure
-        .bonds
-        .iter()
-        .filter(|&&(from, to, _)| from == ligand || to == ligand)
-        .map(|&(_, _, order)| if order == 4 { 3 } else { 2 * order as i32 })
-        .sum();
+    // The natural-valence search (strutil.c 3221-3250): the ligand's
+    // REMAINING chemical valence (chem_bonds_valence: single 1,
+    // double 2, triple 3; the aromatic blend of the remaining bonds —
+    // 2 aromatics read 1.5 each, 3 read 4 total, other counts gated
+    // above) plus the read-time hydrogen count, matched against the
+    // registered valences at charges -1, 0, +1 in that order, the
+    // FIRST match naming the new charge. A valence of 0 renormalizes
+    // a HALOGEN to -1 (any other element stays).
+    let mut aromatic = 0u32;
+    let mut cbv: i32 = 0;
+    for &(from, to, order) in &structure.bonds {
+        if from == ligand || to == ligand {
+            if order > 3 {
+                aromatic += 1;
+            } else {
+                cbv += order as i32;
+            }
+        }
+    }
+    cbv += match aromatic {
+        2 => 3, // two remaining aromatic bonds read 1.5 each
+        3 => 4, // three read 4 total
+        _ => 0, // single bonds only (1 and >3 gated above)
+    };
     let val = cbv + structure.atoms[ligand].h_count as i32;
     let new_charge = if val == 0 {
         matches!(ligand_el, 9 | 17 | 35 | 53 | 85).then_some(-1)
     } else {
-        (-1..=1).find(|&charge| metal_valence(ligand_el, charge, 0) as i32 == val)
+        (-1..=1).find(|&charge| metal_valence(ligand_el, charge, 0) == val)
     };
     let Some(new_charge) = new_charge else {
         return true;
@@ -600,6 +725,9 @@ fn disconnect_one_ligand(
     structure.atoms[ligand].charge = new_charge;
     true
 }
+
+#[cfg(test)]
+mod tests {
     use super::*;
 
     #[test]

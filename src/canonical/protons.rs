@@ -392,7 +392,10 @@ fn is_z_atom(el: i32) -> bool {
 pub(crate) fn el_valences(el: i32, charge: i32) -> [u8; 5] {
     let idx = (charge.clamp(-2, 2) + 2) as usize;
     let row: [[u8; 5]; 5] = match el {
-        1 => [[0u8, 0, 1, 0, 0]; 5],               // H
+        // H/D/T: one valence of 1 at the neutral state only (ElData
+        // util.c:107) — the per-charge table never folds into a
+        // single charge's valence list.
+        1 => [[0; 5], [0; 5], [1, 0, 0, 0, 0], [0; 5], [0; 5]],
         2 | 10 | 18 | 36 | 54 | 86 => [[0; 5]; 5], // noble gases
         // Alkali metals: one neutral valence only (ElData rows).
         3 | 11 | 19 | 37 | 55 | 87 => [[0; 5], [0; 5], [1, 0, 0, 0, 0], [0; 5], [0; 5]],
@@ -586,10 +589,9 @@ pub(crate) fn el_valences(el: i32, charge: i32) -> [u8; 5] {
         88 => [[0; 5], [0; 5], [2, 0, 0, 0, 0], [1, 0, 0, 0, 0], [0; 5]], // Ra
         90 => [[0; 5], [0; 5], [3, 4, 0, 0, 0], [0; 5], [0; 5]], // Th
         91 => [[0; 5], [0; 5], [3, 4, 5, 0, 0], [0; 5], [0; 5]], // Pa
-        92 | 93 | 94 | 95 => [[0; 5], [0; 5], [3, 4, 5, 6, 0], [0; 5], [0; 5]], // U Np Pu Am
+        92..=95 => [[0; 5], [0; 5], [3, 4, 5, 6, 0], [0; 5], [0; 5]], // U Np Pu Am
         97 => [[0; 5], [0; 5], [3, 4, 0, 0, 0], [0; 5], [0; 5]], // Bk
-        102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 110 | 111 | 112 | 113 | 114 | 115 | 116
-        | 117 | 118 => [[0; 5], [0; 5], [1, 0, 0, 0, 0], [0; 5], [0; 5]], // No..Og placeholders
+        102..=118 => [[0; 5], [0; 5], [1, 0, 0, 0, 0], [0; 5], [0; 5]], // No..Og placeholders
         _ => return [0; 5],
     };
     row[idx]

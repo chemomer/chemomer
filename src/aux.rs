@@ -337,6 +337,14 @@ pub fn aux_info(
                 counts[atom],
                 degrees[atom],
             );
+            // A BARE atom (no bonds, no H) never records its charge —
+            // "charge of a single atom component is in the INChI"
+            // (ichimak2.c:1309-1311 gates the whole OrigInfo entry on
+            // valence || num_H): the disconnected Pt⁴⁺ and Na⁺ speak
+            // through the identifier's /q, not /CRV:.
+            if degrees[atom] == 0 && counts[atom] == 0 {
+                return (ranks_aux[atom], 0, 0);
+            }
             (ranks_aux[atom], charge, unusual)
         })
         .filter(|&(_, charge, unusual)| charge != 0 || unusual != 0)
@@ -444,8 +452,27 @@ pub(crate) fn reversibility_block(original: &Structure) -> String {
     // non-chiral — every molfile carries one of the two bits).
     let chiral_letter = if original.chiral_flag { 'c' } else { 'n' };
     let mut out = format!("/rA:{n}{chiral_letter}");
-    for atom in &original.atoms {
+    // The unusual-valence digit and the charge suffixes read the
+    // SUBMITTED structure (ichiprt1.c WriteOrigAtoms): the digit is
+    // the valence the read-time derivation cannot reconstruct
+    // unambiguously (the two-bond Na of the diethylamide recording
+    // echoes `Na2`), printed before the charge.
+    let echo_context = crate::canonical::metals::MetalContext::new(original);
+    for (index, atom) in original.atoms.iter().enumerate() {
+        let el = crate::canonical::protons::el_number(&atom.element).unwrap_or(0);
+        let cbv = echo_context.cbv2[index] / 2;
+        let num_h = crate::canonical::metals::get_num_h(el, atom.charge, cbv);
+        let valence = crate::canonical::metals::needed_unusual_valence(
+            el,
+            atom.charge,
+            cbv,
+            num_h,
+            echo_context.degrees[index],
+        );
         out.push_str(&atom.element);
+        if valence > 0 {
+            out.push_str(&valence.to_string());
+        }
         match atom.charge {
             0 => {}
             negative if negative < 0 => {
