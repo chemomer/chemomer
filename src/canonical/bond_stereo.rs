@@ -244,6 +244,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            fold_source: Vec::new(),
             chiral_flag: false,
         }
     }
@@ -295,6 +296,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            fold_source: Vec::new(),
             chiral_flag: false,
         };
         assert!(segments(
@@ -328,6 +330,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            fold_source: Vec::new(),
             chiral_flag: false,
         };
         assert!(segments(

@@ -317,6 +317,7 @@ mod tests {
             isotopic_h: Default::default(),
             protons_hard_moved: false,
             ride_marks: Vec::new(),
+            fold_source: Vec::new(),
             chiral_flag: false,
         }
     }

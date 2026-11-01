@@ -124,14 +124,14 @@ pub fn aux_info(
     // `/N:` — the ORIGINAL atom numbers in canonical order (the
     // reference's nOrigAtNosInCanonOrd reads orig_at_number; the
     // normalized structure's indices shift when explicit hydrogen
-    // atoms folded away, so the echo structure supplies the map).
-    let original_index: Vec<usize> = original
-        .atoms
-        .iter()
-        .enumerate()
-        .filter(|(_, atom)| atom.element != "H")
-        .map(|(index, _)| index)
-        .collect();
+    // atoms folded away, so the fold's own source map supplies the
+    // exact correspondence — hydrogen-bearing originals included,
+    // H2's surviving atom is original atom 1 or 2 by the fold).
+    let original_index: Vec<usize> = if working.fold_source.is_empty() {
+        (0..original.atoms.len()).collect()
+    } else {
+        working.fold_source.clone()
+    };
     let mut order: Vec<usize> = (0..working.atoms.len()).collect();
     order.sort_by_key(|&atom| ranks_aux[atom]);
     let numbering: Vec<String> = order

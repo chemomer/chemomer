@@ -56,6 +56,11 @@ pub struct Structure {
     /// chiral at submission (the reference's FLAG_INP_AT_CHIRAL).
     /// The SUCF option reads it and the aux `/rA` letter speaks it.
     pub chiral_flag: bool,
+    /// The fold's provenance: for each atom of the folded structure,
+    /// its index in the submitted one. Empty when no fold ran (then
+    /// the structures align index-for-index) — the aux numbering's
+    /// exact original-atom map, hydrogen-bearing originals included.
+    pub fold_source: Vec<usize>,
 }
 
 /// Allowed valences of the organic subset; the implicit hydrogen
@@ -131,7 +136,6 @@ impl Structure {
             if atom.element != "H" {
                 continue;
             }
-            keep[index] = false;
             let carrier = self.bonds.iter().find_map(|&(from, to, _)| {
                 if from == index {
                     Some(to)
@@ -141,9 +145,26 @@ impl Structure {
                     None
                 }
             });
-            if let Some(carrier) = carrier {
-                folds.push((carrier, 1, atom.isotope));
+            // A hydrogen survives as a structural atom when it is
+            // charged (hydride: InChI=1S/H/q-1), when it has no
+            // carrier at all (the valence gap reads it as H2), or
+            // when it is an H-H pair's LOWER index — the coalescence
+            // TARGET, the higher member folding onto it so the
+            // survivor keeps the pair's first original number
+            // (InChI=1S/H2/h1H, aux N:1). Otherwise it rides: onto
+            // its heavy carrier, or downward within an H-H chain.
+            let rides = match carrier {
+                None => false,
+                Some(carrier) => {
+                    atom.charge == 0
+                        && (self.atoms[carrier].element != "H" || carrier < index)
+                }
+            };
+            if !rides {
+                continue;
             }
+            keep[index] = false;
+            folds.push((carrier.unwrap(), 1, atom.isotope));
         }
         for (carrier, count, isotope) in folds {
             self.atoms[carrier].h_count += count;
@@ -156,12 +177,15 @@ impl Structure {
         self.isotopic_h = isotopic_h;
         let mut remap = vec![0usize; self.atoms.len()];
         let mut next = 0usize;
+        let mut fold_source = Vec::with_capacity(self.atoms.len());
         for index in 0..self.atoms.len() {
             if keep[index] {
                 remap[index] = next;
                 next += 1;
+                fold_source.push(index);
             }
         }
+        self.fold_source = fold_source;
         self.atoms = self
             .atoms
             .iter()
