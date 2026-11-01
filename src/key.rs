@@ -24,11 +24,6 @@
 
 use crate::error::{err, Result};
 
-fn error_err(message: impl Into<String>) -> crate::error::Error {
-    // err() returns Result; lift it to the error itself.
-    err::<()>(message).unwrap_err()
-}
-
 /// The InChIKey for a standard identifier.
 pub fn inchikey(inchi: &str) -> Result<String> {
     key_extensions(inchi).map(|(key, _, _)| key)
@@ -41,7 +36,12 @@ pub fn inchikey(inchi: &str) -> Result<String> {
 pub fn key_extensions(inchi: &str) -> Result<(String, String, String)> {
     let blocks = split_blocks(inchi)?;
     let (digest_major, digest_minor) = digests(&blocks);
-    let key = assemble_key(blocks.proton.as_deref(), &digest_major, &digest_minor);
+    let key = assemble_key(
+        blocks.flag,
+        blocks.proton.as_deref(),
+        &digest_major,
+        &digest_minor,
+    );
     Ok((
         key,
         xhash_major_hex(&digest_major),
@@ -110,7 +110,7 @@ fn split_blocks(inchi: &str) -> Result<Blocks> {
     } else if let Some(rest) = inchi.strip_prefix("InChI=1/") {
         (rest, 'N')
     } else {
-        return error_err("inchikey: not an InChI=1[S/] identifier");
+        return err("inchikey: not an InChI=1[S/] identifier");
     };
     let body = body.to_string();
     let segments: Vec<&str> = body.split('/').collect();
@@ -166,7 +166,12 @@ fn digests(blocks: &Blocks) -> ([u8; 32], [u8; 32]) {
     (digest_major, digest_minor)
 }
 
-fn assemble_key(proton: Option<&str>, digest_major: &[u8; 32], digest_minor: &[u8; 32]) -> String {
+fn assemble_key(
+    flag: char,
+    proton: Option<&str>,
+    digest_major: &[u8; 32],
+    digest_minor: &[u8; 32],
+) -> String {
     let mut key = String::new();
     for chunk in 0..4 {
         key.push_str(&triplet(digest_major, chunk * 14));
@@ -176,7 +181,7 @@ fn assemble_key(proton: Option<&str>, digest_major: &[u8; 32], digest_minor: &[u
     key.push_str(&triplet(digest_minor, 0));
     key.push_str(&triplet(digest_minor, 14));
     key.push_str(&dublet(digest_minor, 28));
-    key.push(blocks.flag); // the calculation flag: S standard, N full
+    key.push(flag); // the calculation flag: S standard, N full
     key.push('A'); // the base subversion flag
     key.push('-');
     key.push_str(&proton_flag(proton));
