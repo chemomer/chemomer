@@ -17,7 +17,15 @@ use crate::options::Options;
 /// bit-identical; `SNon` emits nothing (the perception's numbering
 /// verdict keeps running elsewhere — the aux numbering still speaks
 /// the stereo-informed canonicalization, matching the oracle's SNon
-/// recordings).
+/// recordings); `SRel`/`SRac` reshape the set per the reference's
+/// GetSp3RelRacAbs: `/m` never prints, `/s` speaks `2`/`3`, and the
+/// rows are the stereo-informed verdict's winning pass (the
+/// lexicographically smaller of the absolute/inverted passes,
+/// ichimak2.c:1224–1250). When the inversion verdict ties — the meso
+/// or trivial-inversion case — no `/s` prints at all (SP3_ONLY), and
+/// with no perceivable center the whole set stays empty (`SP3_NONE`:
+/// the oracle records no `/s2` for a bond-only-stereo fixture under
+/// `-SRel`).
 fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> {
     if options.no_stereo {
         return Vec::new();
@@ -29,7 +37,56 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
     let symmetry = canonical::base_symmetry(&adjacency, &invariants);
     let groups = canonical::group_membership(structure, &counts);
     let ranks = canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
-    canonical::stereo::segments(structure, &counts, &ranks, &symmetry)
+    let segments = canonical::stereo::segments(structure, &counts, &ranks, &symmetry);
+    let stereo_type = options.requested_stereo_type();
+    if stereo_type.is_none() {
+        return segments;
+    }
+    // The relative/racemic reshape. The verdict mirrors the aux's
+    // input assembly (tautomeric structures strip the mobile H and
+    // drop the group rows) so the identifier and the aux speak one
+    // verdict; no perceivable center means no set at all.
+    let tautomeric = canonical::tautomer::mobile_groups(structure, &counts, &ranks)
+        .iter()
+        .any(|group| group.count > group.charge);
+    let Some(verdict) = canonical::stereo::informed_verdict(structure, &counts, &ranks, tautomeric)
+    else {
+        return Vec::new();
+    };
+    if verdict.sign == 0 {
+        // SP3_ONLY: the rows tie — the /t stands (the default path's
+        // rendering is the winning one), no /m and no /s follow.
+        return segments
+            .into_iter()
+            .filter(|(kind, _)| *kind == 't')
+            .collect();
+    }
+    let mut out = Vec::new();
+    if !verdict.main_pairs.is_empty() {
+        // The winning pass's rows: the centers renumber per the
+        // winning ranks, the parities speak 1 = odd / 2 = even, the
+        // first center normalized `-` (the winning rows are the
+        // lexicographic minimum, so its parity is odd).
+        let first = verdict.main_pairs.first().map(|&(_, parity)| parity);
+        let text = verdict
+            .main_pairs
+            .iter()
+            .enumerate()
+            .map(|(index, &(rank, parity))| {
+                let mark = match first {
+                    Some(first_parity) if index > 0 && parity != first_parity => '+',
+                    _ => '-',
+                };
+                format!("{rank}{mark}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push(('t', format!("t{text}")));
+    }
+    if let Some(kind) = stereo_type {
+        out.push(('s', format!("s{kind}")));
+    }
+    out
 }
 
 macro_rules! stereo_layer {
