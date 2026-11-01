@@ -369,6 +369,38 @@ mod tests {
         assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H2O/h1H2");
     }
 
+    const H2: &str = "h2\n  chemomer\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n    1.0000    1.0000    0.0000 H   0  0  0  0  0  0  0  0  0  0  0  0  0\n    2.0000    1.0000    0.0000 H   0  0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0  0  0  0  0  0  0  0\nM  END\n";
+
+    const LONE_H: &str = "h\n  chemomer\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n    1.0000    1.0000    0.0000 H   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n";
+
+    const HYDRIDE: &str = "h-\n  chemomer\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n    1.0000    1.0000    0.0000 H   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  CHG  1   1  -1\nM  END\n";
+
+    #[test]
+    fn molecular_hydrogen_coalesces_to_the_oracle_identifier() {
+        // The oracle reads H-H as one atom carrying one implicit H
+        // (InChI=1S/H2/h1H); the old fold removed BOTH hydrogens and
+        // underflowed the empty partition.
+        let engine = Engine::from_molfile(H2).expect("parses");
+        assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H2/h1H");
+        assert_eq!(
+            engine.aux_string().unwrap(),
+            "AuxInfo=1/0/N:1/rA:2nHH/rB:s1;/rC:1,1,0;2,1,0;"
+        );
+    }
+
+    #[test]
+    fn a_lone_uncharged_hydrogen_reads_as_h2() {
+        // The valence gap supplies its implicit partner.
+        let engine = Engine::from_molfile(LONE_H).expect("parses");
+        assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H2/h1H");
+    }
+
+    #[test]
+    fn hydride_stays_a_bare_charged_atom() {
+        let engine = Engine::from_molfile(HYDRIDE).expect("parses");
+        assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H/q-1");
+    }
+
     #[test]
     fn assembly_follows_declared_layer_order_not_registry_order() {
         // Registry scrambled on purpose; the assembler must sort by

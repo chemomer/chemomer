@@ -19,7 +19,9 @@ impl Partition {
         at_number.sort_by_key(|&i| (invariants[i], i));
         let mut rank = vec![0u32; n];
         let mut current = n as u32;
-        rank[at_number[n - 1]] = current;
+        if n > 0 {
+            rank[at_number[n - 1]] = current;
+        }
         for position in (1..n).rev() {
             if invariants[at_number[position - 1]] != invariants[at_number[position]] {
                 current = position as u32;
@@ -37,7 +39,9 @@ impl Partition {
         at_number.sort_by_key(|&i| (invariants[i], i));
         let mut rank = vec![0u32; n];
         let mut current = n as u32;
-        rank[at_number[n - 1]] = current;
+        if n > 0 {
+            rank[at_number[n - 1]] = current;
+        }
         for position in (1..n).rev() {
             if invariants[at_number[position - 1]] != invariants[at_number[position]] {
                 current = position as u32;
