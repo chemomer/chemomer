@@ -290,6 +290,274 @@ fn ring_systems(structure: &Structure) -> RingSystems {
     }
 }
 
+/// The element's first neutral valence — the reference's
+/// `get_el_valence(el, 0, 0)` for the ion-group elements.
+fn first_neutral_valence(element: &str) -> i32 {
+    match element {
+        "C" | "Si" => 4,
+        "N" | "P" | "As" | "Sb" => 3,
+        "O" | "S" | "Se" | "Te" => 2,
+        "F" | "Cl" | "Br" | "I" => 1,
+        _ => 0,
+    }
+}
+
+/// The reference's `ion_el_group`: the ion-family of an element.
+fn ion_el_group(element: &str) -> Option<u8> {
+    match element {
+        "C" | "Si" => Some(b'C'),
+        "N" | "P" | "As" | "Sb" => Some(b'N'),
+        "O" | "S" | "Se" | "Te" => Some(b'O'),
+        _ => None,
+    }
+}
+
+/// The reference's `fix_special_bonds` (ichi_bns.c 2181–2645, under
+/// REMOVE_ION_PAIRS_FIX_BONDS, inside SetForbiddenEdges at BNS
+/// allocation): the unchangeable bonds around N(V) oxide/iminium and
+/// S(IV)/S(VI)/S(VIII) centers — the bonds the templates may never
+/// cross and the network may never route. The C counts non-metal
+/// bonds only; the port's scope carries no bonded metals in the
+/// passing corpus, so every bond counts.
+#[allow(clippy::too_many_lines)]
+fn fix_special_bonds(
+    structure: &Structure,
+    hydrogens: &[u32],
+    neighbors: &[Vec<(usize, u32)>],
+    bond_index: &HashMap<(usize, usize), usize>,
+    bond_sum2: &[i32],
+    ring_system: &[usize],
+) -> BTreeSet<usize> {
+    let mut forbidden = BTreeSet::new();
+    let mut mark = |a: usize, b: usize| {
+        if let Some(&index) = bond_index.get(&(a.min(b), a.max(b))) {
+            forbidden.insert(index);
+        }
+    };
+    for center in 0..structure.atoms.len() {
+        let record = &structure.atoms[center];
+        if record.charge != 0 {
+            continue;
+        }
+        let element = record.element.as_str();
+        let group = ion_el_group(element);
+        let cbv = bond_sum2[center] / 2;
+        let num_h = hydrogens[center] as i32;
+        let excess = cbv + num_h - first_neutral_valence(element);
+        let degree = neighbors[center].len();
+        if group == Some(b'N') && excess == 2 && num_h == 0 {
+            if degree == 2 {
+                // #N= : both bonds fix; the single bond beyond an
+                // =N- (no H, two bonds, cbv 3) follows.
+                let (n1, k1) = neighbors[center][0];
+                let (n2, k2) = neighbors[center][1];
+                mark(center, n1);
+                mark(center, n2);
+                let (n3, _bond) = if k1 == 2 { (n1, k1) } else { (n2, k2) };
+                if hydrogens[n3] == 0
+                    && neighbors[n3].len() == 2
+                    && bond_sum2[n3] / 2 == 3
+                    && ion_el_group(structure.atoms[n3].element.as_str()) == Some(b'N')
+                {
+                    if let Some(&(other, other_bond)) =
+                        neighbors[n3].iter().find(|&&(x, _)| x != center)
+                    {
+                        let _ = other_bond;
+                        mark(n3, other);
+                    }
+                }
+            } else if degree == 3 {
+                // =N(-)(-): forbid the terminal neutral =O, else the
+                // neutral =N when exactly one N and at most one
+                // terminal O hang off the center.
+                let mut num_n = 0;
+                let mut k_n = None;
+                let mut num_o = 0;
+                let mut k_o = None;
+                for (position, &(neigh, _)) in neighbors[center].iter().enumerate() {
+                    let neigh_group = ion_el_group(structure.atoms[neigh].element.as_str());
+                    if neigh_group == Some(b'N') {
+                        num_n += 1;
+                        k_n = Some(position);
+                    } else if neigh_group == Some(b'O') && neighbors[neigh].len() == 1 {
+                        num_o += 1;
+                        k_o = Some(position);
+                    }
+                }
+                let mut fixed_double = false;
+                if num_o == 1 {
+                    let position = k_o.expect("counted");
+                    let &(neigh, kind) = &neighbors[center][position];
+                    if structure.atoms[neigh].charge == 0 && kind == 2 {
+                        mark(center, neigh);
+                        fixed_double = true;
+                    }
+                }
+                if !fixed_double && num_o <= 1 && num_n == 1 {
+                    let position = k_n.expect("counted");
+                    let &(neigh, kind) = &neighbors[center][position];
+                    if structure.atoms[neigh].charge == 0 && kind == 2 {
+                        mark(center, neigh);
+                    }
+                }
+            } else if degree == 4 {
+                // -N(=N-)- : fix the double bond to the =N- neighbor
+                // and the single bond beyond it.
+                let doubles: Vec<usize> = (0..degree)
+                    .filter(|&position| {
+                        let (neigh, kind) = neighbors[center][position];
+                        kind == 2
+                            && ion_el_group(structure.atoms[neigh].element.as_str()) == Some(b'N')
+                    })
+                    .collect();
+                if doubles.len() == 1 {
+                    let position = doubles[0];
+                    let (n2, _) = neighbors[center][position];
+                    if hydrogens[n2] == 0
+                        && neighbors[n2].len() == 2
+                        && bond_sum2[n2] / 2 == 3
+                        && ion_el_group(structure.atoms[n2].element.as_str()) == Some(b'N')
+                    {
+                        if let Some(&(other, other_bond)) =
+                            neighbors[n2].iter().find(|&&(x, _)| x != center)
+                        {
+                            if other_bond == 1 {
+                                mark(n2, other);
+                                mark(center, n2);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if group == Some(b'O') && element != "O" && num_h == 0 {
+            // The S(IV)/S(VI)/S(VIII) branches: excess 2/4/6 over
+            // degrees 3/4/5.
+            let want_degree = match excess {
+                2 => 3,
+                4 => 4,
+                6 => 5,
+                _ => 0,
+            };
+            if want_degree == 0 || degree != want_degree {
+                continue;
+            }
+            // The neighbor classification shared by the S branches.
+            let mut num_double = 0u32;
+            let mut double_pos = None;
+            let mut num_double_terminal_o = 0u32;
+            let mut num_oh = 0u32;
+            let mut num_om = 0u32;
+            let mut om_positions: Vec<usize> = Vec::new();
+            let mut num_x = 0u32;
+            let mut num_other = 0u32;
+            let mut other_pos = None;
+            for (position, &(neigh, kind)) in neighbors[center].iter().enumerate() {
+                let neigh_element = structure.atoms[neigh].element.as_str();
+                let terminal = neighbors[neigh].len() == 1;
+                if kind == 2 {
+                    num_double += 1;
+                    double_pos = Some(position);
+                    let neutral_or_oxonium = structure.atoms[neigh].charge == 0
+                        || (structure.atoms[neigh].charge == 1 && neighbors[neigh].len() == 2);
+                    if neutral_or_oxonium
+                        && hydrogens[neigh] == 0
+                        && ion_el_group(neigh_element) == Some(b'O')
+                        && terminal
+                    {
+                        num_double_terminal_o += 1;
+                    }
+                } else if kind == 1
+                    && terminal
+                    && ion_el_group(neigh_element) == Some(b'O')
+                    && hydrogens[neigh] <= 1
+                    && (structure.atoms[neigh].charge == 0 && hydrogens[neigh] == 1
+                        || structure.atoms[neigh].charge == -1 && hydrogens[neigh] == 0)
+                        as i32
+                        == 1
+                {
+                    num_oh += 1;
+                } else if kind == 1 && !terminal {
+                    om_positions.push(position);
+                    num_om += 1;
+                } else if kind == 1 && terminal {
+                    num_x += 1;
+                } else {
+                    num_other += 1;
+                    other_pos = Some(position);
+                }
+            }
+            if excess == 2 {
+                // S(IV): the sulfoxide/sulfonamide patterns.
+                if num_double == 1
+                    && num_double_terminal_o == 1
+                    && num_oh + num_om == 1
+                    && num_other == 1
+                {
+                    if let Some(position) = other_pos {
+                        let (other, _) = neighbors[center][position];
+                        mark(center, other);
+                    }
+                } else if num_double == 1 && num_oh == 0 && num_om == 0 {
+                    let position = double_pos.expect("counted");
+                    let (n2, _) = neighbors[center][position];
+                    let n2_element = structure.atoms[n2].element.as_str();
+                    let mut found = 0u32;
+                    let mut found_pos = None;
+                    if ion_el_group(n2_element) == Some(b'N') {
+                        for (other_position, &(neigh, kind)) in neighbors[center].iter().enumerate()
+                        {
+                            if kind == 1
+                                && (hydrogens[neigh] > 0 || structure.atoms[neigh].charge == -1)
+                                && structure.atoms[neigh].element.as_str() == n2_element
+                            {
+                                found += 1;
+                                found_pos = Some(other_position);
+                            }
+                        }
+                    }
+                    let mut do_not_fix = false;
+                    for (other_position, &(neigh, _)) in neighbors[center].iter().enumerate() {
+                        if other_position != position
+                            && structure.atoms[neigh].element.as_str() == n2_element
+                            && ring_system[neigh] == ring_system[n2]
+                        {
+                            do_not_fix = true;
+                        }
+                    }
+                    if do_not_fix {
+                        // nothing
+                    } else if found == 1 {
+                        let skip = [position, found_pos.expect("found")];
+                        if let Some((remaining, _)) = neighbors[center]
+                            .iter()
+                            .enumerate()
+                            .find(|&(p, _)| !skip.contains(&p))
+                        {
+                            let (other, _) = neighbors[center][remaining];
+                            mark(center, other);
+                        }
+                    } else if found == 0 {
+                        let (n2, _) = neighbors[center][position];
+                        mark(center, n2);
+                    }
+                }
+            } else if num_double == num_double_terminal_o
+                && num_double_terminal_o == 2
+                && num_oh + num_om + num_x == 2
+                && num_other == 0
+            {
+                // S(VI)/S(VIII): the sulfate/sulfone single bonds to
+                // non-terminal neighbors fix.
+                for &position in &om_positions {
+                    let (other, _) = neighbors[center][position];
+                    mark(center, other);
+                }
+            }
+        }
+    }
+    forbidden
+}
+
 /// The reference's SetForbiddenEdges under BNS_PROTECT_FROM_TAUT: a
 /// carbonyl carbon carrying two valence-1 oxygens whose bond orders
 /// sum to 3 (the acetyl pattern) or a nitro-style nitrogen carrying
@@ -407,7 +675,15 @@ impl<'a> Context<'a> {
             bond_sum2[to] += order2;
         }
         let rings = ring_systems(structure);
-        let forbidden = forbidden_edges(structure, &neighbors, &bond_index);
+        let mut forbidden = forbidden_edges(structure, &neighbors, &bond_index);
+        forbidden.extend(fix_special_bonds(
+            structure,
+            hydrogens,
+            &neighbors,
+            &bond_index,
+            &bond_sum2,
+            &rings.system,
+        ));
         let mut ride_marks = vec![0u8; structure.bonds.len()];
         for (index, &mark) in structure.ride_marks.iter().enumerate() {
             if index < ride_marks.len() {
@@ -2127,7 +2403,7 @@ impl Gate {
 }
 
 /// The scan's running populations.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 struct Counts {
     oxygen: u32,
     nitrogen: u32,
@@ -2157,6 +2433,10 @@ struct AnchorSpec {
     /// PT_16_00's filter: another scan endpoint sharing the seed's
     /// element is skipped (ichitaut.c 4805–4806).
     exclude_seed_element: bool,
+    /// PT_06_00's filter: another scan endpoint that is a CARBON
+    /// while the seed is also a carbon is skipped
+    /// (ichitaut.c 4968–4970).
+    exclude_seed_carbon: bool,
     /// PT_18_00's skip: a real double bond onto a valence-3 endpoint
     /// with no mobile units never counts (ichitaut.c 5493–5494).
     pt18_double_skip: bool,
@@ -2254,6 +2534,13 @@ fn anchor_round(context: &Context, state: &mut Registration, spec: &AnchorSpec) 
                 {
                     continue;
                 }
+                if spec.exclude_seed_carbon
+                    && endpoint != seed
+                    && context.structure.atoms[endpoint].element == "C"
+                    && context.structure.atoms[seed].element == "C"
+                {
+                    continue;
+                }
                 if spec.pt18_double_skip
                     && bond == BondType::Double
                     && info.valence == 3
@@ -2311,6 +2598,12 @@ fn anchor_round(context: &Context, state: &mut Registration, spec: &AnchorSpec) 
             if !spec.gate.allows(&admitted, &all_neighbors) {
                 continue;
             }
+            if std::env::var_os("INCHI_TRACE_BNS").is_some() {
+                eprintln!(
+                    "ANCHOR {:?} seed={seed} seedinfo={seed_info:?} cp={centerpoint} ends={ends:?} donors={donors} acc={acceptors} adm={admitted:?}",
+                    spec.predicate
+                );
+            }
             let partitioned = find_accessible_end_points(context, state, &ends, spec.predicate);
             changed |= register_partition(context, state, centerpoint, &partitioned);
         }
@@ -2350,6 +2643,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 centerpoint_neutral: false,
                 ket_normal_carbon: false,
                 exclude_seed_element: false,
+                exclude_seed_carbon: false,
                 pt18_double_skip: false,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: false,
@@ -2370,6 +2664,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 centerpoint_neutral: true,
                 ket_normal_carbon: false,
                 exclude_seed_element: true,
+                exclude_seed_carbon: false,
                 pt18_double_skip: false,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: false,
@@ -2390,6 +2685,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 centerpoint_neutral: false,
                 ket_normal_carbon: false,
                 exclude_seed_element: false,
+                exclude_seed_carbon: true,
                 pt18_double_skip: false,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: false,
@@ -2410,6 +2706,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 centerpoint_neutral: false,
                 ket_normal_carbon: false,
                 exclude_seed_element: false,
+                exclude_seed_carbon: false,
                 pt18_double_skip: false,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: false,
@@ -2433,6 +2730,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 centerpoint_neutral: false,
                 ket_normal_carbon: false,
                 exclude_seed_element: false,
+                exclude_seed_carbon: false,
                 pt18_double_skip: false,
                 scan: ScanStyle::Mobile {
                     alt_acceptor_by_neutral: true,
@@ -2457,6 +2755,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 centerpoint_neutral: false,
                 ket_normal_carbon: false,
                 exclude_seed_element: false,
+                exclude_seed_carbon: false,
                 pt18_double_skip: true,
                 scan: ScanStyle::Mobile {
                     alt_acceptor_by_neutral: false,
@@ -2481,6 +2780,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 centerpoint_neutral: false,
                 ket_normal_carbon: true,
                 exclude_seed_element: false,
+                exclude_seed_carbon: false,
                 pt18_double_skip: false,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: true,
