@@ -834,3 +834,74 @@ fn the_recmet_output_equals_the_oracle_recording() {
          no recording {without_recording}"
     );
 }
+
+/// The experimental tautomerism gate: the corpus's tautomer-extremes
+/// tranche records every hand-built tautomer-rich fixture under each
+/// flag combination (ket, t15, ket15t, pt22, pt16, pt06, pt39, pt13,
+/// pt18); the engine under the matching options must equal each
+/// recording byte-for-byte. The tranche file is optional — a corpus
+/// without it skips (no triage interplay: these recordings are all
+/// flag-path outputs the standard pipeline never produces).
+#[test]
+fn the_tautomer_extremes_match_the_oracle() {
+    let dir = suite_dir();
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/tautomer-extremes.json")) else {
+        return;
+    };
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(&text).expect("valid tautomer-extremes fixtures");
+    assert!(
+        !cases.is_empty(),
+        "the tautomer-extremes file carries no fixtures"
+    );
+
+    /// One flag mode: the recording key and the option builder.
+    type FlagMode = (&'static str, fn(chemomer::Options) -> chemomer::Options);
+
+    const MODES: [FlagMode; 9] = [
+        ("ket", |options| options.with_ket()),
+        ("t15", |options| options.with_15t()),
+        ("ket15t", |options| options.with_ket().with_15t()),
+        ("pt22", |options| options.with_pt_22_00()),
+        ("pt16", |options| options.with_pt_16_00()),
+        ("pt06", |options| options.with_pt_06_00()),
+        ("pt39", |options| options.with_pt_39_00()),
+        ("pt13", |options| options.with_pt_13_00()),
+        ("pt18", |options| options.with_pt_18_00()),
+    ];
+
+    let mut checked = 0usize;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let molfile = case["molfile"].as_str().expect("molfile");
+        for (mode, flag) in MODES {
+            let recorded = case[mode]["inchi"].as_str().expect("mode inchi recording");
+            let options = flag(chemomer::Options::default());
+            match chemomer::Engine::with_options(molfile, options)
+                .and_then(|engine| engine.inchi_string())
+            {
+                Ok(assembled) => {
+                    checked += 1;
+                    if assembled != recorded {
+                        failures.push(format!(
+                            "{id} [{mode}]: assembled {assembled:?} != oracle {recorded:?}"
+                        ));
+                    }
+                }
+                Err(error) => failures.push(format!("{id} [{mode}]: {error}")),
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} tautomer-extremes mismatch(es):\n{}\n(mode checks: {checked}, fixtures: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "tautomer-extremes gate: {checked} mode checks over {} fixtures",
+        cases.len()
+    );
+}
