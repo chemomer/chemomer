@@ -31,6 +31,7 @@ pub mod key;
 pub mod layers;
 mod molfile;
 pub mod options;
+pub mod reverse;
 pub mod rinchi;
 
 pub use engine::Engine;
@@ -52,6 +53,10 @@ pub fn parse_molfile(input: &str) -> Result<Structure> {
 /// [`parse_molfile`]/[`Engine::from_molfile`].
 pub fn parse_sdf(input: &str) -> Vec<String> {
     molfile::parse_sdf(input)
+/// Reconstructs a [`Structure`] from a standard InChI string — the
+/// reverse direction (see [`reverse::structure_from_inchi`]).
+pub fn structure_from_inchi(inchi: &str) -> Result<Structure> {
+    reverse::structure_from_inchi(inchi)
 }
 
 /// Parses an MDL V2000 RXNfile into a [`RinchiReaction`] — the
