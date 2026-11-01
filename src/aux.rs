@@ -8,6 +8,7 @@
 //! hydrogens and all (the reference's `WriteOrigAtoms` /
 //! `WriteOrigBonds` / `WriteOrigCoord`, ichiprt1.c).
 
+use crate::canonical::fixedh::FixedH;
 use crate::error::Result;
 use crate::graph::Structure;
 use crate::layers::hydrogen::canonical_ranks_for;
@@ -20,12 +21,17 @@ use crate::options::Options;
 /// standardization moved — the `/p` layer's pinned-path value. The
 /// options ride along: `SNon` clears the inverted-stereo block (the
 /// oracle's SNon recordings drop `/it:` while keeping the
-/// stereo-informed numbering).
+/// stereo-informed numbering). The Fixed-H analysis (`fixed`) appends
+/// the `/F:` repetition block when the identifier's /f carried
+/// non-isotopic content (`fixed_block`) — ichiprt1.c's aux second
+/// pass over the TAUT_NON INChI with AL_FIXH tags.
 pub fn aux_info(
     original: &Structure,
     working: &Structure,
     proton_shift: i32,
     options: &Options,
+    fixed: Option<&FixedH>,
+    fixed_block: bool,
 ) -> Result<String> {
     standardization::ensure_typable_charges(working)?;
     let counts = standardization::adjusted_hydrogens(working);
@@ -77,29 +83,16 @@ pub fn aux_info(
     if let Some(verdict) =
         crate::canonical::stereo::informed_verdict(working, &counts, &ranks, tautomeric)
     {
-        ranks_aux = verdict.ranks;
-        symmetry = verdict.symmetry;
         // SNon withholds the stereo layers and the inverted-stereo
         // fields alike (ichiparm.c:248–253): the block never prints
         // under that mode.
-        if verdict.sign != 0 && !options.no_stereo {
-            // The inverted-stereo block: the marker `im` ("main =
-            // Inv(main)") when the inverted layer is the pairwise
-            // parity-flip of the main over the same centers; the
-            // single-component corpus never prints the list form.
-            let flip_pairs = verdict.main_pairs.len() == verdict.inv_pairs.len()
-                && verdict
-                    .main_pairs
-                    .iter()
-                    .zip(&verdict.inv_pairs)
-                    .all(|(main, inv)| {
-                        main.0 == inv.0
-                            && (main.1 + inv.1 == 3
-                                || (!matches!(main.1, 1 | 2) && main.1 == inv.1))
-                    });
-            if flip_pairs {
-                inverted_block = "/it:im".to_string();
-            }
+        let marker = verdict.sign != 0
+            && !options.no_stereo
+            && crate::canonical::stereo::inverted_marker(&verdict);
+        ranks_aux = verdict.ranks;
+        symmetry = verdict.symmetry;
+        if marker {
+            inverted_block = "/it:im".to_string();
         }
     } else if tautomeric {
         let mask = crate::canonical::tautomer::endpoint_mask(working, &counts);
@@ -138,6 +131,7 @@ pub fn aux_info(
         .iter()
         .map(|&atom| (original_index[atom] + 1).to_string())
         .collect();
+    let main_numbering = numbering.clone();
     out.push_str(&numbering.join(","));
 
     // `/E:` — the constitutional equivalence classes: members by
@@ -156,6 +150,7 @@ pub fn aux_info(
         })
         .collect();
     equivalents.sort();
+    let equivalents_main = equivalents.clone();
     if !equivalents.is_empty() {
         out.push_str("/E:");
         let text: Vec<String> = equivalents
@@ -242,6 +237,68 @@ pub fn aux_info(
             .any(|(carrier, _)| working.atoms[*carrier].element == "C");
     if fixed_isotopes && out.contains("/E:") {
         out.push_str("/I:/E:m");
+    }
+
+    // The `/F:` block — the fixed-H representation's numbering,
+    // equivalence and inverted-stereo marker, each an `m` repetition
+    // mark when it repeats the main block (ichiprt1.c's aux second
+    // pass; prints only when the identifier's /f carried non-isotopic
+    // content — the corpus's FI-only /f (d2o) has no /F: block).
+    if let (Some(fixed), true) = (fixed, fixed_block) {
+        let mut block = String::from("/F:");
+        let mut order: Vec<usize> = (0..working.atoms.len()).collect();
+        order.sort_by_key(|&atom| fixed.ranks[atom]);
+        let fixed_numbering: Vec<String> = order
+            .iter()
+            .map(|&atom| (original_index[atom] + 1).to_string())
+            .collect();
+        if fixed_numbering == main_numbering {
+            block.push('m');
+        } else {
+            block.push_str(&fixed_numbering.join(","));
+        }
+        // /E: — the fixed representation's equivalence classes from
+        // its own symmetry: `m` when they repeat the main list, the
+        // list when they differ, nothing when all classes are
+        // singletons (aspirin's split carboxyl oxygens).
+        let mut classes: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
+        for (atom, class) in fixed.symmetry.iter().enumerate() {
+            classes.entry(*class).or_default().push(fixed.ranks[atom]);
+        }
+        let mut equivalents: Vec<Vec<u32>> = classes
+            .into_values()
+            .filter(|members| members.len() > 1)
+            .map(|mut members| {
+                members.sort_unstable();
+                members
+            })
+            .collect();
+        equivalents.sort();
+        if !equivalents.is_empty() {
+            if equivalents == equivalents_main {
+                block.push_str("/E:m");
+            } else {
+                block.push_str("/E:");
+                let text: Vec<String> = equivalents
+                    .iter()
+                    .map(|members| {
+                        format!(
+                            "({})",
+                            members
+                                .iter()
+                                .map(|m| m.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    })
+                    .collect();
+                block.push_str(&text.join(""));
+            }
+        }
+        if fixed.inverted {
+            block.push_str("/it:m");
+        }
+        out.push_str(&block);
     }
 
     // `/CRV:` — normalized charges and unusual valences, ascending
@@ -533,7 +590,7 @@ mod tests {
         let original = crate::molfile::parse(WATER_MOL).expect("parses");
         let mut working = original.clone();
         working.fold_explicit_hydrogens();
-        let aux = aux_info(&original, &working, 0, &Options::default()).expect("aux");
+        let aux = aux_info(&original, &working, 0, &Options::default(), None, false).expect("aux");
         assert_eq!(aux, "AuxInfo=1/0/N:1/rA:1nO/rB:/rC:12,12,0;");
     }
 
@@ -577,7 +634,7 @@ mod tests {
         };
         working.fold_explicit_hydrogens();
         let original = working.clone();
-        let aux = aux_info(&original, &working, 0, &Options::default()).expect("aux");
+        let aux = aux_info(&original, &working, 0, &Options::default(), None, false).expect("aux");
         assert!(aux.starts_with("AuxInfo=1/1/N:"), "{aux}");
         assert!(aux.contains("/CRV:"), "{aux}");
         assert!(aux.contains("(3,4)"), "{aux}");

@@ -32,10 +32,10 @@ use super::table::ConnectionTable;
 /// sorts after every hydrogen-bearing atom — the opposite of comparing
 /// raw counts, and the reason the canonical numbering drives the
 /// unsaturation last.
-const BASE_H_NUMBER: u32 = 16_383;
-const EMPTY_H_NUMBER: u32 = 32_766;
+pub(crate) const BASE_H_NUMBER: u32 = 16_383;
+pub(crate) const EMPTY_H_NUMBER: u32 = 32_766;
 
-fn encoded_hydrogen(hydrogens: u32) -> u32 {
+pub(crate) fn encoded_hydrogen(hydrogens: u32) -> u32 {
     if hydrogens == 0 {
         EMPTY_H_NUMBER
     } else {
@@ -608,18 +608,18 @@ pub fn canonical_table(
 
 /// Disjoint sets over atoms, merged by position-wise mappings of
 /// automorphic terminal labelings.
-struct Orbits {
+pub(crate) struct Orbits {
     parent: Vec<usize>,
 }
 
 impl Orbits {
-    fn new(n: usize) -> Orbits {
+    pub(crate) fn new(n: usize) -> Orbits {
         Orbits {
             parent: (0..n).collect(),
         }
     }
 
-    fn representative(&self, atom: usize) -> usize {
+    pub(crate) fn representative(&self, atom: usize) -> usize {
         let mut root = atom;
         while self.parent[root] != root {
             root = self.parent[root];
@@ -627,7 +627,7 @@ impl Orbits {
         root
     }
 
-    fn union(&mut self, a: usize, b: usize) {
+    pub(crate) fn union(&mut self, a: usize, b: usize) {
         let (ra, rb) = (self.representative(a), self.representative(b));
         if ra != rb {
             self.parent[rb] = ra;

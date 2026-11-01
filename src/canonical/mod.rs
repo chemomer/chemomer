@@ -18,6 +18,7 @@ pub mod blossom;
 pub(crate) mod bns;
 pub mod bond_stereo;
 pub mod emit;
+pub mod fixedh;
 mod invariants;
 mod partition;
 pub mod protons;

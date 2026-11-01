@@ -403,6 +403,23 @@ pub(crate) fn informed_verdict(
     })
 }
 
+/// The inverted-stereo marker test — the aux's `/it:im` condition
+/// (aux.rs's flip-pairs check, hoisted so the engine's FixedH /F:
+/// marker reads the same verdict): the inverted layer is the pairwise
+/// parity-flip of the main over the same centers. The single-component
+/// corpus never prints the list form.
+pub(crate) fn inverted_marker(verdict: &StereoVerdict) -> bool {
+    verdict.main_pairs.len() == verdict.inv_pairs.len()
+        && verdict
+            .main_pairs
+            .iter()
+            .zip(&verdict.inv_pairs)
+            .all(|(main, inv)| {
+                main.0 == inv.0
+                    && (main.1 + inv.1 == 3 || (!matches!(main.1, 1 | 2) && main.1 == inv.1))
+            })
+}
+
 /// One terminal's stereo rows over `ranks`: per center (ascending
 /// canonical number) the center's rank, the parity number (1 = odd,
 /// 2 = even — the geometry bit composed with the ligand permutation

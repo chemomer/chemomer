@@ -6,6 +6,7 @@
 
 pub mod charge;
 pub mod connection;
+pub mod fixedh;
 pub mod formula;
 pub mod hydrogen;
 pub mod isotope;
@@ -63,12 +64,14 @@ pub trait LayerEmitter {
 /// change the (DE)PROTONATION normalization applied (see
 /// [`crate::canonical::protons`]); `options` ride into the layers
 /// that consult them at emit (the stereo layers, per
-/// [`crate::options::Options`]).
+/// [`crate::options::Options`]); the Fixed-H analysis (present under
+/// `options.fixed_h`) feeds the full-InChI `/f` layer.
 pub fn default_layers(
     options: &crate::options::Options,
     proton_shift: i32,
+    fixed_h: Option<crate::canonical::fixedh::FixedH>,
 ) -> Vec<Box<dyn LayerEmitter>> {
-    vec![
+    let mut layers: Vec<Box<dyn LayerEmitter>> = vec![
         Box::new(formula::FormulaLayer),
         Box::new(connection::ConnectionLayer),
         Box::new(hydrogen::HydrogenLayer),
@@ -79,5 +82,9 @@ pub fn default_layers(
         Box::new(stereo::MLayer::with_options(options.clone())),
         Box::new(stereo::SLayer::with_options(options.clone())),
         Box::new(isotope::IsotopeLayer),
-    ]
+    ];
+    if let Some(fixed) = fixed_h {
+        layers.push(Box::new(fixedh::FixedHLayer::new(fixed, options.clone())));
+    }
+    layers
 }
