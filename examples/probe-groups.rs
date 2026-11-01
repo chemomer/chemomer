@@ -37,8 +37,8 @@ fn main() {
     let groups = chemomer::canonical::tautomer::mobile_groups(s, &counts, &ranks);
     for (atom, record) in s.atoms.iter().enumerate() {
         println!(
-            "atom {atom} {} H={} charge={}",
-            record.element, counts[atom], record.charge
+            "atom {atom} {} H={} charge={} rank={}",
+            record.element, counts[atom], record.charge, ranks[atom]
         );
     }
     for group in &groups {
