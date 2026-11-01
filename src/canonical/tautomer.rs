@@ -2449,6 +2449,12 @@ struct AnchorSpec {
     /// PT_18_00's skip: a real double bond onto a valence-3 endpoint
     /// with no mobile units never counts (ichitaut.c 5493–5494).
     pt18_double_skip: bool,
+    /// The possible-mobile clause: the Standard family counts a
+    /// registered endpoint as possibly mobile
+    /// (`nMobile>0 || at[endpoint].endpoint`); the PT_13_00/PT_18_00
+    /// blocks count bare mobile units only (`nMobile>0`,
+    /// ichitaut.c 5349, 5538).
+    mobile_gate_registered: bool,
     scan: ScanStyle,
     gate: Gate,
 }
@@ -2595,7 +2601,8 @@ fn anchor_round(context: &Context, state: &mut Registration, spec: &AnchorSpec) 
                 }
                 donors += donor_side as u32;
                 acceptors += acceptor_side as u32;
-                possible_mobile += (info.mobile > 0 || registered) as u32;
+                possible_mobile +=
+                    (info.mobile > 0 || (spec.mobile_gate_registered && registered)) as u32;
                 admitted.valence2 += (info.valence == 2) as u32;
                 admitted.valence3 += (info.valence == 3) as u32;
                 admitted.valence4 += (info.valence == 4) as u32;
@@ -2654,6 +2661,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 exclude_seed_element: false,
                 exclude_seed_carbon: false,
                 pt18_double_skip: false,
+                mobile_gate_registered: true,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: false,
                 },
@@ -2675,6 +2683,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 exclude_seed_element: true,
                 exclude_seed_carbon: false,
                 pt18_double_skip: false,
+                mobile_gate_registered: true,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: false,
                 },
@@ -2696,6 +2705,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 exclude_seed_element: false,
                 exclude_seed_carbon: true,
                 pt18_double_skip: false,
+                mobile_gate_registered: true,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: false,
                 },
@@ -2717,6 +2727,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 exclude_seed_element: false,
                 exclude_seed_carbon: false,
                 pt18_double_skip: false,
+                mobile_gate_registered: true,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: false,
                 },
@@ -2741,6 +2752,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 exclude_seed_element: false,
                 exclude_seed_carbon: false,
                 pt18_double_skip: false,
+                mobile_gate_registered: false,
                 scan: ScanStyle::Mobile {
                     alt_acceptor_by_neutral: true,
                 },
@@ -2766,6 +2778,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 exclude_seed_element: false,
                 exclude_seed_carbon: false,
                 pt18_double_skip: true,
+                mobile_gate_registered: false,
                 scan: ScanStyle::Mobile {
                     alt_acceptor_by_neutral: false,
                 },
@@ -2791,6 +2804,7 @@ fn flag_round(context: &Context, state: &mut Registration) -> bool {
                 exclude_seed_element: false,
                 exclude_seed_carbon: false,
                 pt18_double_skip: false,
+                mobile_gate_registered: true,
                 scan: ScanStyle::Standard {
                     seed_verdict_alt: true,
                 },
