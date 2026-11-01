@@ -1122,9 +1122,10 @@ fn fresh_state(n: usize) -> Registration {
 
 /// Builds the endpoint linkage: the templates run as registration
 /// rounds — anchors, then the shift walks — each registering groups
-/// and re-marking bonds, to a fixpoint. The returned adjacency joins
-/// every pair of co-members.
-fn build_links(context: &Context) -> Vec<BTreeSet<usize>> {
+/// and re-marking bonds, to a fixpoint. Returns the co-member
+/// adjacency and the settled registration state (the group walk
+/// seeds from it).
+fn build_links(context: &Context) -> (Vec<BTreeSet<usize>>, Registration) {
     let n = context.structure.atoms.len();
     let mut state = Registration {
         group_of: vec![None; n],
@@ -1206,7 +1207,7 @@ fn build_links(context: &Context) -> Vec<BTreeSet<usize>> {
             }
         }
     }
-    linked
+    (linked, state)
 }
 
 /// The reference's GetChargeType + bCanBeACPoint: (type, subtype)
@@ -3474,11 +3475,21 @@ fn components(
     charge_units: &impl Fn(usize) -> u32,
 ) -> Vec<Vec<usize>> {
     let n = context.structure.atoms.len();
-    let linked = build_links(context);
+    let (linked, links_state) = build_links(context);
     let mut component = vec![usize::MAX; n];
     let mut groups = Vec::new();
+    // The seeding: base-predicate endpoints — plus, under the
+    // experimental flags, every REGISTERED atom of the settled
+    // registration state. The flag passes enroll carbons the base
+    // predicate refuses (the keto-enol -CH<, the PT-scanned imine
+    // carbons); the reference's t-groups speak whatever registered,
+    // so the group walk must seed them. The default pipeline (no
+    // flags) keeps today's base-only seeding.
+    let ext = context.structure.taut_ext.any();
     for start in 0..n {
-        if context.endpoint(state, start).is_none() || component[start] != usize::MAX {
+        if (context.endpoint(state, start).is_none() && !(ext && links_state.registered(start)))
+            || component[start] != usize::MAX
+        {
             continue;
         }
         let mut members = Vec::new();

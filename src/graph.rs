@@ -94,6 +94,23 @@ pub struct TautExt {
     pub pt_18_00: bool,
 }
 
+impl TautExt {
+    /// Whether any experimental pass is on — the perception's
+    /// default-shaped behaviors (endpoint seeding by the base
+    /// predicate) stay exact only while this reads false.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.keto_enol
+            || self.t15
+            || self.pt_22_00
+            || self.pt_16_00
+            || self.pt_06_00
+            || self.pt_39_00
+            || self.pt_13_00
+            || self.pt_18_00
+    }
+}
+
 impl Structure {
     /// The disconnected fragments as independent structures, in
     /// first-appearance order. Each fragment's `fold_source` carries
