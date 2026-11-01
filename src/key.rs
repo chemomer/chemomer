@@ -105,8 +105,10 @@ fn proton_flag(proton: Option<&str>) -> String {
 
 /// The `index`-th base-26 triplet of the digest: 14 bits of the digest
 /// bit stream (bytes in order, bits LSB-first within a byte) against
-/// the triplet table that skips the E** and TAA..TTV entries.
-fn triplet(digest: &[u8; 32], index: usize) -> String {
+/// the triplet table that skips the E** and TAA..TTV entries. Shared
+/// with the RInChI key shapes (rinchi_hashing.cpp uses the same
+/// tables).
+pub(crate) fn triplet(digest: &[u8; 32], index: usize) -> String {
     let mut value: usize = 0;
     for bit in 0..14 {
         let position = index + bit;
@@ -119,8 +121,9 @@ fn triplet(digest: &[u8; 32], index: usize) -> String {
     table_entry(value)
 }
 
-/// The `index`-th base-26 dublet: 9 bits (512 entries).
-fn dublet(digest: &[u8; 32], index: usize) -> String {
+/// The `index`-th base-26 dublet: 9 bits (512 entries). Shared with
+/// the RInChI key shapes.
+pub(crate) fn dublet(digest: &[u8; 32], index: usize) -> String {
     let mut value: usize = 0;
     for bit in 0..9 {
         let position = index + bit;
@@ -164,8 +167,8 @@ pub fn table_entry(value: usize) -> String {
 }
 
 /// SHA-256 (FIPS 180-4) — dependency-free, the crate carries no
-/// runtime dependencies.
-fn sha256(message: &[u8]) -> [u8; 32] {
+/// runtime dependencies. Shared with the RInChI key shapes.
+pub(crate) fn sha256(message: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
