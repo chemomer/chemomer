@@ -40,10 +40,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Skip until credentials exist
+        # CI stays green before the publish credentials are configured:
+        # the workflow is a no-op until both secrets exist, then takes
+        # over automatically.
+        id: credentials
+        run: |
+          if [ -n "${{ secrets.CHEMOMER_CI_PAT_TOKEN }}" ] && [ -n "${{ secrets.CARGO_REGISTRY_TOKEN }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Release credentials not configured — skipping (add CHEMOMER_CI_PAT_TOKEN and CARGO_REGISTRY_TOKEN)."
+          fi
+
       - name: Install Rust toolchain
+        if: steps.credentials.outputs.ready == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz
+        if: steps.credentials.outputs.ready == 'true'
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release
