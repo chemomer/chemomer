@@ -37,7 +37,10 @@ pub use engine::Engine;
 pub use error::{Error, Result};
 pub use graph::{AtomRecord, Structure};
 pub use options::Options;
-pub use rinchi::{parse_rxn, RinchiComponent, RinchiReaction};
+pub use rinchi::{
+    parse_rxn, reaction_from_rinchi, reaction_from_rinchi_with_auxinfo, RinchiComponent,
+    RinchiReaction,
+};
 
 /// Parses the V2000 molfile subset into a [`Structure`].
 pub fn parse_molfile(input: &str) -> Result<Structure> {
