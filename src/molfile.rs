@@ -491,10 +491,7 @@ fn apply_alias_lines(
             continue;
         }
         let index: usize = line[3..].trim().parse().map_err(|_| bad(line))?;
-        let symbol = lines
-            .get(position + 1)
-            .ok_or_else(|| bad(line))?
-            .trim();
+        let symbol = lines.get(position + 1).ok_or_else(|| bad(line))?.trim();
         let atom = atoms.get_mut(index - 1).ok_or_else(|| bad(line))?;
         let bytes = symbol.as_bytes();
         let mut end = 1;

@@ -1071,7 +1071,6 @@ fn the_reverse_reconstruction_matches_the_oracle() {
                     pass += 1;
                 }
             },
->>>>>>> e3d5f2a (Gate the reverse reconstruction against the oracle's own output)
         }
     }
 

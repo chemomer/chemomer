@@ -1101,6 +1101,7 @@ fn reconstruct(layers: Layers) -> Result<Structure> {
         isotopic_h,
         protons_hard_moved: false,
         ride_marks: Vec::new(),
+        taut_ext: Default::default(),
         fold_source: Vec::new(),
         chiral_flag: false,
     })
