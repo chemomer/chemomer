@@ -1160,3 +1160,68 @@ fn the_large_molecules_match_the_oracle() {
     let dir = suite_dir();
     check_identity_tranche(&dir, "large-molecules.json", "large-molecules");
 }
+
+/// The SDfile batch gate: the corpus's sdf-batch tranche records SDFs
+/// verbatim with the oracle's per-record identifiers, in record order.
+/// `parse_sdf` splits the records on the $$$$ terminator lines and each
+/// record pipes through `Engine::from_molfile` standing alone — the
+/// engine-side piece of a batch read.
+#[test]
+fn the_sdf_batch_matches_the_oracle() {
+    let dir = suite_dir();
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/sdf-batch.json")) else {
+        return;
+    };
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(&text).expect("valid sdf-batch fixtures");
+    assert!(!cases.is_empty(), "the sdf-batch file carries no fixtures");
+
+    let mut pass = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let sdf = case["sdf"].as_str().expect("sdf");
+        let recorded: Vec<&str> = case["inchis"]
+            .as_array()
+            .expect("inchis")
+            .iter()
+            .map(|value| value.as_str().expect("inchi"))
+            .collect();
+        let records = chemomer::parse_sdf(sdf);
+        if records.len() != recorded.len() {
+            failures.push(format!(
+                "{id}: parse_sdf split {} record(s), oracle recorded {}",
+                records.len(),
+                recorded.len()
+            ));
+            continue;
+        }
+        let mut ok = true;
+        for (index, (record, recorded_inchi)) in records.iter().zip(&recorded).enumerate() {
+            match chemomer::Engine::from_molfile(record).and_then(|engine| engine.inchi_string()) {
+                Ok(assembled) if assembled == *recorded_inchi => {}
+                Ok(assembled) => {
+                    ok = false;
+                    failures.push(format!(
+                        "{id}: record {index} assembled {assembled:?} != oracle {recorded_inchi:?}"
+                    ));
+                }
+                Err(error) => {
+                    ok = false;
+                    failures.push(format!("{id}: record {index} errored: {error}"));
+                }
+            }
+        }
+        if ok {
+            pass += 1;
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} sdf-batch mismatch(es):\n{}\n(sdf-batch pass: {pass}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!("sdf-batch gate: pass {pass}, total {}", cases.len());
+}
