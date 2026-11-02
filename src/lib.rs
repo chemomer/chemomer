@@ -47,6 +47,13 @@ pub fn parse_molfile(input: &str) -> Result<Structure> {
     molfile::parse(input)
 }
 
+/// Splits an SDfile into its records' verbatim molfile texts, on the
+/// `$$$$` terminator lines — the batch reader over
+/// [`parse_molfile`]/[`Engine::from_molfile`].
+pub fn parse_sdf(input: &str) -> Vec<String> {
+    molfile::parse_sdf(input)
+}
+
 /// Parses an MDL V2000 RXNfile into a [`RinchiReaction`] — the
 /// reaction-identity layer's input edge.
 pub fn parse_rxnfile(input: &str) -> Result<RinchiReaction> {
