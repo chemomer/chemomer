@@ -608,8 +608,8 @@ mod tests {
         let sdf = format!("{WATER}$$$$\n{WATER}$$$$\n");
         let records = parse_sdf(&sdf);
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0], format!("{WATER}"));
-        assert_eq!(records[1], format!("{WATER}"));
+        assert_eq!(records[0], WATER.to_string());
+        assert_eq!(records[1], WATER.to_string());
     }
 
     #[test]
