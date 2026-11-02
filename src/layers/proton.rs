@@ -72,6 +72,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -93,6 +94,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -121,6 +123,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
     }
@@ -148,6 +151,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
 
@@ -168,6 +172,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
     }
@@ -192,6 +197,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -214,6 +220,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -242,6 +249,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         let hydrogens = s.hydrogens();
         assert_eq!(hydrogens[2], 0);

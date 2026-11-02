@@ -1596,6 +1596,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         }
     }
 

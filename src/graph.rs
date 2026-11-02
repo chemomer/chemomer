@@ -28,6 +28,12 @@ pub struct Structure {
     /// V2000 bond types: 1 single, 2 double, 3 triple, 4 aromatic
     /// (aromatic counts as 1.5 in valence sums).
     pub bonds: Vec<(usize, usize, u32)>,
+    /// The polymer repeat-unit data the reader collected (V2000
+    /// `M  STY`/`SST`/`SCN`/`SAL`/`SBL`/`SMT`/`SDI` property lines;
+    /// V3000 SGROUP blocks are discarded by the reference reader and
+    /// never get here). `None` for every non-polymer input — the
+    /// field costs nothing then.
+    pub polymer: Option<Polymer>,
     /// The experimental tautomerism extensions the engine runs under
     /// (the reference's TG_FLAG_KETO_ENOL_TAUT / TG_FLAG_1_5_TAUT /
     /// TG_FLAG_PT_* taut flags, stamped from the generation options).
@@ -109,6 +115,41 @@ impl TautExt {
             || self.pt_13_00
             || self.pt_18_00
     }
+}
+
+/// One polymer repeat unit (the reference's OAD_PolymerUnit as read
+/// from the V2000 Sgroup property lines, mol_fmt1.c 1451–1900).
+/// Atom and bond references are 0-based structure indices.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PolymerUnit {
+    /// The Sgroup number as written (`M  STY` first field).
+    pub id: usize,
+    /// `M  STY` type: SRU=1, MON=2, COP=3, MOD=4, CRO=5, MER=6;
+    /// anything else reads 0 (the reference's MOL_FMT_M_STY_NON).
+    pub unit_type: u8,
+    /// `M  SST` subtype: unset=0, ALT=1, RAN=2, BLK=3.
+    pub subtype: u8,
+    /// `M  SCN` connection pattern: unset=0, HT=1, HH=2, EU=3.
+    pub conn: u8,
+    /// `M  SMT` subscript; empty when the line is absent (the aux
+    /// /Z: echo renders "n" for the empty label).
+    pub smt: String,
+    /// `M  SAL` atoms of the unit, 0-based, in the written order.
+    pub alist: Vec<usize>,
+    /// `M  SBL` crossing bonds, 0-based bond indices, in the written
+    /// order (pairs: bond 2k and 2k+1 are the unit's two caps).
+    pub blist: Vec<usize>,
+    /// `M  SDI` bracket coordinates — first line into `xbr1`, second
+    /// into `xbr2`; the aux /Z: echo prints them when present.
+    pub xbr1: Option<[f64; 4]>,
+    pub xbr2: Option<[f64; 4]>,
+}
+
+/// The polymer data of a structure: the units as read, in Sgroup
+/// declaration order (the reference's OAD_Polymer).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Polymer {
+    pub units: Vec<PolymerUnit>,
 }
 
 impl Structure {
@@ -201,6 +242,7 @@ impl Structure {
                 taut_ext: self.taut_ext,
                 chiral_flag: self.chiral_flag,
                 fold_source: members.iter().map(|&a| source(a)).collect(),
+                polymer: None,
             });
         }
         fragments

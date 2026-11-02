@@ -117,7 +117,11 @@ fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
         let y: f64 = line.get(10..20).unwrap_or("").trim().parse().unwrap_or(0.0);
         positions.push((x, y));
         atoms.push(AtomRecord {
-            element,
+            // The MDL star atom reads as the pseudo-element Zz at
+            // parse (mol_fmt1.c MolfileTreatPseudoElementAtoms:
+            // `*` ===> "Zz" when pseudo-elements are allowed); the
+            // engine's option gate decides permission.
+            element: if element == "*" { "Zz".to_string() } else { element },
             // The H-count code field is NEVER read by the release
             // engine: mol_fmt1.c walks it only under MOL_FMT_QUERY,
             // and mol_fmt.h:79 sets MOL_FMT_QUERY = MOL_FMT_ABSENT —
@@ -167,6 +171,7 @@ fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
     let property_tail = &lines[4 + atom_count + bond_count..];
     let isotopic_h = apply_alias_lines(property_tail, &mut atoms)?;
     apply_property_lines(property_tail, &mut atoms)?;
+    let polymer = parse_sgroup_lines(property_tail, atom_count, bond_count)?;
 
     Ok(Structure {
         atoms,
@@ -179,6 +184,7 @@ fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
         taut_ext: Default::default(),
         fold_source: Vec::new(),
         chiral_flag: chiral_flag != 0,
+        polymer,
     })
 }
 
@@ -288,6 +294,7 @@ fn parse_v3000(lines: &[&str]) -> Result<Structure> {
         taut_ext: Default::default(),
         fold_source: Vec::new(),
         chiral_flag: chiral_flag != 0,
+        polymer: None,
     })
 }
 
@@ -306,8 +313,13 @@ fn parse_v3000_atom(line: &str) -> Result<(usize, AtomRecord, (f64, f64))> {
 
     let mut atom = AtomRecord {
         // Two-letter symbols arrive case-normalized (mol_fmt3.c:1054-1057
-        // lowercases a trailing uppercase letter: "CL" reads "Cl").
-        element: normalize_v3000_symbol(symbol),
+        // lowercases a trailing uppercase letter: "CL" reads "Cl");
+        // the star atom reads Zz here too.
+        element: if symbol == "*" {
+            "Zz".to_string()
+        } else {
+            normalize_v3000_symbol(symbol)
+        },
         h_count: 0,
         charge: 0,
         h_pinned: false,
@@ -560,6 +572,203 @@ fn apply_property_lines(lines: &[&str], atoms: &mut [AtomRecord]) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// The polymer Sgroup property lines (mol_fmt1.c 1451–1900): `M  STY`
+/// declares units (SRU/MON/COP/MOD/CRO/MER), `M  SST` subtypes
+/// (ALT/RAN/BLK), `M  SCN` connection patterns (HT/HH/EU), `M  SAL`
+/// atom lists, `M  SBL` crossing-bond lists, `M  SMT` subscripts,
+/// `M  SDI` bracket coordinates (first pair of lines per unit). The
+/// lines may arrive in any order — SST/SCN/SAL/SBL reference units by
+/// Sgroup number, and a reference to an undeclared unit is an error
+/// there exactly like the reference's
+/// MolFmtSgroups_GetIndexBySgroupId miss. A file with no Sgroup lines
+/// reads `Ok(None)`.
+fn parse_sgroup_lines(
+    lines: &[&str],
+    atom_count: usize,
+    bond_count: usize,
+) -> Result<Option<crate::graph::Polymer>> {
+    let mut units: Vec<crate::graph::PolymerUnit> = Vec::new();
+    // SDI lines arrive pairwise per unit: the first fills xbr1, the
+    // second xbr2 (mol_fmt1.c SDI handler's brkt1-not-yet-here test).
+    let mut sdi_seen: Vec<usize> = Vec::new();
+    let find_unit = |units: &[crate::graph::PolymerUnit], id: usize| {
+        units.iter().position(|unit| unit.id == id)
+    };
+    for line in lines {
+        if !line.starts_with("M  S") {
+            continue;
+        }
+        let kind = &line[3..6.min(line.len())];
+        let fields: Vec<&str> = line[6..].split_whitespace().collect();
+        match kind {
+            "STY" => {
+                // `M  STY nn8 (sg, type)...` — the count field then
+                // (number, 3-letter-type) pairs, at most 8 per line.
+                let count: usize = fields
+                    .first()
+                    .and_then(|f| f.parse().ok())
+                    .ok_or_else(|| bad(line))?;
+                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
+                    return err(format!("{CONTEXT}: malformed STY line: {line:?}"));
+                }
+                for pair in fields[1..1 + 2 * count].chunks(2) {
+                    let id: usize = pair[0].parse().map_err(|_| bad(line))?;
+                    let unit_type = match pair[1] {
+                        "SRU" => 1u8,
+                        "MON" => 2,
+                        "COP" => 3,
+                        "MOD" => 4,
+                        "CRO" => 5,
+                        "MER" => 6,
+                        _ => {
+                            return err(format!(
+                                "{CONTEXT}: unsupported Sgroup type {pair:?}"
+                            ));
+                        }
+                    };
+                    match find_unit(&units, id) {
+                        Some(index) => units[index].unit_type = unit_type,
+                        None => units.push(crate::graph::PolymerUnit {
+                            id,
+                            unit_type,
+                            ..Default::default()
+                        }),
+                    }
+                }
+            }
+            "SST" => {
+                let count: usize = fields
+                    .first()
+                    .and_then(|f| f.parse().ok())
+                    .ok_or_else(|| bad(line))?;
+                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
+                    return err(format!("{CONTEXT}: malformed SST line: {line:?}"));
+                }
+                for pair in fields[1..1 + 2 * count].chunks(2) {
+                    let id: usize = pair[0].parse().map_err(|_| bad(line))?;
+                    let subtype = match pair[1] {
+                        "ALT" => 1u8,
+                        "RAN" => 2,
+                        "BLK" | "BLO" => 3,
+                        _ => {
+                            return err(format!(
+                                "{CONTEXT}: unsupported Sgroup subtype {pair:?}"
+                            ));
+                        }
+                    };
+                    let index = find_unit(&units, id)
+                        .ok_or_else(|| Error::new(format!("{CONTEXT}: SST names undeclared unit {id}")))?;
+                    units[index].subtype = subtype;
+                }
+            }
+            "SCN" => {
+                let count: usize = fields
+                    .first()
+                    .and_then(|f| f.parse().ok())
+                    .ok_or_else(|| bad(line))?;
+                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
+                    return err(format!("{CONTEXT}: malformed SCN line: {line:?}"));
+                }
+                for pair in fields[1..1 + 2 * count].chunks(2) {
+                    let id: usize = pair[0].parse().map_err(|_| bad(line))?;
+                    let conn = match pair[1] {
+                        "HT" => 1u8,
+                        "HH" => 2,
+                        "EU" => 3,
+                        _ => {
+                            return err(format!(
+                                "{CONTEXT}: unsupported Sgroup connection {pair:?}"
+                            ));
+                        }
+                    };
+                    let index = find_unit(&units, id)
+                        .ok_or_else(|| Error::new(format!("{CONTEXT}: SCN names undeclared unit {id}")))?;
+                    units[index].conn = conn;
+                }
+            }
+            "SAL" => {
+                if fields.len() < 2 {
+                    return err(format!("{CONTEXT}: malformed SAL line: {line:?}"));
+                }
+                let id: usize = fields[0].parse().map_err(|_| bad(line))?;
+                let count: usize = fields[1].parse().map_err(|_| bad(line))?;
+                if fields.len() < 2 + count {
+                    return err(format!("{CONTEXT}: malformed SAL line: {line:?}"));
+                }
+                let index = find_unit(&units, id)
+                    .ok_or_else(|| Error::new(format!("{CONTEXT}: SAL names undeclared unit {id}")))?;
+                for field in &fields[2..2 + count] {
+                    let atom: usize = field.parse().map_err(|_| bad(line))?;
+                    if atom == 0 || atom > atom_count {
+                        return err(format!(
+                            "{CONTEXT}: SAL atom {atom} out of range: {line:?}"
+                        ));
+                    }
+                    units[index].alist.push(atom - 1);
+                }
+            }
+            "SBL" => {
+                if fields.len() < 2 {
+                    return err(format!("{CONTEXT}: malformed SBL line: {line:?}"));
+                }
+                let id: usize = fields[0].parse().map_err(|_| bad(line))?;
+                let count: usize = fields[1].parse().map_err(|_| bad(line))?;
+                if fields.len() < 2 + count {
+                    return err(format!("{CONTEXT}: malformed SBL line: {line:?}"));
+                }
+                let index = find_unit(&units, id)
+                    .ok_or_else(|| Error::new(format!("{CONTEXT}: SBL names undeclared unit {id}")))?;
+                for field in &fields[2..2 + count] {
+                    let bond: usize = field.parse().map_err(|_| bad(line))?;
+                    if bond == 0 || bond > bond_count {
+                        return err(format!(
+                            "{CONTEXT}: SBL bond {bond} out of range: {line:?}"
+                        ));
+                    }
+                    units[index].blist.push(bond - 1);
+                }
+            }
+            "SMT" => {
+                if fields.len() < 2 {
+                    return err(format!("{CONTEXT}: malformed SMT line: {line:?}"));
+                }
+                let id: usize = fields[0].parse().map_err(|_| bad(line))?;
+                let label = fields[1..].join(" ");
+                let index = find_unit(&units, id)
+                    .ok_or_else(|| Error::new(format!("{CONTEXT}: SMT names undeclared unit {id}")))?;
+                units[index].smt = label;
+            }
+            "SDI" => {
+                if fields.len() < 5 {
+                    return err(format!("{CONTEXT}: malformed SDI line: {line:?}"));
+                }
+                let id: usize = fields[0].parse().map_err(|_| bad(line))?;
+                if fields[1] != "4" {
+                    return err(format!("{CONTEXT}: SDI carries non-4 coords: {line:?}"));
+                }
+                let mut coords = [0.0f64; 4];
+                for (slot, field) in coords.iter_mut().zip(&fields[2..6]) {
+                    *slot = field.parse().map_err(|_| bad(line))?;
+                }
+                let index = find_unit(&units, id)
+                    .ok_or_else(|| Error::new(format!("{CONTEXT}: SDI names undeclared unit {id}")))?;
+                let seen = sdi_seen.iter().filter(|&&s| s == id).count();
+                if seen == 0 {
+                    units[index].xbr1 = Some(coords);
+                } else {
+                    units[index].xbr2 = Some(coords);
+                }
+                sdi_seen.push(id);
+            }
+            _ => {}
+        }
+    }
+    // Units with no STY line never materialize (SAL/SBL-only files are
+    // rejected by the reference's GetIndexBySgroupId miss, surfaced
+    // above); a declaration pass with zero units means no polymer.
+    Ok((!units.is_empty()).then(|| crate::graph::Polymer { units }))
 }
 
 fn line_or<'a>(lines: &'a [&'a str], index: usize, block: &str) -> Result<&'a str> {

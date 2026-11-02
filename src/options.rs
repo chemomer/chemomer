@@ -118,6 +118,77 @@ pub struct Options {
     /// `PT_18_00` — the cyanic-acid endpoint pass
     /// `[#1:1][O:2][C:3]#[N:4]` (ichiparm.c 418–423).
     pub pt_18_00: bool,
+    /// `Polymers` — the MODERN polymer treatment (ichiparm.c:435–438,
+    /// POLYMERS_MODERN): repeat units read, Zz/star caps stand as
+    /// atoms, the `/z` layer speaks the CRUs in canonical numbers, and
+    /// the default frame-shift scheme may rewire the cap bonds (the
+    /// structure edits the v1.06 frame shift derives). Non-standard:
+    /// any polymer data turns the identifier's version `1B`.
+    pub polymers: PolymersMode,
+    /// `NPZz` — allow NON-polymeric Zz/star atoms: pseudo atoms
+    /// outside every unit survive as bare `Zz` (the reference's
+    /// n_zy count; ichiparm.c:445–449). Without the flag they reject
+    /// the structure ("Polymer-unrelated pseudoatoms are not
+    /// allowed"). Independent of `polymers`; either flag alone admits
+    /// the atoms.
+    pub npzz: bool,
+    /// `FoldCRU` / `FoldSRU` — fold CRUs with in-unit repeats before
+    /// the frame shift (ichiparm.c:463–473). Unimplemented: the
+    /// reference's fold derives edits from a second interim pass and
+    /// aborts on inputs where the analysis fails — the corpus ledger
+    /// carries the debt.
+    pub fold_cru: bool,
+    /// `FrameShift:` scheme (ichiparm.c:478–508) — whether the modern
+    /// frame shift may rewire the cap bonds at all, and whether the
+    /// legacy modes cyclize. The reference default is
+    /// [`FrameShift::Cycled`]; `NoFrameShift` and `NoEdits` read
+    /// [`FrameShift::None`].
+    pub frame_shift: FrameShift,
+    /// `SAtZZ` — allow stereo centers BONDED to Zz/Zy pseudo atoms
+    /// (ichiparm.c:518–521, ichister.c:1380–1393: without the flag
+    /// such centers never qualify).
+    pub stereo_at_zz: bool,
+}
+
+/// The polymer treatment level (the reference's `bPolymers`,
+/// mode.h:1244–1247; the release binary's option spellings —
+/// `Polymers105+` is developer-only and unrecognized there).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PolymersMode {
+    /// Default: Zz/star atoms reject the structure unless `NPZz` is
+    /// set; polymer data is ignored.
+    #[default]
+    No,
+    /// `Polymers` — the v1.06+ treatment with explicit Zz caps and
+    /// the `/z` layer in the submitted structure's terms.
+    Modern,
+    /// `Polymers105` — the v1.05 treatment: star-capped CRUs are
+    /// cyclized in place, the Zz disappear from the identifier, the
+    /// `/z` layer speaks the cyclized form.
+    Legacy,
+}
+
+/// The frame-shift scheme (the reference's `bFrameShiftScheme`,
+/// ichidrp.h:219–223). Only the cycled scheme moves anything: the
+/// modern edits derive from the interim pass's CYCLIZED `/z` pattern,
+/// and `Opened`/`EndsOpened`/`None` leave the interim uncyclized —
+/// the extraction then finds nothing to rewire (observed against the
+/// 1.07.5 oracle: `FrameShift:MoveStars`, `FrameShift:MoveBrackets`,
+/// `NoFrameShift` and `NoEdits` all reproduce the plain structure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrameShift {
+    /// `FrameShift:Cyclize` (and the bare default): cyclize the
+    /// interim, re-flank the caps onto the senior backbone bond.
+    #[default]
+    Cycled,
+    /// `NoFrameShift` / `FrameShift:None`: no edits at all.
+    None,
+    /// `FrameShift:MoveStars`: the interim runs uncyclized — no edits
+    /// (parity-observed no-op, kept as a distinct flag for the option
+    /// line's shape).
+    Opened,
+    /// `FrameShift:MoveBrackets`: as `Opened`.
+    EndsOpened,
 }
 
 impl Options {
@@ -275,6 +346,56 @@ impl Options {
     pub fn with_pt_18_00(mut self) -> Self {
         self.pt_18_00 = true;
         self
+    }
+
+    /// `Polymers` — the modern polymer treatment.
+    #[must_use]
+    pub fn with_polymers(mut self) -> Self {
+        self.polymers = PolymersMode::Modern;
+        self
+    }
+
+    /// `Polymers105` — the legacy treatment.
+    #[must_use]
+    pub fn with_polymers_105(mut self) -> Self {
+        self.polymers = PolymersMode::Legacy;
+        self
+    }
+
+    /// `NPZz` — non-polymeric Zz/star atoms allowed.
+    #[must_use]
+    pub fn with_npzz(mut self) -> Self {
+        self.npzz = true;
+        self
+    }
+
+    /// `FoldCRU` — CRU fold analysis (unimplemented; ledger).
+    #[must_use]
+    pub fn with_fold_cru(mut self) -> Self {
+        self.fold_cru = true;
+        self
+    }
+
+    /// `FrameShift:` — the frame-shift scheme.
+    #[must_use]
+    pub fn with_frame_shift(mut self, scheme: FrameShift) -> Self {
+        self.frame_shift = scheme;
+        self
+    }
+
+    /// `SAtZZ` — stereo centers bonded to Zz/Zy allowed.
+    #[must_use]
+    pub fn with_stereo_at_zz(mut self) -> Self {
+        self.stereo_at_zz = true;
+        self
+    }
+
+    /// Whether the frame-shift edits may run at all: the cycled
+    /// scheme only, and `NoEdits` reads as scheme `None` (the
+    /// reference's parse clears both bits together).
+    #[must_use]
+    pub fn frame_shift_edits(&self) -> bool {
+        self.frame_shift == FrameShift::Cycled
     }
 
     /// Whether the assembled identifier is the standard one
