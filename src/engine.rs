@@ -9,6 +9,14 @@ use crate::layers::{default_layers, standardization, LayerEmitter, MANDATORY_KIN
 use crate::molfile;
 use crate::options::Options;
 
+/// The reference's normally-allowed input size: the total atom count
+/// over which the identifier speaks the beta version
+/// (ichisize.h:51 NORMALLY_ALLOWED_INP_MAX_ATOMS; the reader's
+/// default cap needs -LargeMolecules to lift, while the WRITER marks
+/// every structure beyond the bound `1B` regardless of options,
+/// ichiprt1.c:1684-1688).
+const NORMALLY_ALLOWED_INP_MAX_ATOMS: usize = 1024;
+
 pub struct Engine {
     structure: Structure,
     /// The submitted structure exactly as parsed — explicit hydrogens
@@ -329,15 +337,13 @@ impl Engine {
 
         let mut sorted: Vec<&Box<dyn LayerEmitter>> = self.layers.iter().collect();
         sorted.sort_by_key(|layer| layer.order());
-        // The version prefix: the standard flag is the assembler's
-        // only contract with the options — the non-std modes
-        // (SRel/SRac/SUCF/SUU/SLUUD) read `InChI=1/` (the reference's
-        // bStdFormat), everything else stays `InChI=1S/`.
-        let mut out = String::from(if self.options.is_standard() {
-            "InChI=1S/"
-        } else {
-            "InChI=1/"
-        });
+        // The version prefix: the beta flavor wins over every option
+        // when the structure crosses the large-molecule bound (the
+        // reference emits `1B` before consulting the standard flag,
+        // ichiprt1.c:3149-3158), the options' standard flag otherwise —
+        // the non-std modes (SRel/SRac/SUCF/SUU/SLUUD) read `InChI=1/`
+        // (the reference's bStdFormat), everything else `InChI=1S/`.
+        let mut out = String::from(self.version_prefix());
         let mut appended = false;
         for layer in sorted {
             if let Some(segment) = layer.emit(&self.structure)? {
@@ -357,6 +363,34 @@ impl Engine {
         crate::key::inchikey(&self.inchi_string()?)
     }
 
+    /// The total atom count across every component — the reference's
+    /// nAtomsAllComp, the emitted structures' atoms summed over the
+    /// component list (ichiprt1.c:1422-1424).
+    fn total_atoms(&self) -> usize {
+        if self.siblings.is_empty() {
+            self.structure.atoms.len()
+        } else {
+            self.siblings
+                .iter()
+                .map(|sibling| sibling.structure.atoms.len())
+                .sum()
+        }
+    }
+
+    /// The version prefix the assembled identifier speaks: the beta
+    /// flavor wins over every option when the total atom count crosses
+    /// the large-molecule bound, the options' standard flag otherwise
+    /// (see [`Engine::inchi_string`]).
+    fn version_prefix(&self) -> &'static str {
+        if self.total_atoms() > NORMALLY_ALLOWED_INP_MAX_ATOMS {
+            "InChI=1B/"
+        } else if self.options.is_standard() {
+            "InChI=1S/"
+        } else {
+            "InChI=1/"
+        }
+    }
+
     /// The `-RecMet` output line: the main (disconnected) identifier
     /// under the non-standard prefix, followed — ONLY when the
     /// standard pass actually disconnected a coordination metal — by
@@ -373,6 +407,7 @@ impl Engine {
                 let identifier = reconnected.inchi_string()?;
                 let layers = identifier
                     .strip_prefix("InChI=1S/")
+                    .or_else(|| identifier.strip_prefix("InChI=1B/"))
                     .or_else(|| identifier.strip_prefix("InChI=1/"))
                     .unwrap_or(&identifier);
                 Ok(format!("{main}/r{layers}"))
@@ -425,12 +460,11 @@ impl Engine {
         // from the per-component join and emitted once as the NET
         // shift.
         let mut parts: Vec<Vec<(char, String)>> = Vec::new();
-        let mut standard = true;
         for sibling in &self.siblings {
             let id = sibling.inchi_string()?;
-            standard = standard && id.starts_with("InChI=1S/");
             let body = id
                 .strip_prefix("InChI=1S/")
+                .or_else(|| id.strip_prefix("InChI=1B/"))
                 .or_else(|| id.strip_prefix("InChI=1/"))
                 .expect("a sibling identifier carries a version prefix");
             parts.push(
@@ -465,7 +499,10 @@ impl Engine {
                 _ => groups.push(vec![index]),
             }
         }
-        let mut out = String::from(if standard { "InChI=1S/" } else { "InChI=1/" });
+        // The top-level prefix speaks the whole component list — the
+        // beta flavor when the SUM crosses the bound, even when each
+        // component stays under it (the reference's nAtomsAllComp).
+        let mut out = String::from(self.version_prefix());
         let formulas: Vec<String> = groups
             .iter()
             .map(|members| {
@@ -954,6 +991,105 @@ mod tests {
     fn water_assembles_from_the_registered_layers() {
         let engine = Engine::from_molfile(WATER).expect("parses");
         assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H2O/h1H2");
+    }
+
+    /// A linear n-carbon alkane chain as a V3000 molfile (the V2000
+    /// counts line caps at 999 atoms; large molecules arrive as V3000).
+    fn alkane_chain(carbons: usize) -> String {
+        let mut out = format!(
+            "chain\n  generator\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\n\
+             M  V30 BEGIN CTAB\nM  V30 COUNTS {carbons} {bonds} 0 0 0\nM  V30 BEGIN ATOM\n",
+            bonds = carbons.saturating_sub(1)
+        );
+        for k in 0..carbons {
+            out.push_str(&format!(
+                "M  V30 {} C {} {} 0 0\n",
+                k + 1,
+                k * 12,
+                if k % 2 == 0 { 12 } else { 20 }
+            ));
+        }
+        out.push_str("M  V30 END ATOM\n");
+        if carbons > 1 {
+            out.push_str("M  V30 BEGIN BOND\n");
+            for k in 0..carbons - 1 {
+                out.push_str(&format!("M  V30 {} 1 {} {}\n", k + 1, k + 1, k + 2));
+            }
+            out.push_str("M  V30 END BOND\n");
+        }
+        out.push_str("M  V30 END CTAB\nM  END\n");
+        out
+    }
+
+    #[test]
+    fn structures_past_the_large_molecule_bound_speak_the_beta_version() {
+        // 1025 atoms: one past NORMALLY_ALLOWED_INP_MAX_ATOMS — the
+        // reference writes InChI=1B regardless of the standard flag
+        // (ichiprt1.c:1684-1688), the layers unchanged.
+        let engine = Engine::from_molfile(&alkane_chain(1025)).expect("parses");
+        let inchi = engine.inchi_string().expect("identifier");
+        assert!(
+            inchi.starts_with("InChI=1B/C1025H2052/"),
+            "beta prefix missing: {}",
+            &inchi[..40.min(inchi.len())]
+        );
+        let key = engine.inchikey().expect("key");
+        assert!(key.ends_with("-UHFFFAOYBA-N"), "beta key flag: {key}");
+    }
+
+    #[test]
+    fn the_bound_structure_stays_standard() {
+        // Exactly 1024 atoms: not past the bound (the reference's
+        // comparison is strictly greater), the standard flavor stands.
+        let engine = Engine::from_molfile(&alkane_chain(1024)).expect("parses");
+        let inchi = engine.inchi_string().expect("identifier");
+        assert!(
+            inchi.starts_with("InChI=1S/C1024H2050/"),
+            "standard prefix missing: {}",
+            &inchi[..40.min(inchi.len())]
+        );
+    }
+
+    #[test]
+    fn the_beta_bound_reads_the_component_sum() {
+        // Two components of 513 atoms each: each stays under the
+        // bound, the sum (1026) crosses it — the reference's
+        // nAtomsAllComp is the SUM over the component list
+        // (ichiprt1.c:1422-1424).
+        let mut molfile = String::from(
+            "dimer\n  generator\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\n\
+             M  V30 BEGIN CTAB\nM  V30 COUNTS 1026 1024 0 0 0\nM  V30 BEGIN ATOM\n",
+        );
+        for component in 0..2 {
+            for k in 0..513 {
+                let index = component * 513 + k + 1;
+                molfile.push_str(&format!(
+                    "M  V30 {index} C {} {} 0 0\n",
+                    k * 12,
+                    12 + component * 200
+                ));
+            }
+        }
+        molfile.push_str("M  V30 END ATOM\nM  V30 BEGIN BOND\n");
+        for component in 0..2 {
+            for k in 0..512 {
+                let base = component * 513;
+                molfile.push_str(&format!(
+                    "M  V30 {} 1 {} {}\n",
+                    component * 512 + k + 1,
+                    base + k + 1,
+                    base + k + 2
+                ));
+            }
+        }
+        molfile.push_str("M  V30 END BOND\nM  V30 END CTAB\nM  END\n");
+        let engine = Engine::from_molfile(&molfile).expect("parses");
+        let inchi = engine.inchi_string().expect("identifier");
+        assert!(
+            inchi.starts_with("InChI=1B/2C513H1028"),
+            "component-sum beta prefix missing: {}",
+            &inchi[..40.min(inchi.len())]
+        );
     }
 
     #[test]
