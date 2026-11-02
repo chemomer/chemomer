@@ -36,6 +36,30 @@ fn counts_version(counts: &str) -> Option<&str> {
     counts.get(33..)?.split_whitespace().last()
 }
 
+/// Splits an SDfile into its records' verbatim texts, on the `$$$$`
+/// terminator lines — the batch reader's whole face. Each record keeps
+/// everything up to its terminator (header, connection table, any SDF
+/// data fields), so a record parses exactly as it would standing
+/// alone; empty gaps between terminators produce no records.
+pub fn parse_sdf(input: &str) -> Vec<String> {
+    let mut records = Vec::new();
+    let mut current = String::new();
+    for line in input.lines() {
+        if line.trim_end() == "$$$$" {
+            if !current.trim().is_empty() {
+                records.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.trim().is_empty() {
+        records.push(current);
+    }
+    records
+}
+
 /// Reads the V2000 positional fields: counts line, atom block, bond
 /// block, and the `M  CHG` / `M  ISO` property lines.
 fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
@@ -577,5 +601,34 @@ mod tests {
         let engine = crate::engine::Engine::from_molfile(WATER_V3000).expect("engine");
         let inchi = engine.inchi_string().expect("inchi");
         assert_eq!(inchi, "InChI=1S/H2O/h1H2");
+    }
+
+    #[test]
+    fn parse_sdf_splits_on_the_terminator_lines() {
+        let sdf = format!("{WATER}$$$$\n{WATER}$$$$\n");
+        let records = parse_sdf(&sdf);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0], format!("{WATER}"));
+        assert_eq!(records[1], format!("{WATER}"));
+    }
+
+    #[test]
+    fn sdf_data_fields_ride_their_record() {
+        let with_fields = format!("{WATER}> <ID>\nsdf/water\n\n$$$$\n");
+        let records = parse_sdf(&with_fields);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].contains("> <ID>"));
+        // The record still parses: the data fields trail the
+        // connection table, where the property-line loop ignores them.
+        let engine = crate::engine::Engine::from_molfile(&records[0]).expect("engine");
+        assert_eq!(engine.inchi_string().expect("inchi"), "InChI=1S/H2O/h1H2");
+    }
+
+    #[test]
+    fn sdf_empty_gaps_and_a_missing_final_terminator_read() {
+        let sdf = format!("{WATER}$$$$\n\n\n$$$$\n{WATER}");
+        let records = parse_sdf(&sdf);
+        assert_eq!(records.len(), 2, "the empty gap produces no record");
+        assert!(parse_sdf("").is_empty());
     }
 }
