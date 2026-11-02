@@ -1,17 +1,21 @@
-//! The V2000 molfile reader — the identity pipeline's input edge.
-//! Encapsulated on purpose: callers see a `Structure`, never the
-//! column arithmetic; only the subset the corpus identity molfiles
-//! use (the gem writer's output) is supported, and unsupported
-//! constructs are reported rather than guessed.
+//! The V2000/V3000 molfile reader — the identity pipeline's input
+//! edge. Encapsulated on purpose: callers see a `Structure`, never
+//! the column arithmetic; only the subset the corpus identity
+//! molfiles use (the gem writer's output) is supported, and
+//! unsupported constructs are reported rather than guessed.
 
 use crate::error::{err, Result};
 use crate::graph::{AtomRecord, Structure};
 
 const CONTEXT: &str = "molfile";
 
-/// Reads the V2000 subset: counts line, atom block, bond block, and
-/// `M  CHG` / `M  ISO` property lines. Isotope mass numbers land on the
-/// atoms (the /i layer and the hydrogen fold read them).
+/// Reads the V2000 subset (counts line, atom block, bond block, and
+/// `M  CHG` / `M  ISO` property lines) or the V3000 CTAB block —
+/// dispatched on the counts line's version tag, the way the reference
+/// reads the version string after the eleven fixed fields and arms
+/// its V3000 reader on "V3000" (mol_fmt1.c:630-645). Isotope mass
+/// numbers land on the atoms (the /i layer and the hydrogen fold read
+/// them).
 pub fn parse(input: &str) -> Result<Structure> {
     let lines: Vec<&str> = input.lines().collect();
     if lines.len() < 5 {
@@ -19,6 +23,22 @@ pub fn parse(input: &str) -> Result<Structure> {
     }
 
     let counts = lines[3];
+    if counts_version(counts) == Some("V3000") {
+        return parse_v3000(&lines[4..]);
+    }
+    parse_v2000(&lines, counts)
+}
+
+/// The counts line's CTFile version tag — the whitespace token at
+/// column 33, after the eleven 3-character fields
+/// (mol_fmt1.c:630-636 reads exactly that field and dispatches).
+fn counts_version(counts: &str) -> Option<&str> {
+    counts.get(33..)?.split_whitespace().last()
+}
+
+/// Reads the V2000 positional fields: counts line, atom block, bond
+/// block, and the `M  CHG` / `M  ISO` property lines.
+fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
     let atom_count: usize = counts
         .get(0..3)
         .unwrap_or("")
@@ -40,7 +60,7 @@ pub fn parse(input: &str) -> Result<Structure> {
     let mut atoms = Vec::with_capacity(atom_count);
     let mut positions = Vec::with_capacity(atom_count);
     for index in 0..atom_count {
-        let line = line_or(&lines, 4 + index, "atom block")?;
+        let line = line_or(lines, 4 + index, "atom block")?;
         let element = line.get(31..34).unwrap_or("").trim().to_string();
         if element.is_empty() {
             return err(format!("{CONTEXT}: atom {index} has no element symbol"));
@@ -68,7 +88,7 @@ pub fn parse(input: &str) -> Result<Structure> {
     let mut bonds = Vec::with_capacity(bond_count);
     let mut stereo_bonds = std::collections::BTreeMap::new();
     for index in 0..bond_count {
-        let line = line_or(&lines, 4 + atom_count + index, "bond block")?;
+        let line = line_or(lines, 4 + atom_count + index, "bond block")?;
         let from: usize = line
             .get(0..3)
             .unwrap_or("")
@@ -96,7 +116,318 @@ pub fn parse(input: &str) -> Result<Structure> {
         bonds.push((from - 1, to - 1, kind));
     }
 
-    for line in &lines[4 + atom_count + bond_count..] {
+    apply_property_lines(&lines[4 + atom_count + bond_count..], &mut atoms)?;
+
+    Ok(Structure {
+        atoms,
+        bonds,
+        stereo_bonds,
+        positions,
+        isotopic_h: Default::default(),
+        protons_hard_moved: false,
+        ride_marks: Vec::new(),
+        taut_ext: Default::default(),
+        fold_source: Vec::new(),
+        chiral_flag: chiral_flag != 0,
+    })
+}
+
+/// Reads the V3000 CTAB block: `M  V30`-prefixed logical lines after
+/// the quasi-counts line — `BEGIN CTAB`, the `COUNTS` line, the atom
+/// and bond blocks, the optional tail blocks (SGROUP, OBJ3D, LINKNODE,
+/// COLLECTION — read and skipped, the reference stores enhanced stereo
+/// only to ignore it), and `END CTAB` (mol_fmt3.c). Graph semantics —
+/// element case, bond orders 1-3 plus aromatic 4, the V2000 stereo
+/// codes, charges and isotope masses — are the reference's: free-form
+/// whitespace fields, `KEY=value` attributes in the V30 form of the
+/// V2000 `M  CHG` / `M  ISO` property lines (mol_fmt3.c:1071-1122).
+fn parse_v3000(lines: &[&str]) -> Result<Structure> {
+    let mut v30 = V30Lines { lines, pos: 0 };
+
+    expect_v30_line(&mut v30, "BEGIN CTAB")?;
+
+    let counts_line = next_v30_line(&mut v30)?
+        .ok_or_else(|| Error::new(format!("{CONTEXT} V3000: truncated before the COUNTS line")))?;
+    let fields: Vec<&str> = counts_line.split_whitespace().collect();
+    if fields.first() != Some(&"COUNTS") {
+        return err(format!(
+            "{CONTEXT} V3000: cannot interpret the COUNTS line: {counts_line:?}"
+        ));
+    }
+    let atom_count: usize = fields
+        .get(1)
+        .and_then(|field| field.parse().ok())
+        .ok_or_else(|| Error::new(format!("{CONTEXT} V3000: COUNTS carries no atom count")))?;
+    let bond_count: usize = fields
+        .get(2)
+        .and_then(|field| field.parse().ok())
+        .ok_or_else(|| Error::new(format!("{CONTEXT} V3000: COUNTS carries no bond count")))?;
+    // The chiral flag is the COUNTS line's fifth number (mol_fmt3.c:530).
+    let chiral_flag: u32 = fields
+        .get(5)
+        .and_then(|field| field.parse().ok())
+        .unwrap_or(0);
+
+    expect_v30_line(&mut v30, "BEGIN ATOM")?;
+    let mut atoms = Vec::with_capacity(atom_count);
+    let mut positions = Vec::with_capacity(atom_count);
+    // Original atom index -> structure position: V3000 bonds may name
+    // the atoms in any order (mol_fmt3.c get_actual_atom_number).
+    let mut index_map = std::collections::HashMap::with_capacity(atom_count);
+    for position in 0..atom_count {
+        let line = next_v30_line(&mut v30)?
+            .ok_or_else(|| Error::new(format!("{CONTEXT} V3000: truncated atom block")))?;
+        let (index, atom, position_xy) = parse_v3000_atom(&line)?;
+        index_map.insert(index, position);
+        positions.push(position_xy);
+        atoms.push(atom);
+    }
+    expect_v30_line(&mut v30, "END ATOM")?;
+
+    let mut bonds = Vec::with_capacity(bond_count);
+    let mut stereo_bonds = std::collections::BTreeMap::new();
+    // The reference skips the whole bond block when the counts say
+    // zero bonds — no BEGIN BOND line need exist (mol_fmt3.c:1274-1277).
+    if bond_count > 0 {
+        expect_v30_line(&mut v30, "BEGIN BOND")?;
+        for bond_index in 0..bond_count {
+            let line = next_v30_line(&mut v30)?
+                .ok_or_else(|| Error::new(format!("{CONTEXT} V3000: truncated bond block")))?;
+            let (bond, stereo) = parse_v3000_bond(&line, &index_map)?;
+            if let Some(stereo) = stereo {
+                stereo_bonds.insert(bond_index, stereo);
+            }
+            bonds.push(bond);
+        }
+        expect_v30_line(&mut v30, "END BOND")?;
+    }
+
+    // The tail: optional SGROUP, OBJ3D, LINKNODE and COLLECTION
+    // blocks — read and skipped (the reference reads the enhanced
+    // stereo collections only to ignore them, mol_fmt3.c:1602-1727).
+    loop {
+        let line = next_v30_line(&mut v30)?
+            .ok_or_else(|| Error::new(format!("{CONTEXT} V3000: no END CTAB marker")))?;
+        match line.as_str() {
+            "BEGIN SGROUP" => skip_v30_block(&mut v30, "END SGROUP")?,
+            "BEGIN OBJ3D" => skip_v30_block(&mut v30, "END OBJ3D")?,
+            "LINKNODE" => {}
+            "BEGIN COLLECTION" => skip_v30_block(&mut v30, "END COLLECTION")?,
+            "END CTAB" => break,
+            other => {
+                return err(format!(
+                    "{CONTEXT} V3000: cannot interpret the CTAB line {other:?}"
+                ));
+            }
+        }
+    }
+
+    // After the CTAB the physical remainder is the property-line tail:
+    // the reference still walks `M  CHG` / `M  ISO` there (the property
+    // loop runs while the version string is non-empty, mol_fmt1.c:995).
+    apply_property_lines(&v30.lines[v30.pos..], &mut atoms)?;
+
+    Ok(Structure {
+        atoms,
+        bonds,
+        stereo_bonds,
+        positions,
+        isotopic_h: Default::default(),
+        protons_hard_moved: false,
+        ride_marks: Vec::new(),
+        taut_ext: Default::default(),
+        fold_source: Vec::new(),
+        chiral_flag: chiral_flag != 0,
+    })
+}
+
+/// One `M  V30 <index> <element> x y z <aamap> [KEY=value ...]` atom
+/// line: positional fields then attributes (mol_fmt3.c:956-1222).
+/// `CHG=` and `MASS=` carry the V30 form of the V2000 `M  CHG` /
+/// `M  ISO` property lines — charge and absolute isotope mass number.
+fn parse_v3000_atom(line: &str) -> Result<(usize, AtomRecord, (f64, f64))> {
+    let mut tokens = line.split_whitespace();
+    let index: usize = v30_number(&mut tokens, line)?;
+    let symbol = tokens.next().ok_or_else(|| bad(line))?;
+    let x: f64 = v30_number(&mut tokens, line)?;
+    let y: f64 = v30_number(&mut tokens, line)?;
+    let _z: f64 = v30_number(&mut tokens, line)?;
+    let _aamap: usize = v30_number(&mut tokens, line)?;
+
+    let mut atom = AtomRecord {
+        // Two-letter symbols arrive case-normalized (mol_fmt3.c:1054-1057
+        // lowercases a trailing uppercase letter: "CL" reads "Cl").
+        element: normalize_v3000_symbol(symbol),
+        h_count: 0,
+        charge: 0,
+        h_pinned: false,
+        isotope: 0,
+    };
+    for attribute in tokens {
+        let Some((key, value)) = attribute.split_once('=') else {
+            return err(format!(
+                "{CONTEXT} V3000: atom attribute without a value: {attribute:?}"
+            ));
+        };
+        match key {
+            "CHG" => atom.charge = v30_value(value, line)?,
+            "MASS" => atom.isotope = v30_value(value, line)?,
+            // Read-and-ignored attributes: the reference consumes the
+            // value and moves on (query, reaction and valence hints
+            // never reach the identity pipeline).
+            "VAL" | "HCOUNT" | "RAD" | "CFG" | "STBOX" | "INVRET" | "EXACHG" | "SUBST"
+            | "UNSAT" | "RBCNT" | "ATTCHPT" | "RGROUPS" | "ATTCHORD" | "CLASS" | "SEQID" => {}
+            other => {
+                return err(format!("{CONTEXT} V3000: unknown atom attribute {other:?}"));
+            }
+        }
+    }
+    Ok((index, atom, (x, y)))
+}
+
+/// One `M  V30 <index> <type> <atom1> <atom2> [KEY=value ...]` bond
+/// line. Types are the V2000 orders (1-3 plain, 4 aromatic);
+/// `CFG=` carries the V30 form of the V2000 stereo column — 1 up,
+/// 2 either, 3 down, remapped to the V2000 codes 1/4/6
+/// (mol_fmt3.c:1407-1428).
+fn parse_v3000_bond(
+    line: &str,
+    index_map: &std::collections::HashMap<usize, usize>,
+) -> Result<((usize, usize, u32), Option<u8>)> {
+    let mut tokens = line.split_whitespace();
+    let _index: usize = v30_number(&mut tokens, line)?;
+    let bond_type: u32 = v30_number(&mut tokens, line)?;
+    if !(1..=4).contains(&bond_type) {
+        return err(format!(
+            "{CONTEXT} V3000: unsupported bond type {bond_type}"
+        ));
+    }
+    let from: usize = v30_number(&mut tokens, line)?;
+    let to: usize = v30_number(&mut tokens, line)?;
+    let mut stereo = None;
+    for attribute in tokens {
+        let Some((key, value)) = attribute.split_once('=') else {
+            return err(format!(
+                "{CONTEXT} V3000: bond attribute without a value: {attribute:?}"
+            ));
+        };
+        match key {
+            "CFG" => {
+                let code: u8 = v30_value(value, line)?;
+                stereo = Some(match code {
+                    1 => 1,
+                    2 => 4,
+                    3 => 6,
+                    other => {
+                        return err(format!(
+                            "{CONTEXT} V3000: unsupported bond CFG code {other}"
+                        ));
+                    }
+                });
+            }
+            // Read-and-ignored attributes (query, display, reaction).
+            "TOPO" | "RXCTR" | "STBOX" | "DISP" | "ATTACH" => {}
+            // Haptic bonds (ENDPTS) are stored-and-ignored by the
+            // reference — a construct the identity pipeline never
+            // sees; reported rather than guessed here.
+            "ENDPTS" => {
+                return err(format!("{CONTEXT} V3000: haptic bonds are not supported"));
+            }
+            other => {
+                return err(format!("{CONTEXT} V3000: unknown bond attribute {other:?}"));
+            }
+        }
+    }
+    let from = *index_map.get(&from).ok_or_else(|| bad(line))?;
+    let to = *index_map.get(&to).ok_or_else(|| bad(line))?;
+    Ok(((from, to, bond_type), stereo))
+}
+
+/// Two-letter symbols arrive case-normalized: a trailing uppercase
+/// letter lowercases ("CL" reads "Cl") — mol_fmt3.c:1054-1057.
+fn normalize_v3000_symbol(symbol: &str) -> String {
+    let mut chars: Vec<char> = symbol.chars().collect();
+    if chars.len() == 2 && chars[1].is_ascii_uppercase() {
+        chars[1] = chars[1].to_ascii_lowercase();
+    }
+    chars.into_iter().collect()
+}
+
+/// The `M  V30 ` logical-line reader: every physical line carries the
+/// 7-character prefix (stripped here), and a trailing `-` continues
+/// onto the next physical line (mol_fmt3.c
+/// get_V3000_input_line_to_strbuf:1889-1927).
+struct V30Lines<'a> {
+    lines: &'a [&'a str],
+    pos: usize,
+}
+
+fn next_v30_line(v30: &mut V30Lines<'_>) -> Result<Option<String>> {
+    let Some(line) = v30.lines.get(v30.pos).copied() else {
+        return Ok(None);
+    };
+    v30.pos += 1;
+    let Some(stripped) = line.strip_prefix("M  V30 ") else {
+        return err(format!(
+            "{CONTEXT} V3000: V30 line lacks the `M  V30 ` prefix: {line:?}"
+        ));
+    };
+    let mut logical = stripped.trim_end().to_string();
+    while logical.ends_with('-') {
+        logical.pop();
+        let Some(continuation) = v30.lines.get(v30.pos).copied() else {
+            return err(format!(
+                "{CONTEXT} V3000: continued line has no continuation: {line:?}"
+            ));
+        };
+        v30.pos += 1;
+        let Some(stripped) = continuation.strip_prefix("M  V30 ") else {
+            return err(format!(
+                "{CONTEXT} V3000: V30 line lacks the `M  V30 ` prefix: {continuation:?}"
+            ));
+        };
+        logical.push_str(stripped.trim_end());
+    }
+    Ok(Some(logical))
+}
+
+fn expect_v30_line(v30: &mut V30Lines<'_>, marker: &str) -> Result<()> {
+    match next_v30_line(v30)? {
+        Some(line) if line == marker => Ok(()),
+        Some(line) => err(format!(
+            "{CONTEXT} V3000: expected {marker:?}, found {line:?}"
+        )),
+        None => err(format!("{CONTEXT} V3000: truncated before {marker:?}")),
+    }
+}
+
+fn skip_v30_block(v30: &mut V30Lines<'_>, marker: &str) -> Result<()> {
+    loop {
+        match next_v30_line(v30)? {
+            Some(line) if line == marker => return Ok(()),
+            Some(_) => {}
+            None => {
+                return err(format!("{CONTEXT} V3000: no {marker:?} marker"));
+            }
+        }
+    }
+}
+
+fn v30_number<'a, T: std::str::FromStr>(
+    tokens: &mut impl Iterator<Item = &'a str>,
+    line: &str,
+) -> Result<T> {
+    let field = tokens.next().ok_or_else(|| bad(line))?;
+    field.parse().map_err(|_| bad(line))
+}
+
+fn v30_value<T: std::str::FromStr>(value: &str, line: &str) -> Result<T> {
+    value.parse().map_err(|_| bad(line))
+}
+
+/// The `M  CHG` / `M  ISO` property-line tail shared by both flavors.
+fn apply_property_lines(lines: &[&str], atoms: &mut [AtomRecord]) -> Result<()> {
+    for line in lines {
         let is_charge = line.starts_with("M  CHG");
         if !(is_charge || line.starts_with("M  ISO")) {
             continue;
@@ -116,19 +447,7 @@ pub fn parse(input: &str) -> Result<Structure> {
             }
         }
     }
-
-    Ok(Structure {
-        atoms,
-        bonds,
-        stereo_bonds,
-        positions,
-        isotopic_h: Default::default(),
-        protons_hard_moved: false,
-        ride_marks: Vec::new(),
-        taut_ext: Default::default(),
-        fold_source: Vec::new(),
-        chiral_flag: chiral_flag != 0,
-    })
+    Ok(())
 }
 
 fn line_or<'a>(lines: &'a [&'a str], index: usize, block: &str) -> Result<&'a str> {
@@ -184,5 +503,79 @@ mod tests {
     fn water_fixture_constant_parses() {
         let structure = parse(WATER).expect("parses");
         assert_eq!(structure.atoms[0].element, "O");
+    }
+
+    // The V3000 flavor: the same water, one CTAB block.
+    const WATER_V3000: &str = "water\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 1 0 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 O 12 12 0 0\nM  V30 END ATOM\nM  V30 END CTAB\nM  END\n";
+
+    #[test]
+    fn reads_the_v3000_block_into_the_same_structure() {
+        let v3000 = parse(WATER_V3000).expect("parses");
+        let v2000 = parse(WATER).expect("parses");
+        assert_eq!(v3000, v2000);
+    }
+
+    #[test]
+    fn v3000_carries_charges_isotopes_and_case_normalizes_symbols() {
+        let molfile = "dichloro\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 2 1 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 CL 12 12 0 0 MASS=37\nM  V30 2 N 20 12 0 0 CHG=1\nM  V30 END ATOM\nM  V30 BEGIN BOND\nM  V30 1 1 1 2\nM  V30 END BOND\nM  V30 END CTAB\nM  END\n";
+        let structure = parse(molfile).expect("parses");
+        assert_eq!(structure.atoms[0].element, "Cl");
+        assert_eq!(structure.atoms[0].isotope, 37);
+        assert_eq!(structure.atoms[1].element, "N");
+        assert_eq!(structure.atoms[1].charge, 1);
+        assert_eq!(structure.bonds, vec![(0, 1, 1)]);
+    }
+
+    #[test]
+    fn v3000_aromatic_bonds_and_wedge_cfg_map_to_the_v2000_codes() {
+        let molfile = "wedge\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 3 3 0 0 1\nM  V30 BEGIN ATOM\nM  V30 1 C 12 12 0 0\nM  V30 2 C 20 14 0 0\nM  V30 3 O 4 14 0 0\nM  V30 END ATOM\nM  V30 BEGIN BOND\nM  V30 1 1 1 2 CFG=1\nM  V30 2 4 2 3\nM  V30 3 1 1 3 CFG=3\nM  V30 END BOND\nM  V30 END CTAB\nM  END\n";
+        let structure = parse(molfile).expect("parses");
+        assert_eq!(structure.bonds, vec![(0, 1, 1), (1, 2, 4), (0, 2, 1)]);
+        assert_eq!(structure.stereo_bonds.get(&0), Some(&1));
+        assert_eq!(structure.stereo_bonds.get(&2), Some(&6));
+        assert!(structure.chiral_flag);
+    }
+
+    #[test]
+    fn v3000_continuation_lines_join_into_one_logical_line() {
+        let molfile = "wrapped\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 2 1 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 C 12 12 0 0\nM  V30 2 O 20 12 0 -\nM  V30 0\nM  V30 END ATOM\nM  V30 BEGIN BOND\nM  V30 1 1 1 2\nM  V30 END BOND\nM  V30 END CTAB\nM  END\n";
+        let structure = parse(molfile).expect("parses");
+        assert_eq!(structure.atoms[1].element, "O");
+        assert_eq!(structure.atoms[1].isotope, 0);
+        assert_eq!(structure.bonds, vec![(0, 1, 1)]);
+    }
+
+    #[test]
+    fn v3000_tail_blocks_are_skipped_to_end_ctab() {
+        let molfile = "collected\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 1 0 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 C 12 12 0 0\nM  V30 END ATOM\nM  V30 BEGIN COLLECTION\nM  V30 MDLV30/STEABS ATOMS=(1 1)\nM  V30 END COLLECTION\nM  V30 END CTAB\nM  END\n";
+        let structure = parse(molfile).expect("parses");
+        assert_eq!(structure.atoms[0].element, "C");
+        assert!(!structure.chiral_flag);
+    }
+
+    #[test]
+    fn v3000_unsupported_constructs_report_rather_than_guess() {
+        let unknown = "odd\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 1 0 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 C 12 12 0 0 FOO=3\nM  V30 END ATOM\nM  V30 END CTAB\nM  END\n";
+        assert!(parse(unknown).is_err(), "unknown atom attribute");
+        let haptic = "haptic\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 2 1 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 Fe 12 12 0 0\nM  V30 2 C 20 12 0 0\nM  V30 END ATOM\nM  V30 BEGIN BOND\nM  V30 1 1 1 2 ENDPTS=(5 2 3 4 5 6) ATTACH=ALL\nM  V30 END BOND\nM  V30 END CTAB\nM  END\n";
+        assert!(parse(haptic).is_err(), "haptic bond");
+        let unprefixed =
+            "bad\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nBEGIN CTAB\nM  END\n";
+        assert!(parse(unprefixed).is_err(), "missing M  V30 prefix");
+    }
+
+    #[test]
+    fn v3000_zero_bond_counts_need_no_bond_block() {
+        let molfile = "lone\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 1 0 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 Na 12 12 0 0 CHG=1\nM  V30 END ATOM\nM  V30 END CTAB\nM  END\n";
+        let structure = parse(molfile).expect("parses");
+        assert!(structure.bonds.is_empty());
+        assert_eq!(structure.atoms[0].charge, 1);
+    }
+
+    #[test]
+    fn v3000_elements_read_through_the_same_engine() {
+        let engine = crate::engine::Engine::from_molfile(WATER_V3000).expect("engine");
+        let inchi = engine.inchi_string().expect("inchi");
+        assert_eq!(inchi, "InChI=1S/H2O/h1H2");
     }
 }
