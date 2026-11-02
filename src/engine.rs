@@ -1307,4 +1307,39 @@ mod tests {
         };
         assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H2O/c1-2/p+1");
     }
+
+    #[test]
+    fn the_repetition_join_speaks_both_mark_styles() {
+        // The permanganate /f /q recording: two equal marks, two equal
+        // values, a bare empty slot, then a lone mark — the styles
+        // never cross-merge.
+        let fields = vec!["m", "m", "-1", "-1", "", "m"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(merge_repetitions(fields).join(";"), "2m;2*-1;;m");
+        // The decahydrate: thirteen equal marks collapse to the bare
+        // count (AuxInfo /F:13m).
+        let fields: Vec<String> = std::iter::repeat_n("m".to_string(), 13).collect();
+        assert_eq!(merge_repetitions(fields).join(";"), "13m");
+        // Equal-value runs take the starred form; unequal neighbours
+        // never merge even in the same class.
+        let fields = vec!["+1", "+1", "+2", ""]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(merge_repetitions(fields).join(";"), "2*+1;+2;");
+    }
+
+    #[test]
+    fn the_plain_run_join_keeps_its_own_semantics() {
+        // merge_runs (the mobile layers and CRV) multiplies equal
+        // NON-EMPTY values with the star and keeps empty slots bare —
+        // no `m` special-casing.
+        let fields = vec!["(1,2)", "(1,2)", "", "s"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(merge_runs(fields).join(";"), "2*(1,2);;s");
+    }
 }

@@ -717,4 +717,61 @@ mod tests {
         assert!(aux.contains("/CRV:"), "{aux}");
         assert!(aux.contains("(3,4)"), "{aux}");
     }
+
+    #[test]
+    fn the_fixed_pass_fields_repeat_the_main_numbering_as_m() {
+        // The multi-component /F: recipe (ichiprt3.c str_AuxNumb /
+        // str_AuxEqu over bSecondNonTautPass): the fixed numbering
+        // equal to the main one renders `m` — the recorded sodium
+        // acetate (`/F:2m/E:m`) and copper sulfate pentahydrate
+        // (`/F:m;5,2,4,6,3`) fields.
+        let mut working = Structure {
+            atoms: vec![atom("C"), atom("C"), atom("O"), atom("O")],
+            bonds: vec![(0, 1, 1), (1, 2, 1), (1, 3, 2)],
+            ..Default::default()
+        };
+        working.fold_explicit_hydrogens();
+        // Fixed ranks in submission order, all classes distinct: the
+        // numbering repeats the main one (`m`), the equivalence has no
+        // non-singleton class (empty field).
+        let fixed = crate::canonical::fixedh::FixedH {
+            ranks: vec![1, 2, 3, 4],
+            symmetry: vec![1, 2, 3, 4],
+            deltas: vec![0, 0, 0, 0],
+            formula: "C2H4O2".to_string(),
+            total_charge: 0,
+            inverted: false,
+        };
+        let fields = fixed_pass_fields(&working, &fixed, "1,2,3,4", "");
+        assert_eq!(fields.numbering, "m");
+        assert_eq!(fields.equ, "");
+        assert!(!fields.inverted);
+        // A differing fixed numbering prints the list; a differing
+        // non-singleton class prints its text (the sulfate recording's
+        // `5,2,4,6,3` with `/E:(2,3,4)`).
+        let fixed = crate::canonical::fixedh::FixedH {
+            ranks: vec![3, 1, 2, 4],
+            symmetry: vec![1, 2, 2, 2],
+            deltas: vec![0, 0, 0, 0],
+            formula: "H2O4S".to_string(),
+            total_charge: 0,
+            inverted: false,
+        };
+        let fields = fixed_pass_fields(&working, &fixed, "1,2,3,4", "");
+        assert_eq!(fields.numbering, "2,3,1,4");
+        assert_eq!(fields.equ, "(1,2,4)");
+        // A fixed equivalence repeating the main one renders the `m`
+        // mark (the sodium acetate recording's `/E:m`).
+        let fixed = crate::canonical::fixedh::FixedH {
+            ranks: vec![1, 2, 3, 4],
+            symmetry: vec![1, 2, 3, 3],
+            deltas: vec![0, 0, 0, 0],
+            formula: "C2H4O2".to_string(),
+            total_charge: 0,
+            inverted: false,
+        };
+        let fields = fixed_pass_fields(&working, &fixed, "1,2,3,4", "(3,4)");
+        assert_eq!(fields.numbering, "m");
+        assert_eq!(fields.equ, "m");
+    }
 }
