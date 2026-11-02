@@ -416,14 +416,25 @@ impl Engine {
     /// segments, identical adjacent components multiplied `n*`, and
     /// the /p layer one NET segment (the sum of the components'
     /// shifts). The version prefix reads `1S` only when every
-    /// component is standard.
+    /// component is standard. Under [`Options::fixed_h`] each
+    /// sibling's own `/f` block is stripped from the main line and
+    /// re-assembled as ONE multi-component `/f` block — the list
+    /// writers' conventions (ichiprt1.c
+    /// OutputINCHI_FixedHLayerWithSublayers over ichiprt3.c's
+    /// str_HillFormula2 / str_FixedH_atoms / str_Charge2): the fixed
+    /// formulas dot-joined with bare-count multipliers, the fixed-H
+    /// deltas and the charge fields `;`-joined per component with the
+    /// `n*` and bare-count run marks, and NO `/p` (the protons segment
+    /// is mobile-H only).
     fn assemble_identifier(&self) -> Result<String> {
         // Each sibling identifier splits into (kind, segment) pairs —
         // the formula carries no letter, the layers do. The assembly
         // joins BY KIND (components carry different layer sets; the
         // sodium's /q must not swallow the acid's /p), the /p excluded
         // from the per-component join and emitted once as the NET
-        // shift.
+        // shift. The sibling's /f block (everything from its `f`
+        // segment on — the fixed formula, its /h /q sub-segments and
+        // the FI block) is lifted out: no main layer begins with `f`.
         let mut parts: Vec<Vec<(char, String)>> = Vec::new();
         let mut standard = true;
         for sibling in &self.siblings {
@@ -433,22 +444,31 @@ impl Engine {
                 .strip_prefix("InChI=1S/")
                 .or_else(|| id.strip_prefix("InChI=1/"))
                 .expect("a sibling identifier carries a version prefix");
-            parts.push(
-                body.split('/')
-                    .enumerate()
-                    .map(|(index, segment)| {
-                        (
-                            if index == 0 {
-                                '\0'
-                            } else {
-                                segment.chars().next().unwrap_or('\0')
-                            },
-                            segment.to_string(),
-                        )
-                    })
-                    .collect(),
-            );
+            let segments: Vec<(char, String)> = body
+                .split('/')
+                .enumerate()
+                .map(|(index, segment)| {
+                    (
+                        if index == 0 {
+                            '\0'
+                        } else {
+                            segment.chars().next().unwrap_or('\0')
+                        },
+                        segment.to_string(),
+                    )
+                })
+                .collect();
+            // The sibling's /f block (everything from its `f` segment
+            // on — the fixed formula, its /h /q sub-segments and the FI
+            // block) is lifted out of the main line: no main layer
+            // begins with `f`.
+            let fixed_start = segments
+                .iter()
+                .position(|(kind, _)| *kind == 'f')
+                .unwrap_or(segments.len());
+            parts.push(segments[..fixed_start].to_vec());
         }
+        let components = self.fixed_components()?;
         let mut order: Vec<usize> = (0..parts.len()).collect();
         order.sort_by(|&a, &b| compare_components(&self.siblings[a], &self.siblings[b]));
         // Identical adjacent FORMULAS group under a multiplier (the
@@ -515,12 +535,22 @@ impl Engine {
             out.push('/');
             out.push_str(&format!("p{sign}{}", net.abs()));
         }
+        // The fixed-H block: one /f over all components, in the same
+        // sorted order, present when any component's /f is active.
+        if components.iter().any(|component| component.active) {
+            out.push('/');
+            out.push_str(&assemble_fixedh_block(&order, &components));
+        }
         Ok(out)
     }
 
     /// The multi-component AuxInfo: the per-component canonical fields
     /// `;`-joined over the sorted component order, the echo
-    /// (`/rA /rB /rC`) whole-structure over the submitted input.
+    /// (`/rA /rB /rC`) whole-structure over the submitted input. Under
+    /// the fixed-H mode the aux second pass (`/F:` plus its `/E:` and
+    /// `/it:` repetition fields) rides when the identifier's /f carried
+    /// non-isotopic content — ichiprt1.c's `repeat_INChI_Aux_output`
+    /// with AL_FIXH tags.
     fn assemble_aux(&self) -> Result<String> {
         let mut order: Vec<usize> = (0..self.siblings.len()).collect();
         order.sort_by(|&a, &b| compare_components(&self.siblings[a], &self.siblings[b]));
@@ -547,7 +577,7 @@ impl Engine {
         // /q only), with the layer segments' multiplier semantics:
         // consecutive equal non-empty fields collapse to `n*field`,
         // an empty field stays one bare slot.
-        let canonical_tags = ["N:", "E:", "gE:", "it:", "iN:", "CRV:"];
+        let canonical_tags = ["N:", "E:", "gE:", "it:", "iN:"];
         let mut out = format!("AuxInfo=1/{norm}");
         for tag in canonical_tags {
             let mut present = false;
@@ -567,8 +597,99 @@ impl Engine {
                 out.push_str(&merge_runs(fields).join(";"));
             }
         }
+        // The /F: second pass (ichiprt1.c's AL_FIXH run): one field per
+        // component over the sorted order — the fixed numbering (`m`
+        // when it repeats the main one) and the fixed equivalence
+        // (`m`/classes/empty), then the inverted-stereo mark. The
+        // second pass rides only when the identifier's /f carried
+        // NON-isotopic content (bNonTautNonIsoIdentifierNotEmpty); an
+        // FI-only /f block (the d2o recording) leaves it out.
+        let components = self.fixed_components()?;
+        if components.iter().any(|component| component.non_iso_content) {
+            let mut numberings = Vec::new();
+            let mut equivalents = Vec::new();
+            let mut inversions = Vec::new();
+            for (position, &index) in order.iter().enumerate() {
+                let sibling = &self.siblings[index];
+                let main = |tag: &str| {
+                    field_aux[position]
+                        .iter()
+                        .find(|(t, _)| t == tag)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default()
+                };
+                let fields = match &sibling.fixed_h {
+                    Some(fixed) => crate::aux::fixed_pass_fields(
+                        &sibling.structure,
+                        fixed,
+                        &main("N:"),
+                        &main("E:"),
+                    ),
+                    None => crate::aux::FixedHPassFields {
+                        numbering: String::new(),
+                        equ: String::new(),
+                        inverted: false,
+                    },
+                };
+                numberings.push(fields.numbering);
+                equivalents.push(fields.equ);
+                inversions.push(if fields.inverted { "m" } else { "" }.to_string());
+            }
+            out.push_str("/F:");
+            out.push_str(&merge_repetitions(numberings).join(";"));
+            if equivalents.iter().any(|field| !field.is_empty()) {
+                out.push_str("/E:");
+                out.push_str(&merge_repetitions(equivalents).join(";"));
+            }
+            if inversions.iter().any(|field| !field.is_empty()) {
+                out.push_str("/it:");
+                out.push_str(&merge_repetitions(inversions).join(";"));
+            }
+        }
+        let mut present = false;
+        let mut fields: Vec<String> = Vec::new();
+        for aux in &field_aux {
+            let value = aux
+                .iter()
+                .find(|(t, _)| t == "CRV:")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            present = present || !value.is_empty();
+            fields.push(value);
+        }
+        if present {
+            out.push_str("/CRV:");
+            out.push_str(&merge_runs(fields).join(";"));
+        }
         out.push_str(&crate::aux::reversibility_block(&self.original));
         Ok(out)
+    }
+
+    /// Each sibling's slice of the `/f` block (sibling order — index
+    /// through the assembly's sorted `order`).
+    fn fixed_components(&self) -> Result<Vec<crate::layers::fixedh::FixedHComponent>> {
+        self.siblings
+            .iter()
+            .map(|sibling| match &sibling.fixed_h {
+                Some(fixed) => {
+                    let layer = crate::layers::fixedh::FixedHLayer::new(
+                        fixed.clone(),
+                        sibling.options.clone(),
+                    );
+                    layer.component(&sibling.structure)
+                }
+                None => Ok(crate::layers::fixedh::FixedHComponent {
+                    formula: String::new(),
+                    formula_differs: false,
+                    h_text: None,
+                    atoms: 0,
+                    q_field: String::new(),
+                    q_differs: false,
+                    active: false,
+                    non_iso_content: false,
+                }),
+            })
+            .collect()
     }
 
     /// The AuxInfo line beside the identifier: canonical numbering,
@@ -768,6 +889,142 @@ fn merge_runs(fields: Vec<String>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// The mixed repetition-field join (ichiprt3.c str_Charge2's second
+/// pass and str_AuxEqu): consecutive equal `m` marks collapse to a
+/// BARE count (`2m`, the decahydrate's `13m`), consecutive equal value
+/// fields collapse to the starred `n*value` (`2*-1`), and an empty
+/// field stays one bare slot; the two mark styles never cross-merge
+/// (the permanganate recording: `2m;2*-1;;m`).
+fn merge_repetitions(fields: Vec<String>) -> Vec<String> {
+    enum Class {
+        Empty,
+        Mark,
+        Value,
+    }
+    let mut runs: Vec<(Class, usize, String)> = Vec::new();
+    for field in fields {
+        let class = if field.is_empty() {
+            Class::Empty
+        } else if field == "m" {
+            Class::Mark
+        } else {
+            Class::Value
+        };
+        let mergeable = !matches!(class, Class::Empty);
+        match runs.last_mut() {
+            Some((last_class, count, last)) if mergeable => match (&*last_class, &class) {
+                (Class::Mark, Class::Mark) | (Class::Value, Class::Value) if *last == field => {
+                    *count += 1;
+                }
+                _ => runs.push((class, 1, field)),
+            },
+            _ => runs.push((class, 1, field)),
+        }
+    }
+    runs.into_iter()
+        .map(|(class, count, field)| match class {
+            Class::Empty => field,
+            Class::Mark if count > 1 => format!("{count}{field}"),
+            Class::Value if count > 1 => format!("{count}*{field}"),
+            _ => field,
+        })
+        .collect()
+}
+
+/// The multi-component `/f` block over the sorted components
+/// (ichiprt1.c OutputINCHI_FixedHLayerWithSublayers over ichiprt3.c's
+/// str_HillFormula2 / str_FixedH_atoms / str_Charge2): the fixed
+/// formulas dot-joined with bare-count multipliers (retracted to the
+/// bare `f` when every component's fixed formula equals its mobile
+/// one), the fixed-H deltas and the charge fields `;`-joined per
+/// component, and NO `/p` (the protons segment is mobile-H only,
+/// strutil.h DIFS_p). The corpus witnesses formula, /h and /q; the
+/// fixed stereo and FI sub-segments have no multi recording yet.
+fn assemble_fixedh_block(
+    order: &[usize],
+    components: &[crate::layers::fixedh::FixedHComponent],
+) -> String {
+    let mut out = String::from("f");
+    // The formula segment: every component's fixed formula prints
+    // whenever the segment fills (a single differing component fills
+    // it — the barium recording's `/fBa.2Cl.2H2O` keeps the waters'
+    // unchanged H2O), consecutive equals under a bare count.
+    if order.iter().any(|&index| components[index].formula_differs) {
+        let mut groups: Vec<(usize, String)> = Vec::new();
+        for &index in order {
+            let formula = components[index].formula.clone();
+            match groups.last_mut() {
+                Some((count, last)) if *last == formula => *count += 1,
+                _ => groups.push((1, formula)),
+            }
+        }
+        let formulas: Vec<String> = groups
+            .into_iter()
+            .map(|(count, formula)| {
+                if count > 1 {
+                    format!("{count}{formula}")
+                } else {
+                    formula
+                }
+            })
+            .collect();
+        out.push_str(&formulas.join("."));
+    }
+    // The fixed-H deltas (IL_HFIX): one field per component, the empty
+    // slot bare; consecutive equal NON-EMPTY deltas of equal-length
+    // components multiply with the star (str_FixedH_atoms' eq2prev —
+    // the memcmp runs over equal-length nNum_H_fixed arrays; the alum
+    // recording's `2*1H`). The whole segment retracts when every
+    // component's deltas are empty.
+    if order
+        .iter()
+        .any(|&index| components[index].h_text.is_some())
+    {
+        out.push_str("/h");
+        let mut runs: Vec<(usize, String, usize)> = Vec::new();
+        for &index in order {
+            let component = &components[index];
+            let text = component.h_text.clone().unwrap_or_default();
+            match runs.last_mut() {
+                Some((count, last, atoms))
+                    if !text.is_empty() && *last == text && *atoms == component.atoms =>
+                {
+                    *count += 1;
+                }
+                _ => runs.push((1, text, component.atoms)),
+            }
+        }
+        let fields: Vec<String> = runs
+            .into_iter()
+            .map(|(count, text, _)| {
+                if count > 1 {
+                    format!("{count}*{text}")
+                } else {
+                    text
+                }
+            })
+            .collect();
+        out.push_str(&fields.join(";"));
+    }
+    // The charges (IL_CHRG under the fixed-H tag): one field per
+    // component — empty (zero fixed charge), the `m` repetition mark
+    // (the fixed charge equals the nonzero mobile one), or the signed
+    // total — joined with the mixed repetition marks. The segment
+    // fills when any component carries a NEQ or IS_EMPTY charge bit;
+    // an all-marks charge (every component repeating its nonzero
+    // mobile charge) omits (CompINChILayers' EQL2PRECED carries no
+    // FILL bit).
+    if order.iter().any(|&index| components[index].q_differs) {
+        out.push_str("/q");
+        let fields: Vec<String> = order
+            .iter()
+            .map(|&index| components[index].q_field.clone())
+            .collect();
+        out.push_str(&merge_repetitions(fields).join(";"));
+    }
+    out
 }
 
 /// The reference's component comparator (ichimake.c CompINChI2): the

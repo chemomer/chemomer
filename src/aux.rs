@@ -15,6 +15,59 @@ use crate::layers::hydrogen::canonical_ranks_for;
 use crate::layers::standardization;
 use crate::options::Options;
 
+/// The rendered `/N:` numbering — the original atom numbers in
+/// canonical order (the shared recipe of the main block and the /F:
+/// second pass).
+fn canonical_numbering(
+    working: &Structure,
+    ranks: &[u32],
+    original_index: &[usize],
+) -> Vec<String> {
+    let mut order: Vec<usize> = (0..working.atoms.len()).collect();
+    order.sort_by_key(|&atom| ranks[atom]);
+    order
+        .iter()
+        .map(|&atom| (original_index[atom] + 1).to_string())
+        .collect()
+}
+
+/// The non-singleton equivalence classes as sorted member lists —
+/// members by canonical number, classes ordered by their minimum (the
+/// shared recipe of the main `/E:` and the /F: second pass).
+fn equivalence_classes(symmetry: &[u32], ranks: &[u32]) -> Vec<Vec<u32>> {
+    let mut classes: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
+    for (atom, class) in symmetry.iter().enumerate() {
+        classes.entry(*class).or_default().push(ranks[atom]);
+    }
+    let mut equivalents: Vec<Vec<u32>> = classes
+        .into_values()
+        .filter(|members| members.len() > 1)
+        .map(|mut members| {
+            members.sort_unstable();
+            members
+        })
+        .collect();
+    equivalents.sort();
+    equivalents
+}
+
+/// The rendered class text — `(2,3)(4,5)` (the `/E:` field shape).
+pub(crate) fn render_equivalents(equivalents: &[Vec<u32>]) -> String {
+    equivalents
+        .iter()
+        .map(|members| {
+            format!(
+                "({})",
+                members
+                    .iter()
+                    .map(|m| m.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect()
+}
+
 /// The AuxInfo line for a submitted structure (`original`, exactly as
 /// parsed) and its normalized form (`working`, the one the layers
 /// read). `proton_shift` is the net protons the (DE)PROTONATION
@@ -125,48 +178,18 @@ pub fn aux_info(
     } else {
         working.fold_source.clone()
     };
-    let mut order: Vec<usize> = (0..working.atoms.len()).collect();
-    order.sort_by_key(|&atom| ranks_aux[atom]);
-    let numbering: Vec<String> = order
-        .iter()
-        .map(|&atom| (original_index[atom] + 1).to_string())
-        .collect();
+    let numbering: Vec<String> = canonical_numbering(working, &ranks_aux, &original_index);
     let main_numbering = numbering.clone();
     out.push_str(&numbering.join(","));
 
     // `/E:` — the constitutional equivalence classes: members by
     // canonical number, non-singleton classes only, classes ordered
     // by their minimum.
-    let mut classes: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
-    for (atom, class) in symmetry.iter().enumerate() {
-        classes.entry(*class).or_default().push(ranks_aux[atom]);
-    }
-    let mut equivalents: Vec<Vec<u32>> = classes
-        .into_values()
-        .filter(|members| members.len() > 1)
-        .map(|mut members| {
-            members.sort_unstable();
-            members
-        })
-        .collect();
-    equivalents.sort();
-    let equivalents_main = equivalents.clone();
+    let equivalents_main = equivalence_classes(&symmetry, &ranks_aux);
+    let equivalents = equivalents_main.clone();
     if !equivalents.is_empty() {
         out.push_str("/E:");
-        let text: Vec<String> = equivalents
-            .iter()
-            .map(|members| {
-                format!(
-                    "({})",
-                    members
-                        .iter()
-                        .map(|m| m.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            })
-            .collect();
-        out.push_str(&text.join(""));
+        out.push_str(&render_equivalents(&equivalents));
     }
 
     // `/gE:` — equivalence of the registered mobile groups: groups
@@ -246,12 +269,8 @@ pub fn aux_info(
     // content — the corpus's FI-only /f (d2o) has no /F: block).
     if let (Some(fixed), true) = (fixed, fixed_block) {
         let mut block = String::from("/F:");
-        let mut order: Vec<usize> = (0..working.atoms.len()).collect();
-        order.sort_by_key(|&atom| fixed.ranks[atom]);
-        let fixed_numbering: Vec<String> = order
-            .iter()
-            .map(|&atom| (original_index[atom] + 1).to_string())
-            .collect();
+        let fixed_numbering: Vec<String> =
+            canonical_numbering(working, &fixed.ranks, &original_index);
         if fixed_numbering == main_numbering {
             block.push('m');
         } else {
@@ -261,38 +280,14 @@ pub fn aux_info(
         // its own symmetry: `m` when they repeat the main list, the
         // list when they differ, nothing when all classes are
         // singletons (aspirin's split carboxyl oxygens).
-        let mut classes: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
-        for (atom, class) in fixed.symmetry.iter().enumerate() {
-            classes.entry(*class).or_default().push(fixed.ranks[atom]);
-        }
-        let mut equivalents: Vec<Vec<u32>> = classes
-            .into_values()
-            .filter(|members| members.len() > 1)
-            .map(|mut members| {
-                members.sort_unstable();
-                members
-            })
-            .collect();
-        equivalents.sort();
+        let equivalents = equivalence_classes(&fixed.symmetry, &fixed.ranks);
         if !equivalents.is_empty() {
-            if equivalents == equivalents_main {
+            let text = render_equivalents(&equivalents);
+            if text == render_equivalents(&equivalents_main) {
                 block.push_str("/E:m");
             } else {
                 block.push_str("/E:");
-                let text: Vec<String> = equivalents
-                    .iter()
-                    .map(|members| {
-                        format!(
-                            "({})",
-                            members
-                                .iter()
-                                .map(|m| m.to_string())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        )
-                    })
-                    .collect();
-                block.push_str(&text.join(""));
+                block.push_str(&text);
             }
         }
         if fixed.inverted {
@@ -593,6 +588,62 @@ fn clean_coord(value: f64) -> String {
         return rest.to_string();
     }
     text
+}
+
+/// The per-component fields of the aux /F: second pass — the slice
+/// the multi-component assembly `;`-joins (ichiprt3.c str_AuxNumb /
+/// str_AuxEqu with bSecondNonTautPass). `main_numbering` is the
+/// component's rendered main `/N:` value and `main_equivalents` its
+/// rendered main `/E:` value (empty when the main block printed no
+/// classes); both carry the exact text these recipes rendered, so the
+/// repetition marks compare strings.
+pub(crate) struct FixedHPassFields {
+    /// The numbering field: `m` when the fixed numbering repeats the
+    /// main one, else the comma-joined fixed numbering.
+    pub numbering: String,
+    /// The second-pass equivalence field: `m` when the fixed classes
+    /// repeat the main ones, the class text when they differ, empty
+    /// when the fixed classes are all singletons.
+    pub equ: String,
+    /// The fixed pass adopted the inverted stereo verdict (`it:m`).
+    pub inverted: bool,
+}
+
+pub(crate) fn fixed_pass_fields(
+    working: &Structure,
+    fixed: &FixedH,
+    main_numbering: &str,
+    main_equivalents: &str,
+) -> FixedHPassFields {
+    let original_index: Vec<usize> = if working.fold_source.is_empty() {
+        (0..working.atoms.len()).collect()
+    } else {
+        working.fold_source.clone()
+    };
+    let fixed_numbering = canonical_numbering(working, &fixed.ranks, &original_index);
+    let numbering = if fixed_numbering
+        .iter()
+        .map(String::as_str)
+        .eq(main_numbering.split(','))
+    {
+        "m".to_string()
+    } else {
+        fixed_numbering.join(",")
+    };
+    let equivalents = equivalence_classes(&fixed.symmetry, &fixed.ranks);
+    let text = render_equivalents(&equivalents);
+    let equ = if text.is_empty() {
+        String::new()
+    } else if text == main_equivalents {
+        "m".to_string()
+    } else {
+        text
+    };
+    FixedHPassFields {
+        numbering,
+        equ,
+        inverted: fixed.inverted,
+    }
 }
 
 #[cfg(test)]
