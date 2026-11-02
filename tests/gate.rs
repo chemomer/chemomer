@@ -1071,27 +1071,22 @@ fn the_tautomer_extremes_match_the_oracle() {
     );
 }
 
-/// The V3000 input gate: the corpus's v3000-molfiles tranche records a
-/// sample of existing fixtures re-authored as V3000 molfiles (the
-/// CHG=/MASS= attributes, CFG= wedges, free-form V30 lines), each with
-/// the oracle's identifier over that V3000 input — cross-checked at
-/// recording time against the source fixture's V2000 identity. The
-/// engine's reader dispatches on the counts-line version tag, so the
-/// same `Engine::from_molfile` path must reproduce both recordings
-/// byte-for-byte. The tranche file is optional — a corpus without it
-/// skips (the way the rinchi gate skips a missing tranche).
-#[test]
-fn the_v3000_input_matches_the_oracle() {
-    let dir = suite_dir();
-    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/v3000-molfiles.json")) else {
+/// One identity tranche walk, shared by the input-breadth gates: every
+/// `{id, molfile, inchi, inchikey}` fixture must reproduce the oracle's
+/// recorded identifier byte-for-byte through `Engine::from_molfile`,
+/// with the native key over the recorded identifier (the identifier
+/// gate's per-record invariant). A missing tranche file reads as an
+/// empty one — the gate skips, the way the rinchi gate skips a missing
+/// tranche. Beyond-±1 fixtures (the per-atom GetAtomChargeType bound)
+/// count separately, never as failures.
+fn check_identity_tranche(dir: &std::path::Path, file: &str, label: &str) {
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures").join(file)) else {
+        println!("{label} gate: no tranche file, skipped");
         return;
     };
-    let cases: Vec<serde_json::Value> =
-        serde_json::from_str(&text).expect("valid v3000-molfiles fixtures");
-    assert!(
-        !cases.is_empty(),
-        "the v3000-molfiles file carries no fixtures"
-    );
+    let cases: Vec<serde_json::Value> = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("valid {file} fixtures: {error}"));
+    assert!(!cases.is_empty(), "the {file} file carries no fixtures");
 
     let mut pass = 0;
     let mut beyond = 0;
@@ -1104,9 +1099,6 @@ fn the_v3000_input_matches_the_oracle() {
         match chemomer::Engine::from_molfile(molfile).and_then(|engine| engine.inchi_string()) {
             Ok(assembled) => {
                 if assembled == recorded {
-                    // The native hasher must reproduce the recorded key
-                    // from the recorded identifier, per the identifier
-                    // gate's per-record invariant.
                     let key = chemomer::key::inchikey(recorded).expect("keys");
                     if key == recorded_key {
                         pass += 1;
@@ -1130,13 +1122,41 @@ fn the_v3000_input_matches_the_oracle() {
     }
     assert!(
         failures.is_empty(),
-        "{} V3000 mismatch(es):\n{}\n(v3000 pass: {pass}, beyond-±1: {beyond}, total: {})",
+        "{} {label} mismatch(es):\n{}\n({label} pass: {pass}, beyond-±1: {beyond}, total: {})",
         failures.len(),
         failures.join("\n"),
         cases.len()
     );
     println!(
-        "v3000 gate: pass {pass}, beyond-±1 {beyond}, total {}",
+        "{label} gate: pass {pass}, beyond-±1 {beyond}, total {}",
         cases.len()
     );
+}
+
+/// The V3000 input gate: the corpus's v3000-molfiles tranche records a
+/// sample of existing fixtures re-authored as V3000 molfiles (the
+/// CHG=/MASS= attributes, CFG= wedges, free-form V30 lines), each with
+/// the oracle's identifier over that V3000 input — cross-checked at
+/// recording time against the source fixture's V2000 identity. The
+/// engine's reader dispatches on the counts-line version tag, so the
+/// same `Engine::from_molfile` path must reproduce both recordings
+/// byte-for-byte.
+#[test]
+fn the_v3000_input_matches_the_oracle() {
+    let dir = suite_dir();
+    check_identity_tranche(&dir, "v3000-molfiles.json", "v3000");
+}
+
+/// The LargeMolecules gate: the corpus's large-molecules tranche
+/// records alkane chains past the reference's normally-allowed input
+/// size (ichisize.h:51, the 1024-atom cap its reader enforces without
+/// -LargeMolecules) with the oracle's `-LargeMolecules` identifiers —
+/// the beta `InChI=1B` flavor the reference writes for every structure
+/// past that bound. Our reader carries no atom cap and the assembler
+/// applies the same atom-count rule, so plain `Engine::from_molfile`
+/// reproduces both recordings.
+#[test]
+fn the_large_molecules_match_the_oracle() {
+    let dir = suite_dir();
+    check_identity_tranche(&dir, "large-molecules.json", "large-molecules");
 }
