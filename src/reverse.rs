@@ -8,8 +8,12 @@
 //! branch-stack walk, [`ParseSegmentMobileH`] (ichiread.c:8230) for
 //! the /h fixed counts and `(Hn,atoms)` t-groups,
 //! [`ParseSegmentCharge`] (ichiread.c:8032), [`ParseSegmentProtons`]
-//! (ichiread.c:7426), [`ParseSegmentIsoAtoms`] (ichiread.c:5806) and
-//! [`ParseSegmentIsoExchgH`] (ichiread.c:5541) for /q /p /i.
+//! (ichiread.c:7426), [`ParseSegmentIsoAtoms`] (ichiread.c:5806),
+//! [`ParseSegmentIsoExchgH`] (ichiread.c:5541) for /q /p /i, and the
+//! stereo segments [`ParseSegmentSp2`] (ichiread.c:6866, /b),
+//! [`ParseSegmentSp3`] (ichiread.c:6600, /t), [`ParseSegmentSp3m`]
+//! (ichiread.c:6378, /m) and [`ParseSegmentSp3s`] (ichiread.c:6235,
+//! /s).
 //!
 //! What the reference leaves to its BNS structure restore
 //! (ichirvr1..7.c, the deliberately lossy mobile-H/charge placement)
@@ -18,6 +22,19 @@
 //! (tests/gate.rs) pins those choices against the oracle's own
 //! recorded reconstruction: our forward of our reconstruction must
 //! equal the oracle's re-forward of the oracle's reconstruction.
+//!
+//! Stereo reconstruction diverges from the reference's 0D-parity
+//! path (ichirvr2.c `RestoreAtomConnectionsSetStereo`): the reference
+//! stores parity descriptors on the restored structure and loses them
+//! in its own SDfile serialization, while this module synthesizes the
+//! 2D serialization the engine's own perception reads — drawn
+//! coordinates plus wedge/crossed bond codes, chosen per center and
+//! per double bond against the same perception functions the forward
+//! runs ([`crate::canonical::stereo`], [`crate::canonical::
+//! bond_stereo`]). The reference's parity inversion on rebuild
+//! (ichirvr2.c `bInvertedParity`, keyed on nCompInv2Abs) has no
+//! counterpart here: the /m digit is the perceived first center's
+//! parity bit, and the wedge direction is fitted to it directly.
 
 use crate::error::{err, Result};
 use crate::graph::{AtomRecord, Structure};
@@ -64,6 +81,24 @@ struct IsoEntry {
     tritiums: u32,
 }
 
+/// A parsed /t entry: the canonical atom (0-based) and its mark —
+/// `-`/`+` defined relative parity, `u`/`?` unknown (ichiread.c's
+/// parity_type "-+u?" → 1..4).
+#[derive(Debug, Clone)]
+struct StereoCenter {
+    atom: usize,
+    mark: char,
+}
+
+/// A parsed /b entry: the double bond's canonical endpoints (0-based,
+/// stored high-low as the layer requires) and the mark.
+#[derive(Debug, Clone)]
+struct StereoBond {
+    high: usize,
+    low: usize,
+    mark: char,
+}
+
 /// The parsed layers of one single-component standard InChI.
 #[derive(Debug, Clone, Default)]
 struct Layers {
@@ -81,14 +116,35 @@ struct Layers {
     /// The /i segment's exchangeable-H counts (the `hD2` form after
     /// an empty /i): (deuteriums, tritiums).
     exchanged: (u32, u32),
+    /// /t entries (ascending canonical atoms).
+    stereo_centers: Vec<StereoCenter>,
+    /// /b entries (high-low canonical endpoint pairs, ascending).
+    stereo_bonds: Vec<StereoBond>,
+    /// /m inversion digit (0 or 1) for the single component.
+    inversion: Option<u32>,
+    /// /s stereo-type digit; only 1 (absolute) reconstructs — the
+    /// engine's standard pipeline emits no other type.
+    stereo_type: Option<u32>,
+}
+
+impl Layers {
+    /// Whether any stereo layer was parsed.
+    fn has_stereo(&self) -> bool {
+        !self.stereo_centers.is_empty()
+            || !self.stereo_bonds.is_empty()
+            || self.inversion.is_some()
+            || self.stereo_type.is_some()
+    }
 }
 
 /// Reconstructs a molecular [`Structure`] from a standard InChI
 /// string — the reverse direction of the identity pipeline. Scope:
 /// single-component standard InChIs with formula / /c / /h (fixed and
-/// mobile groups) / /q / /p / /i layers; compressed (abc) layers,
-/// Fixed-H (`/f`) layers, multi-component strings and the stereo
-/// layers (`/b` `/t` `/m` `/s`) are refused with a named error.
+/// mobile groups) / /q / /p / /i layers and the stereo layers /b /t
+/// /m /s (absolute stereo, /s1); compressed (abc) layers, Fixed-H
+/// (`/f`) layers, multi-component strings, relative/racemic types
+/// (/s2 /s3) and stereo combined with the isotopic layers are
+/// refused with a named error.
 pub fn structure_from_inchi(inchi: &str) -> Result<Structure> {
     let layers = parse_layers(inchi)?;
     reconstruct(layers)
@@ -125,11 +181,10 @@ fn parse_layers(inchi: &str) -> Result<Layers> {
             // The isotopic-layer exchangeable-H record: `hD2` after an
             // (empty) /i segment (ParseSegmentIsoExchgH).
             b'h' => parse_exchanged_hydrogen(segment, &mut layers)?,
-            b'b' | b't' | b'm' | b's' => {
-                return err(format!(
-                    "{CONTEXT}: stereo layers (/b /t /m /s) are a follow-up slice: {inchi:?}"
-                ));
-            }
+            b'b' => parse_stereo_bonds(segment, &mut layers)?,
+            b't' => parse_stereo_centers(segment, &mut layers)?,
+            b'm' => parse_inversion(segment, &mut layers)?,
+            b's' => parse_stereo_type(segment, &mut layers)?,
             b'f' => {
                 return err(format!(
                     "{CONTEXT}: Fixed-H layer (/f) is out of the reverse slice: {inchi:?}"
@@ -742,6 +797,210 @@ fn parse_exchanged_hydrogen(segment: &str, layers: &mut Layers) -> Result<()> {
     Ok(())
 }
 
+/// The parity marks the stereo layers speak (ichiread.c's
+/// parity_type): `-` odd, `+` even, `u`/`?` unknown/undefined.
+fn is_parity_mark(byte: u8) -> bool {
+    matches!(byte, b'-' | b'+' | b'u' | b'?')
+}
+
+/// Guards shared by the stereo segment parsers: the single-component,
+/// uncompressed, multiplier-free forms only (the reference's `;`
+/// component separators, `N*` multipliers and abc compression read
+/// elsewhere in ParseSegmentSp2/Sp3).
+fn check_stereo_segment_shape(segment: &str) -> Result<&str> {
+    let body = &segment[1..];
+    if body.contains(';') || body.contains('*') {
+        return err(format!(
+            "{CONTEXT}: multi-component or multiplied stereo segment {segment:?} is out of the reverse slice"
+        ));
+    }
+    if body.bytes().any(|b| b.is_ascii_uppercase()) {
+        return err(format!(
+            "{CONTEXT}: compressed (abc) stereo segment {segment:?} is out of the reverse slice"
+        ));
+    }
+    Ok(body)
+}
+
+/// /t layer → stereocenter entries `at1p,at2p,...` (ParseSegmentSp3 +
+/// SegmentSp3StoreStereoCenters: strictly ascending canonical atoms,
+/// one parity mark each).
+fn parse_stereo_centers(segment: &str, layers: &mut Layers) -> Result<()> {
+    let body = check_stereo_segment_shape(segment)?;
+    if body.is_empty() {
+        // The deliberately-empty segment ("no stereo"): a standard
+        // InChI never emits it.
+        return err(format!("{CONTEXT}: empty /t layer in {segment:?}"));
+    }
+    let n = layers.elements.len();
+    for token in body.split(',') {
+        let bytes = token.as_bytes();
+        let split = bytes
+            .iter()
+            .position(|b| b.is_ascii_digit())
+            .map(|start| {
+                let end = bytes
+                    .iter()
+                    .position(|b| !b.is_ascii_digit())
+                    .unwrap_or(bytes.len());
+                (start, end)
+            })
+            .ok_or_else(|| {
+                crate::error::Error::new(format!(
+                    "{CONTEXT}: expected atom number in /t {segment:?}"
+                ))
+            })?;
+        if split.0 != 0 {
+            return err(format!(
+                "{CONTEXT}: malformed /t entry {token:?} in {segment:?}"
+            ));
+        }
+        let atom: usize = token[..split.1].parse().map_err(|_| {
+            crate::error::Error::new(format!("{CONTEXT}: bad atom number in /t {segment:?}"))
+        })?;
+        if atom == 0 || atom > n {
+            return err(format!(
+                "{CONTEXT}: /t atom {atom} out of 1..{n} in {segment:?}"
+            ));
+        }
+        let &[mark] = bytes.get(split.1..).unwrap_or(&[]) else {
+            return err(format!(
+                "{CONTEXT}: expected a parity mark in /t {segment:?}"
+            ));
+        };
+        if !is_parity_mark(mark) {
+            return err(format!(
+                "{CONTEXT}: unknown parity mark {:?} in /t {segment:?}",
+                mark as char
+            ));
+        }
+        if let Some(previous) = layers.stereo_centers.last() {
+            if previous.atom >= atom {
+                return err(format!(
+                    "{CONTEXT}: /t atoms not strictly ascending in {segment:?}"
+                ));
+            }
+        }
+        layers.stereo_centers.push(StereoCenter {
+            atom: atom - 1,
+            mark: mark as char,
+        });
+    }
+    Ok(())
+}
+
+/// /m layer → the inversion digit: `0` even (nCompInv2Abs = +1), `1`
+/// odd (nCompInv2Abs = −1) — ParseSegmentSp3m's single-component form.
+fn parse_inversion(segment: &str, layers: &mut Layers) -> Result<()> {
+    let body = check_stereo_segment_shape(segment)?;
+    match body {
+        "0" => layers.inversion = Some(0),
+        "1" => layers.inversion = Some(1),
+        _ => {
+            return err(format!(
+                "{CONTEXT}: unsupported /m layer {segment:?} (per-component dots and other forms are out of the reverse slice)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// /s layer → the stereo-type digit (ParseSegmentSp3s: 1 absolute,
+/// 2 relative, 3 racemic). Only the absolute type reconstructs — the
+/// engine's standard pipeline speaks no other.
+fn parse_stereo_type(segment: &str, layers: &mut Layers) -> Result<()> {
+    let body = check_stereo_segment_shape(segment)?;
+    match body {
+        "1" => layers.stereo_type = Some(1),
+        "2" | "3" => {
+            return err(format!(
+                "{CONTEXT}: relative/racemic {segment:?} is out of the reverse slice (the standard pipeline emits /s1 only)"
+            ));
+        }
+        _ => {
+            return err(format!("{CONTEXT}: unsupported /s layer {segment:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// /b layer → double-bond stereo entries `atHi-atLo p` (ParseSegmentSp2:
+/// the high canonical number first, hi > lo, pairs strictly ascending,
+/// one parity mark each).
+fn parse_stereo_bonds(segment: &str, layers: &mut Layers) -> Result<()> {
+    let body = check_stereo_segment_shape(segment)?;
+    if body.is_empty() {
+        return err(format!("{CONTEXT}: empty /b layer in {segment:?}"));
+    }
+    let n = layers.elements.len();
+    for token in body.split(',') {
+        let bytes = token.as_bytes();
+        let first_end = bytes
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .ok_or_else(|| {
+                crate::error::Error::new(format!(
+                    "{CONTEXT}: expected 'hi-lo<mark>' in /b {segment:?}"
+                ))
+            })?;
+        if first_end == 0 || bytes.get(first_end) != Some(&b'-') {
+            return err(format!(
+                "{CONTEXT}: malformed /b entry {token:?} in {segment:?}"
+            ));
+        }
+        let high: usize = token[..first_end].parse().map_err(|_| {
+            crate::error::Error::new(format!("{CONTEXT}: bad atom number in /b {segment:?}"))
+        })?;
+        let rest = &token[first_end + 1..];
+        let rbytes = rest.as_bytes();
+        let second_end = rbytes
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .ok_or_else(|| {
+                crate::error::Error::new(format!(
+                    "{CONTEXT}: expected a parity mark in /b {segment:?}"
+                ))
+            })?;
+        if second_end == 0 {
+            return err(format!(
+                "{CONTEXT}: malformed /b entry {token:?} in {segment:?}"
+            ));
+        }
+        let low: usize = rest[..second_end].parse().map_err(|_| {
+            crate::error::Error::new(format!("{CONTEXT}: bad atom number in /b {segment:?}"))
+        })?;
+        let &[mark] = rbytes.get(second_end..).unwrap_or(&[]) else {
+            return err(format!(
+                "{CONTEXT}: expected a parity mark in /b {segment:?}"
+            ));
+        };
+        if !is_parity_mark(mark) {
+            return err(format!(
+                "{CONTEXT}: unknown parity mark {:?} in /b {segment:?}",
+                mark as char
+            ));
+        }
+        if high <= low || low == 0 || high > n {
+            return err(format!(
+                "{CONTEXT}: /b pair {high}-{low} out of range or unordered (hi > lo, 1..{n}) in {segment:?}"
+            ));
+        }
+        if let Some(previous) = layers.stereo_bonds.last() {
+            if (previous.high, previous.low) >= (high, low) {
+                return err(format!(
+                    "{CONTEXT}: /b pairs not strictly ascending in {segment:?}"
+                ));
+            }
+        }
+        layers.stereo_bonds.push(StereoBond {
+            high: high - 1,
+            low: low - 1,
+            mark: mark as char,
+        });
+    }
+    Ok(())
+}
+
 /// A single atom's reconstruction state during assembly.
 #[derive(Debug, Clone)]
 struct AtomState {
@@ -787,10 +1046,18 @@ impl AtomState {
 /// placement, the /p proton shift, /q charge placement, isotopes, and
 /// the Kekulé assignment over the /c skeleton.
 fn reconstruct(layers: Layers) -> Result<Structure> {
+    let mut layers = layers;
     let n = layers.elements.len();
     if n == 0 {
         return err(format!("{CONTEXT}: identifier has no atoms"));
     }
+    // The stereo targets, captured before the /p pass consumes the
+    // mobile groups.
+    let has_stereo = layers.has_stereo();
+    let stereo_centers = std::mem::take(&mut layers.stereo_centers);
+    let stereo_bond_targets = std::mem::take(&mut layers.stereo_bonds);
+    let inversion = layers.inversion;
+    let stereo_type = layers.stereo_type;
     let mut atoms: Vec<AtomState> = layers
         .elements
         .iter()
@@ -1093,7 +1360,9 @@ fn reconstruct(layers: Layers) -> Result<Structure> {
         .zip(orders)
         .map(|((from, to), order)| (from, to, order))
         .collect();
-    Ok(Structure {
+    let carries_isotopes =
+        !layers.isotopes.is_empty() || layers.exchanged != (0, 0) || !isotopic_h.is_empty();
+    let mut structure = Structure {
         atoms: records,
         bonds,
         stereo_bonds: Default::default(),
@@ -1104,7 +1373,359 @@ fn reconstruct(layers: Layers) -> Result<Structure> {
         taut_ext: Default::default(),
         fold_source: Vec::new(),
         chiral_flag: false,
-    })
+    };
+    if has_stereo {
+        synthesize_stereo(
+            &mut structure,
+            &stereo_centers,
+            &stereo_bond_targets,
+            inversion,
+            stereo_type,
+            carries_isotopes,
+        )?;
+    }
+    Ok(structure)
+}
+
+/// The stereo segments the engine's forward would perceive from
+/// `structure` — the exact functions the standard-pipeline layers run
+/// ([`crate::layers::stereo`] under default emission), so synthesis
+/// candidates are judged by the same code the gate's re-forward runs.
+fn perceived_stereo(structure: &Structure) -> Vec<(char, String)> {
+    let counts = crate::layers::standardization::adjusted_hydrogens(structure);
+    let (adjacency, invariants) = crate::canonical::graph_of(structure);
+    let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
+    let no_taut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
+    let symmetry = crate::canonical::base_symmetry(&adjacency, &invariants);
+    let groups = crate::canonical::group_membership(structure, &counts);
+    let ranks = crate::canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
+    let mut out = crate::canonical::bond_stereo::segments(
+        structure,
+        &counts,
+        &ranks,
+        crate::canonical::stereo::Emission::default(),
+    );
+    out.extend(crate::canonical::stereo::segments(
+        structure,
+        &counts,
+        &ranks,
+        &symmetry,
+        crate::canonical::stereo::Emission::default(),
+    ));
+    out
+}
+
+/// The drawn layout the stereo synthesis reads: atom `i` at
+/// `(i, i^2 / 8)` — parabola points are never three-collinear, so no
+/// ligand-side product degenerates and every wedge lift lands
+/// off-plane (the /8 keeps the molfile's 10-column coordinates in
+/// range for large graphs).
+fn synthesis_positions(atoms: usize) -> Vec<(f64, f64)> {
+    (0..atoms)
+        .map(|index| {
+            let x = index as f64 + 1.0;
+            (x, x * x / 8.0)
+        })
+        .collect()
+}
+
+/// Ranks the forward's stereo layer reads for this structure, with
+/// the canonical-number → atom map the identifier's entries resolve
+/// through. The reconstruction numbers its atoms by the identifier's
+/// canonical order, but the engine's own canonicalization may pick a
+/// different labeling of an automorphic molecule (tartaric acid's
+/// symmetric halves): the /c text cannot see the swap, the stereo
+/// layers can, so every target resolves through this map and the fit
+/// is judged on the perceived text, never on indices.
+fn synthesis_ranks(
+    structure: &Structure,
+) -> Result<(Vec<u32>, std::collections::BTreeMap<u32, usize>)> {
+    let counts = crate::layers::standardization::adjusted_hydrogens(structure);
+    let (adjacency, invariants) = crate::canonical::graph_of(structure);
+    let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
+    let no_taut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
+    let groups = crate::canonical::group_membership(structure, &counts);
+    let ranks = crate::canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
+    let mut atom_of: std::collections::BTreeMap<u32, usize> = Default::default();
+    for (atom, &rank) in ranks.iter().enumerate() {
+        if atom_of.insert(rank, atom).is_some() {
+            return err(format!(
+                "{CONTEXT}: the canonical ranks are not a permutation — stereo synthesis cannot resolve the identifier's numbering"
+            ));
+        }
+    }
+    Ok((ranks, atom_of))
+}
+
+/// Synthesizes the drawn stereo the engine's perception reads back
+/// into the parsed /b /t /m /s layers: a parabola layout, per-target
+/// ligand reflections for the double-bond signs, and per-center wedge
+/// directions fitted against [`perceived_stereo`]. Every step is
+/// verified by the forward's own functions; an unrealizable target is
+/// a named error, never a guess.
+#[allow(clippy::too_many_arguments)]
+fn synthesize_stereo(
+    structure: &mut Structure,
+    centers: &[StereoCenter],
+    bond_targets: &[StereoBond],
+    inversion: Option<u32>,
+    stereo_type: Option<u32>,
+    carries_isotopes: bool,
+) -> Result<()> {
+    if carries_isotopes {
+        return err(format!(
+            "{CONTEXT}: stereo combined with the isotopic layers is out of the reverse slice"
+        ));
+    }
+    if inversion.is_some() != stereo_type.is_some() {
+        return err(format!(
+            "{CONTEXT}: /m without /s (or the converse) is not a standard identifier shape"
+        ));
+    }
+    let (ranks, atom_of) = synthesis_ranks(structure)?;
+
+    // Drawn positions first — both the double-bond signs and the
+    // wedge parities read them.
+    structure.positions = synthesis_positions(structure.atoms.len());
+
+    // /b: for each target in the layer's order, fit the sign. The
+    // sign flips exactly when one reference ligand crosses the
+    // double-bond line, so a single reflection per mismatched bond
+    // suffices; a ligand shared between two targets would be caught
+    // by the final verification.
+    for target in bond_targets {
+        let canonical = (target.high as u32 + 1, target.low as u32 + 1);
+        let (Some(&high), Some(&low)) = (atom_of.get(&canonical.0), atom_of.get(&canonical.1))
+        else {
+            return err(format!(
+                "{CONTEXT}: /b endpoint {}-{} names no atom of the reconstruction",
+                canonical.0, canonical.1
+            ));
+        };
+        let Some(bond_index) = structure.bonds.iter().position(|&(from, to, kind)| {
+            kind == 2 && ((from == high && to == low) || (from == low && to == high))
+        }) else {
+            return err(format!(
+                "{CONTEXT}: /b target {}-{} did not land on a reconstructed double bond",
+                canonical.0, canonical.1
+            ));
+        };
+        if target.mark == '?' || target.mark == 'u' {
+            // The crossed serialization of an unknown parity: the
+            // "either" code reads back as `?` in the perception.
+            structure.stereo_bonds.insert(bond_index, 4);
+            continue;
+        }
+        fit_bond_sign(
+            structure,
+            &ranks,
+            high,
+            low,
+            canonical.0,
+            canonical.1,
+            target.mark,
+        )?;
+    }
+
+    // /t: one wedge per center, direction fitted per center against
+    // the perception (flipping a wedge's drawn side flips that
+    // center's parity bit; one of the two directions always realizes
+    // the target unless the geometry degenerated). The first defined
+    // center's own mark is normalized `-` either way, so for it the
+    // binding constraint is the /m digit.
+    let first_defined = centers
+        .iter()
+        .position(|center| center.mark == '-' || center.mark == '+');
+    let mut used_bonds: std::collections::BTreeSet<usize> =
+        structure.stereo_bonds.keys().copied().collect();
+    for (index, center) in centers.iter().enumerate() {
+        let Some(&atom) = atom_of.get(&(center.atom as u32 + 1)) else {
+            return err(format!(
+                "{CONTEXT}: /t center {} names no atom of the reconstruction",
+                center.atom + 1
+            ));
+        };
+        let Some(bond_index) =
+            structure
+                .bonds
+                .iter()
+                .enumerate()
+                .position(|(position, &(from, to, _))| {
+                    !used_bonds.contains(&position)
+                    && (from == atom || to == atom)
+                    // The lifted ligand must be a heavy atom: the
+                    // reconstruction carries no explicit H to wedge.
+                    && structure.atoms[if from == atom { to } else { from }].element != "H"
+                })
+        else {
+            return err(format!(
+                "{CONTEXT}: no free heavy bond to wedge for center {}",
+                center.atom + 1
+            ));
+        };
+        // Orient the bond center-first: the perception reads the
+        // wedge's first atom as the center and lifts the second.
+        if structure.bonds[bond_index].0 != atom {
+            let (from, to, kind) = structure.bonds[bond_index];
+            structure.bonds[bond_index] = (to, from, kind);
+        }
+        used_bonds.insert(bond_index);
+        if center.mark == '?' || center.mark == 'u' {
+            structure.stereo_bonds.insert(bond_index, 4);
+            continue;
+        }
+        let binding_m = first_defined == Some(index) && inversion.is_some();
+        let mut fitted = false;
+        for &code in &[1u8, 6u8] {
+            structure.stereo_bonds.insert(bond_index, code);
+            let perceived = perceived_stereo(structure);
+            let mark_ok =
+                perceived
+                    .iter()
+                    .find(|(kind, _)| *kind == 't')
+                    .is_some_and(|(_, text)| {
+                        center_mark_of(text, center.atom + 1) == Some(center.mark)
+                    });
+            let m_ok = !binding_m
+                || perceived
+                    .iter()
+                    .find(|(kind, _)| *kind == 'm')
+                    .is_some_and(|(_, text)| *text == format!("m{}", inversion.expect("checked")));
+            if mark_ok && m_ok {
+                fitted = true;
+                break;
+            }
+        }
+        if !fitted {
+            return err(format!(
+                "{CONTEXT}: no wedge direction realizes the parity of center {}",
+                center.atom + 1
+            ));
+        }
+    }
+
+    // Final verification: the perception must speak the parsed layers
+    // verbatim — same entries, same marks, same /m /s shape.
+    let mut expected: Vec<(char, String)> = Vec::new();
+    if !bond_targets.is_empty() {
+        let text: String = bond_targets
+            .iter()
+            .map(|bond| format!("{}-{}{}", bond.high + 1, bond.low + 1, bond.mark))
+            .collect::<Vec<_>>()
+            .join(",");
+        expected.push(('b', format!("b{text}")));
+    }
+    if !centers.is_empty() {
+        let text: String = centers
+            .iter()
+            .map(|center| format!("{}{}", center.atom + 1, center.mark))
+            .collect::<Vec<_>>()
+            .join(",");
+        expected.push(('t', format!("t{text}")));
+    }
+    if let Some(digit) = inversion {
+        expected.push(('m', format!("m{digit}")));
+    }
+    if let Some(digit) = stereo_type {
+        expected.push(('s', format!("s{digit}")));
+    }
+    let perceived = perceived_stereo(structure);
+    if perceived != expected {
+        return err(format!(
+            "{CONTEXT}: synthesized stereo perceives {perceived:?} but the identifier declares {expected:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// A perceived /t text's mark for one center (`t12-,13+` → mark of
+/// atom 12).
+fn center_mark_of(t_text: &str, atom: usize) -> Option<char> {
+    let needle = format!("{atom}");
+    for entry in t_text.strip_prefix('t')?.split(',') {
+        let bytes = entry.as_bytes();
+        if let Some(split) = bytes.iter().position(|b| !b.is_ascii_digit()) {
+            if entry[..split] == needle {
+                return entry[split..].chars().next();
+            }
+        }
+    }
+    None
+}
+
+/// Fits one double bond's drawn sign: when the perception's mark
+/// disagrees with the target, the low endpoint's reference ligand (the
+/// highest-ranked heavy neighbor — the ligand the sign is measured
+/// against) reflects across the double-bond line, which flips its
+/// side and with it the sign. `high`/`low` are the reconstruction's
+/// atoms; `canonical_high`/`canonical_low` the identifier's numbers
+/// the perceived text speaks.
+fn fit_bond_sign(
+    structure: &mut Structure,
+    ranks: &[u32],
+    high: usize,
+    low: usize,
+    canonical_high: u32,
+    canonical_low: u32,
+    wanted: char,
+) -> Result<()> {
+    let mark = |structure: &Structure| {
+        perceived_stereo(structure)
+            .into_iter()
+            .find(|(kind, _)| *kind == 'b')
+            .and_then(|(_, text)| bond_mark_of(&text, canonical_high, canonical_low))
+    };
+    if mark(structure) == Some(wanted) {
+        return Ok(());
+    }
+    // The reference ligand of the low endpoint: the heavy neighbor
+    // with the highest rank (the implicit H ranks 0 and never wins).
+    let (a, b) = (high, low);
+    let reference = (0..structure.atoms.len())
+        .filter(|&candidate| {
+            candidate != a
+                && candidate != b
+                && structure.bonds.iter().any(|&(from, to, _)| {
+                    (from == candidate && to == b) || (to == candidate && from == b)
+                })
+        })
+        .max_by_key(|&candidate| ranks[candidate]);
+    let Some(ligand) = reference else {
+        return err(format!(
+            "{CONTEXT}: /b target {canonical_high}-{canonical_low} has no heavy reference ligand to place"
+        ));
+    };
+    let (ax, ay) = structure.positions[a];
+    let (bx, by) = structure.positions[b];
+    let (dx, dy) = (bx - ax, by - ay);
+    let length_squared = dx * dx + dy * dy;
+    if length_squared < 1e-12 {
+        return err(format!(
+            "{CONTEXT}: degenerate double-bond layout for {canonical_high}-{canonical_low}"
+        ));
+    }
+    let (px, py) = structure.positions[ligand];
+    let t = ((px - ax) * dx + (py - ay) * dy) / length_squared;
+    structure.positions[ligand] = (2.0 * (ax + t * dx) - px, 2.0 * (ay + t * dy) - py);
+    if mark(structure) != Some(wanted) {
+        return err(format!(
+            "{CONTEXT}: reflection could not realize the /b mark of {canonical_high}-{canonical_low}"
+        ));
+    }
+    Ok(())
+}
+
+/// A perceived /b text's mark for one bond (`b4-3+,5-2-` → mark of
+/// 4-3).
+fn bond_mark_of(b_text: &str, high: u32, low: u32) -> Option<char> {
+    let needle = format!("{high}-{low}");
+    for entry in b_text.strip_prefix('b')?.split(',') {
+        let body = &entry[..entry.len() - 1];
+        if body == needle {
+            return entry.chars().last();
+        }
+    }
+    None
 }
 
 /// Bond-order sums over the current orders.
@@ -1408,28 +2029,46 @@ pub fn structure_to_molfile(structure: &Structure) -> String {
     }
     let na = structure.atoms.len() + deuterium_atoms.len();
     let nb = structure.bonds.len() + deuterium_atoms.len();
+    // Stereo-bearing reconstructions carry the synthesized drawn
+    // positions; stereo-less ones keep the flat placeholder layout
+    // (degenerate coordinates void the 2D perception, so a plain
+    // double bond cannot invent a /b layer).
+    let drawn = structure.positions.len() == structure.atoms.len();
+    let coordinate = |index: usize| -> (f64, f64, f64) {
+        if drawn {
+            let (x, y) = structure.positions[index];
+            (x, y, 0.0)
+        } else {
+            (12.0, 12.0, 0.0)
+        }
+    };
     let mut out = String::from("reverse\n  chemomer-reverse\n\n");
     out.push_str(&format!("{:3}{:3}  0  0  0  0  0  0  0999 V2000\n", na, nb));
-    for (index, atom) in structure.atoms.iter().enumerate() {
-        let plain = plain_h[index];
+    for (index, (atom, &plain)) in structure.atoms.iter().zip(&plain_h).enumerate() {
         let code = if plain > 0 { plain + 1 } else { 0 };
+        let (x, y, z) = coordinate(index);
         out.push_str(&format!(
-            "   12.0000   12.0000    0.0000 {:<3} 0  0  {:>2}  0  0  0  0  0  0  0  0\n",
-            atom.element, code
+            "{:10.4}{:10.4}{:10.4} {:<3} 0  0  {:>2}  0  0  0  0  0  0  0  0\n",
+            x, y, z, atom.element, code
         ));
     }
-    for _ in &deuterium_atoms {
+    for position in 0..deuterium_atoms.len() {
+        let (x, y, z) = coordinate(structure.atoms.len() + position);
         out.push_str(&format!(
-            "   12.0000   12.0000    0.0000 {:<3} 0  0  {:>2}  0  0  0  0  0  0  0  0\n",
-            "H", 0
+            "{:10.4}{:10.4}{:10.4} {:<3} 0  0  {:>2}  0  0  0  0  0  0  0  0\n",
+            x, y, z, "H", 0
         ));
     }
-    for &(from, to, kind) in &structure.bonds {
+    for (index, &(from, to, kind)) in structure.bonds.iter().enumerate() {
+        // The stereo column rides the bond line (1 up-wedge, 4 either,
+        // 6 down-wedge — the codes the reader maps to `stereo_bonds`).
+        let stereo = structure.stereo_bonds.get(&index).copied().unwrap_or(0);
         out.push_str(&format!(
-            "{:3}{:3}{:3}  0  0  0  0  0  0  0\n",
+            "{:3}{:3}{:3}{:>3}  0  0  0  0  0  0\n",
             from + 1,
             to + 1,
-            kind
+            kind,
+            stereo
         ));
     }
     for (position, (carrier, _mass)) in deuterium_atoms.iter().enumerate() {
@@ -1638,11 +2277,23 @@ mod tests {
     }
 
     #[test]
-    fn stereo_layers_are_a_follow_up_slice() {
-        let error =
-            structure_from_inchi("InChI=1S/C3H7NO2/c1-2(4)3(5)6/h2H,4H2,1H3,(H,5,6)/t2-/m1/s1")
-                .expect_err("stereo refused");
-        assert!(error.message().contains("stereo layers"));
+    fn stereo_layers_reconstruct_and_reforward_themselves() {
+        let inchi = "InChI=1S/C3H7NO2/c1-2(4)3(5)6/h2H,4H2,1H3,(H,5,6)/t2-/m1/s1";
+        let structure = structure_from_inchi(inchi).expect("reconstructs");
+        assert_eq!(structure.stereo_bonds.len(), 1, "one wedged center bond");
+        assert_eq!(forward(inchi), inchi);
+    }
+
+    #[test]
+    fn ez_double_bond_reconstructs_and_reforwards() {
+        let inchi = "InChI=1S/C4H8/c1-3-4-2/h3-4H,1-2H3/b4-3+";
+        let structure = structure_from_inchi(inchi).expect("reconstructs");
+        assert_eq!(
+            structure.positions.len(),
+            structure.atoms.len(),
+            "drawn layout present"
+        );
+        assert_eq!(forward(inchi), inchi);
     }
 
     #[test]

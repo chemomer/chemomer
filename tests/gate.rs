@@ -1008,6 +1008,16 @@ fn the_recmet_output_equals_the_oracle_recording() {
 /// identifier. The reference's mobile-H/charge restore is
 /// deliberately lossy (ichirvr1..7.c); the ground truth is the
 /// oracle's own recorded reconstruction, never a chemistry argument.
+///
+/// Stereo recordings relax only the sdf leg, and only for the
+/// reference's own serialization loss: its InChI2Struct parities live
+/// in memory (ichirvr2.c sets 0D parity descriptors) and its SDfile
+/// writer emits neither wedges nor coordinates (every atom at the
+/// origin), so no reader can recover the stereo layers from that
+/// file. For a provably 0D recording the sdf leg witnesses the
+/// non-stereo layers; the stereo layers are witnessed by the reverse
+/// leg, which forwards OUR reconstruction — wedges and drawn
+/// coordinates included — to the FULL recorded identifier.
 /// Skipped entirely when the tranche file is absent (no triage
 /// interplay — the reverse slice records its own corpus).
 #[test]
@@ -1029,6 +1039,68 @@ fn the_reverse_reconstruction_matches_the_oracle() {
             .map_err(|error| error.to_string())
     }
 
+    /// Whether the identifier carries stereo segments (/b /t /m /s).
+    fn has_stereo_layers(inchi: &str) -> bool {
+        inchi
+            .split('/')
+            .skip(1)
+            .any(|segment| matches!(segment.as_bytes().first(), Some(b'b' | b't' | b'm' | b's')))
+    }
+
+    /// The identifier without its stereo segments — the layers a 0D
+    /// serialization can still witness.
+    fn strip_stereo_layers(inchi: &str) -> String {
+        let mut out = String::new();
+        for (index, segment) in inchi.split('/').enumerate() {
+            if index > 0 && matches!(segment.as_bytes().first(), Some(b'b' | b't' | b'm' | b's')) {
+                continue;
+            }
+            if index > 0 {
+                out.push('/');
+            }
+            out.push_str(segment);
+        }
+        out
+    }
+
+    /// Whether the SDfile serializes a 0D reconstruction: every atom
+    /// at the origin and no bond stereo code — the shape in which the
+    /// oracle's own writer loses its in-memory parities.
+    fn serializes_zero_dimensional(sdf: &str) -> bool {
+        let lines: Vec<&str> = sdf.lines().collect();
+        if lines.len() < 5 {
+            return false;
+        }
+        let na: usize = lines[3].get(0..3).unwrap_or("").trim().parse().unwrap_or(0);
+        let nb: usize = lines[3].get(3..6).unwrap_or("").trim().parse().unwrap_or(0);
+        let mut atoms = 0;
+        for line in lines.iter().take(4 + na).skip(4) {
+            let (Some(x), Some(y), Some(z)) = (line.get(0..10), line.get(10..20), line.get(20..30))
+            else {
+                return false;
+            };
+            let zero = |field: &str| {
+                field
+                    .trim()
+                    .parse::<f64>()
+                    .map(|value| value == 0.0)
+                    .unwrap_or(false)
+            };
+            if !(zero(x) && zero(y) && zero(z)) {
+                return false;
+            }
+            atoms += 1;
+        }
+        if atoms != na {
+            return false;
+        }
+        lines.iter().skip(4 + na).take(nb).all(|line| {
+            line.get(9..12)
+                .map(|field| field.trim() == "0")
+                .unwrap_or(true)
+        })
+    }
+
     let mut pass = 0;
     let mut failures = Vec::new();
     for case in &cases {
@@ -1037,18 +1109,28 @@ fn the_reverse_reconstruction_matches_the_oracle() {
         let sdf = case["sdf"].as_str().expect("sdf");
         let recorded_forward = case["forward_inchi"].as_str().expect("forward_inchi");
 
-        // The oracle's own reconstruction re-forwards identically.
+        // The oracle's own reconstruction re-forwards identically —
+        // modulo the reference's own 0D stereo serialization loss
+        // (documented above; the assembled string then carries no
+        // stereo layers at all, and the stripped comparison still
+        // pins every other layer).
         if let Err(line) = chemomer::Engine::from_molfile(sdf)
             .and_then(|engine| engine.inchi_string())
             .map_err(|error| error.to_string())
             .and_then(|assembled| {
                 if assembled == recorded_forward {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "sdf forward {assembled:?} != oracle {recorded_forward:?}"
-                    ))
+                    return Ok(());
                 }
+                if has_stereo_layers(recorded_forward)
+                    && !has_stereo_layers(&assembled)
+                    && serializes_zero_dimensional(sdf)
+                    && strip_stereo_layers(&assembled) == strip_stereo_layers(recorded_forward)
+                {
+                    return Ok(());
+                }
+                Err(format!(
+                    "sdf forward {assembled:?} != oracle {recorded_forward:?}"
+                ))
             })
         {
             failures.push(format!("{id}: {line}"));
