@@ -21,6 +21,7 @@ pub mod emit;
 pub mod fixedh;
 mod invariants;
 pub mod metals;
+pub mod polymer;
 mod partition;
 pub mod protons;
 mod search;

@@ -54,6 +54,14 @@ pub struct Engine {
     /// over the salt-disconnected but metal-BONDED copy — the
     /// reference's prep_inp_data[1], runichi3.c:673-683).
     reconnected: Option<Box<Engine>>,
+    /// The whole-structure polymer treatment (the reader's units plus
+    /// the derived state): the /z layer and the aux /Z: echo read it.
+    /// `None` when the input carries no polymer data.
+    polymer: Option<crate::layers::polymer::PolymerLayer>,
+    /// The auxiliary line of the UNEDITED structure under the modern
+    /// treatment — appended after `/U/` so the submitted structure
+    /// stays recoverable (runichi.c 2107-2122).
+    noedits_aux: Option<String>,
 }
 
 impl Engine {
@@ -82,6 +90,33 @@ impl Engine {
         // disconnection CREATES the components (cisplatin: Pt(NH3)2
         // Cl2 reads whole, emits five).
         let mut base = original.clone();
+        // The polymer treatment (the reference's
+        // ValidateAndPreparePolymerAndPseudoatoms, run over the
+        // submitted atoms before the normalization): validation, the
+        // v1.05 cyclization, the v1.06 frame shift.
+        let polymer = polymer_treat(&mut base, &original, &options)?;
+        let noedits_aux = match (&polymer, options.polymers) {
+            (Some(_), crate::options::PolymersMode::Modern) => {
+                let mut unedited = original.clone();
+                let unedited_options = crate::options::Options {
+                    frame_shift: crate::options::FrameShift::None,
+                    ..options.clone()
+                };
+                let _ = polymer_treat(&mut unedited, &original, &unedited_options)?;
+                let engine = Self::from_prepared(
+                    unedited.clone(),
+                    unedited,
+                    unedited_options,
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                )?;
+                Some(engine.aux_string()?)
+            }
+            _ => None,
+        };
         standardization::normalize_internal_salts(&mut base);
         base.fold_explicit_hydrogens();
         if options.do_not_add_h {
@@ -117,6 +152,8 @@ impl Engine {
                 rec_salt,
                 false,
                 None,
+                None,
+                None,
             )?))
         } else {
             None
@@ -129,6 +166,8 @@ impl Engine {
             salt_disconnected,
             metal_disconnected,
             reconnected,
+            polymer,
+            noedits_aux,
         )
     }
 
@@ -139,6 +178,7 @@ impl Engine {
     /// submitted numbering. The assembly sorts by the reference's
     /// component comparator and joins the layers with the component
     /// separator.
+    #[allow(clippy::too_many_arguments)]
     fn from_prepared(
         base: Structure,
         original: Structure,
@@ -146,6 +186,8 @@ impl Engine {
         salt_disconnected: bool,
         metal_disconnected: bool,
         reconnected: Option<Box<Engine>>,
+        polymer: Option<crate::layers::polymer::PolymerLayer>,
+        noedits_aux: Option<String>,
     ) -> Result<Self> {
         let fragments = base.split_components();
         if fragments.len() > 1 {
@@ -164,6 +206,8 @@ impl Engine {
                 salt_disconnected,
                 metal_disconnected,
                 reconnected,
+                polymer,
+                noedits_aux,
             });
         }
         let mut engine = Self::from_original(base, options)?;
@@ -171,6 +215,8 @@ impl Engine {
         engine.salt_disconnected = salt_disconnected;
         engine.metal_disconnected = metal_disconnected;
         engine.reconnected = reconnected;
+        engine.polymer = polymer;
+        engine.noedits_aux = noedits_aux;
         Ok(engine)
     }
 
@@ -282,6 +328,8 @@ impl Engine {
             salt_disconnected: false,
             metal_disconnected: false,
             reconnected: None,
+            polymer: None,
+            noedits_aux: None,
         })
     }
 
@@ -320,7 +368,8 @@ impl Engine {
     /// must never present itself as an identifier.
     pub fn inchi_string(&self) -> Result<String> {
         if !self.siblings.is_empty() {
-            return self.assemble_identifier();
+            let assembled = self.assemble_identifier()?;
+            return Ok(self.hidden(&assembled));
         }
         let registered: Vec<Option<char>> = self.layers.iter().map(|l| l.segment_kind()).collect();
         for mandatory in &MANDATORY_KINDS {
@@ -345,7 +394,18 @@ impl Engine {
         // (the reference's bStdFormat), everything else `InChI=1S/`.
         let mut out = String::from(self.version_prefix());
         let mut appended = false;
+        let mut appended_z = false;
         for layer in sorted {
+            // The /z segment splices in by declared order (between /p
+            // and /b) even though it is not a registered layer.
+            if layer.order() > crate::layers::order::Z && !appended_z {
+                if let Some(segment) = self.emit_z(&self.structure)? {
+                    out.push('/');
+                    out.push_str(&segment);
+                    appended = true;
+                }
+                appended_z = true;
+            }
             if let Some(segment) = layer.emit(&self.structure)? {
                 if appended {
                     out.push('/');
@@ -354,7 +414,32 @@ impl Engine {
                 appended = true;
             }
         }
-        Ok(out)
+        if !appended_z {
+            if let Some(segment) = self.emit_z(&self.structure)? {
+                out.push('/');
+                out.push_str(&segment);
+            }
+        }
+        Ok(self.hidden(&out))
+    }
+
+    /// The legacy Zz-hide post-edit over an assembled line
+    /// (`EditINCHI_HidePolymerZz`); the text untouched otherwise.
+    fn hidden(&self, text: &str) -> String {
+        match &self.polymer {
+            Some(layer) if self.options.polymers == crate::options::PolymersMode::Legacy => {
+                crate::layers::polymer::hide_polymer_zz(text, "", layer.star_count()).0
+            }
+            _ => text.to_string(),
+        }
+    }
+
+    /// The `/z` segment over this engine's polymer treatment.
+    fn emit_z(&self, working: &Structure) -> Result<Option<String>> {
+        match &self.polymer {
+            Some(layer) => layer.emit(working),
+            None => Ok(None),
+        }
     }
 
     /// The InChIKey over the assembled identifier — the truncated
@@ -382,7 +467,7 @@ impl Engine {
     /// the large-molecule bound, the options' standard flag otherwise
     /// (see [`Engine::inchi_string`]).
     fn version_prefix(&self) -> &'static str {
-        if self.total_atoms() > NORMALLY_ALLOWED_INP_MAX_ATOMS {
+        if self.total_atoms() > NORMALLY_ALLOWED_INP_MAX_ATOMS || self.polymer.is_some() {
             "InChI=1B/"
         } else if self.options.is_standard() {
             "InChI=1S/"
@@ -562,6 +647,20 @@ impl Engine {
                 out.push('/');
                 out.push_str(kind.to_string().as_str());
                 out.push_str(&merge_runs(fields).join(";"));
+            }
+        }
+        // The polymer /z: one whole-structure segment over the
+        // combined canonical numbering (units never cross components;
+        // the numbers continue across them).
+        if let Some(layer) = &self.polymer {
+            let structures: Vec<&Structure> = order
+                .iter()
+                .map(|&index| &self.siblings[index].structure)
+                .collect();
+            let numbering = crate::layers::polymer::PolymerLayer::combined_numbering(&structures);
+            if let Some(segment) = layer.emit_segment(&numbering)? {
+                out.push('/');
+                out.push_str(&segment);
             }
         }
         // The proton layer: one NET segment, the sum of the
@@ -760,6 +859,22 @@ impl Engine {
                 fixed_block,
             )?
         };
+        // The polymer aux: the /Z: unit echo, then — under the modern
+        // treatment — the /U/ appendix carrying the unedited
+        // structure's aux (runichi.c 2107-2122).
+        let mut base = base;
+        if let Some(layer) = &self.polymer {
+            if layer.aux_has_units() {
+                base.push_str("/Z:");
+                base.push_str(&layer.aux_z_block());
+            }
+            if let Some(noedits) = &self.noedits_aux {
+                let body = noedits.strip_prefix("AuxInfo=").unwrap_or(noedits);
+                base.push_str("/U/");
+                base.push_str(body);
+            }
+        }
+        let base = self.hidden(&base);
         match (&self.reconnected, self.options.rec_met) {
             (Some(reconnected), true) => {
                 let aux = reconnected.aux_string()?;
@@ -1188,6 +1303,81 @@ fn split_aux_fields(aux: &str) -> Vec<(String, String)> {
     fields
 }
 
+/// The polymer treatment driver over the parsed structure (the
+/// reference's ValidateAndPreparePolymerAndPseudoatoms plus the
+/// modern frame-shift pre-pass): validates, applies the v1.05
+/// cyclization or the v1.06 senior-bond rotation to `base`, and
+/// returns the `/z` layer speaking the treated state. `None` when the
+/// input carries nothing polymeric.
+fn polymer_treat(
+    base: &mut Structure,
+    submitted: &Structure,
+    options: &Options,
+) -> Result<Option<crate::layers::polymer::PolymerLayer>> {
+    use crate::canonical::polymer as treatment;
+    use crate::options::PolymersMode;
+    if submitted.polymer.is_none() && treatment::star_atoms(submitted).is_empty() {
+        return Ok(None);
+    }
+    let mut poly = submitted.polymer.clone().unwrap_or_default();
+    let mut treated = treatment::validate(submitted, options.polymers != PolymersMode::No, options.npzz)?;
+    match options.polymers {
+        PolymersMode::No => {}
+        PolymersMode::Modern => {
+            if treated.has_units() && options.fold_cru {
+                return crate::error::err(
+                    "CRU folding is not implemented (FoldCRU; ledgered beyond this tranche)",
+                );
+            }
+            if treated.has_units()
+                && treated.pzz.len() >= 2
+                && options.frame_shift_edits()
+            {
+                // The interim (105+) pass: cyclize a working copy,
+                // collect its backbones, derive the senior-bond
+                // rotation, apply it to `base`.
+                let mut interim = submitted.clone();
+                let mut interim_treated = treated.clone();
+                treatment::cyclize_units(&mut interim, &mut interim_treated);
+                treatment::fill_backbones(&interim, &poly, &mut interim_treated);
+                let interim_ranks = crate::layers::hydrogen::canonical_ranks_for(&interim);
+                let edited = crate::layers::polymer::apply_frame_shift(
+                    base,
+                    &mut treated,
+                    &interim,
+                    &interim_treated,
+                    &interim_ranks,
+                );
+                if edited {
+                    for index in 0..poly.units.len() {
+                        crate::layers::polymer::rewire_unit_blist(
+                            &mut poly.units[index],
+                            &treated.units[index],
+                        );
+                    }
+                }
+            }
+        }
+        PolymersMode::Legacy => {
+            if treated.has_units() && options.frame_shift_edits() {
+                treatment::cyclize_units(base, &mut treated);
+                treatment::fill_backbones(base, &poly, &mut treated);
+            }
+        }
+    }
+    if !treated.has_units() && treated.zy.is_empty() {
+        return Ok(None);
+    }
+    // The layer speaks the treated structure (the frame shift may
+    // have rewired its bonds; atom indices are stable).
+    Ok(Some(crate::layers::polymer::PolymerLayer::new(
+        base.clone(),
+        poly,
+        treated,
+        options.clone(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,6 +1429,8 @@ mod tests {
             salt_disconnected: false,
             metal_disconnected: false,
             reconnected: None,
+            polymer: None,
+            noedits_aux: None,
         };
         let error = engine.inchi_string().unwrap_err();
         assert!(error.message().contains("mandatory layer kind"));
@@ -1440,6 +1632,8 @@ mod tests {
             salt_disconnected: false,
             metal_disconnected: false,
             reconnected: None,
+            polymer: None,
+            noedits_aux: None,
         };
         assert_eq!(engine.inchi_string().unwrap(), "InChI=1S/H2O/c1-2/p+1");
     }
