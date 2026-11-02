@@ -1070,3 +1070,73 @@ fn the_tautomer_extremes_match_the_oracle() {
         cases.len()
     );
 }
+
+/// The V3000 input gate: the corpus's v3000-molfiles tranche records a
+/// sample of existing fixtures re-authored as V3000 molfiles (the
+/// CHG=/MASS= attributes, CFG= wedges, free-form V30 lines), each with
+/// the oracle's identifier over that V3000 input — cross-checked at
+/// recording time against the source fixture's V2000 identity. The
+/// engine's reader dispatches on the counts-line version tag, so the
+/// same `Engine::from_molfile` path must reproduce both recordings
+/// byte-for-byte. The tranche file is optional — a corpus without it
+/// skips (the way the rinchi gate skips a missing tranche).
+#[test]
+fn the_v3000_input_matches_the_oracle() {
+    let dir = suite_dir();
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/v3000-molfiles.json")) else {
+        return;
+    };
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(&text).expect("valid v3000-molfiles fixtures");
+    assert!(
+        !cases.is_empty(),
+        "the v3000-molfiles file carries no fixtures"
+    );
+
+    let mut pass = 0;
+    let mut beyond = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let molfile = case["molfile"].as_str().expect("molfile");
+        let recorded = case["inchi"].as_str().expect("inchi");
+        let recorded_key = case["inchikey"].as_str().expect("inchikey");
+        match chemomer::Engine::from_molfile(molfile).and_then(|engine| engine.inchi_string()) {
+            Ok(assembled) => {
+                if assembled == recorded {
+                    // The native hasher must reproduce the recorded key
+                    // from the recorded identifier, per the identifier
+                    // gate's per-record invariant.
+                    let key = chemomer::key::inchikey(recorded).expect("keys");
+                    if key == recorded_key {
+                        pass += 1;
+                    } else {
+                        failures.push(format!("{id}: key {key} != oracle {recorded_key}"));
+                    }
+                } else {
+                    failures.push(format!(
+                        "{id}: assembled {assembled:?} != oracle {recorded:?}"
+                    ));
+                }
+            }
+            Err(error) => {
+                if error.message().contains("beyond the ±1 corpus gate") {
+                    beyond += 1;
+                } else {
+                    failures.push(format!("{id}: {error}"));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} V3000 mismatch(es):\n{}\n(v3000 pass: {pass}, beyond-±1: {beyond}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "v3000 gate: pass {pass}, beyond-±1 {beyond}, total {}",
+        cases.len()
+    );
+}
