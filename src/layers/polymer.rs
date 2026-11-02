@@ -109,7 +109,10 @@ impl PolymerLayer {
             out.push_str(&format!("{ty}{sub}{conn}-"));
             out.push_str(if unit.smt.is_empty() { "n" } else { &unit.smt });
             out.push('-');
-            push_compressed_range(&mut out, &unit.alist.iter().map(|a| a + 1).collect::<Vec<_>>());
+            push_compressed_range(
+                &mut out,
+                &unit.alist.iter().map(|a| a + 1).collect::<Vec<_>>(),
+            );
             let echo_pairs = self
                 .treated
                 .units
@@ -147,11 +150,6 @@ impl PolymerLayer {
         if working.is_empty() {
             return Ok(None);
         }
-        let any_structure = self
-            .treated
-            .units
-            .iter()
-            .any(|unit| unit.end1 != usize::MAX || !unit.bkbonds.is_empty());
         // Units in modified-alist lexicographic order (longer first).
         let mut order: Vec<usize> = (0..working.len()).collect();
         order.sort_by(|&a, &b| compare_atom_lists_mod(&working[a].alist, &working[b].alist));
@@ -169,9 +167,13 @@ impl PolymerLayer {
         let mut out = String::new();
         for (position, index) in order.iter().enumerate() {
             let unit = &working[*index];
-            out.push_str(&format!("{}{}{}-", unit.header.0, unit.header.1, unit.header.2));
+            out.push_str(&format!(
+                "{}{}{}-",
+                unit.header.0, unit.header.1, unit.header.2
+            ));
             push_compressed_range(&mut out, &unit.alist);
-            let crossing = unit.nb == 2 && (unit.cyclizable == Closing::NotApplicable || !unit.cyclized);
+            let crossing =
+                unit.nb == 2 && (unit.cyclizable == Closing::NotApplicable || !unit.cyclized);
             if crossing {
                 // "(cap-end,cap-end)", the first bond pointing to the
                 // more senior end under the modern rule, the higher
@@ -188,7 +190,9 @@ impl PolymerLayer {
                 } else {
                     out.push_str(&format!("({}-{},{}-{})", a1, a2, a3, a4));
                 }
-            } else if unit.nb <= 2 && (unit.cyclizable != Closing::NotApplicable || !unit.bkbonds.is_empty()) {
+            } else if unit.nb <= 2
+                && (unit.cyclizable != Closing::NotApplicable || !unit.bkbonds.is_empty())
+            {
                 // The frame-shift pattern "(cap1,cap2-...)". The caps
                 // speak the star pool: the last star positions of the
                 // canonical numbering.
@@ -227,10 +231,8 @@ impl PolymerLayer {
                                 let yw = (y.0.min(y.1), y.0.max(y.1));
                                 xw.cmp(&yw)
                             });
-                            let reorder = matches!(
-                                self.options.polymers,
-                                PolymersMode::Modern
-                            ) || self.interim_mode;
+                            let reorder = matches!(self.options.polymers, PolymersMode::Modern)
+                                || self.interim_mode;
                             if reorder
                                 && self.options.frame_shift_edits()
                                 && unit.cap1 >= 1
@@ -277,7 +279,10 @@ impl PolymerLayer {
     /// (`OAD_Polymer_PrepareWorkingSet`): alists translated (removed
     /// atoms dropped) and sorted, blists cap-first and bond-sorted,
     /// caps and ends translated.
-    fn working_set(&self, numbering: &std::collections::BTreeMap<usize, usize>) -> Result<Vec<WorkingUnit>> {
+    fn working_set(
+        &self,
+        numbering: &std::collections::BTreeMap<usize, usize>,
+    ) -> Result<Vec<WorkingUnit>> {
         let mut out = Vec::new();
         let any_structure_marker = self
             .treated
@@ -293,11 +298,7 @@ impl PolymerLayer {
                     state.end1 != usize::MAX,
                     any_structure_marker,
                 ),
-                alist: unit
-                    .alist
-                    .iter()
-                    .filter_map(|&a| cano(a))
-                    .collect(),
+                alist: unit.alist.iter().filter_map(|&a| cano(a)).collect(),
                 nb: unit.blist.len(),
                 blist: Vec::new(),
                 cyclizable: state.cyclizable,
@@ -314,10 +315,14 @@ impl PolymerLayer {
                 // caps (the reference's OrderBondAtomsAndBonds... on
                 // the treated ends).
                 let (Some(ccap1), Some(cend1)) = (cano(state.cap1), cano(state.end1)) else {
-                    return err("Can not proceed as one of PU crossing bond ends leads to explicit H");
+                    return err(
+                        "Can not proceed as one of PU crossing bond ends leads to explicit H",
+                    );
                 };
                 let (Some(ccap2), Some(cend2)) = (cano(state.cap2), cano(state.end2)) else {
-                    return err("Can not proceed as one of PU crossing bond ends leads to explicit H");
+                    return err(
+                        "Can not proceed as one of PU crossing bond ends leads to explicit H",
+                    );
                 };
                 let mut pairs = vec![(ccap1, cend1), (ccap2, cend2)];
                 if pairs[0].0 > pairs[1].0 {
@@ -439,23 +444,22 @@ fn hide_line(line: &str, n_pzz: usize) -> String {
         None => return line.to_string(),
     };
     let mut segments: Vec<String> = body.split('/').map(str::to_string).collect();
-    for index in 0..segments.len() {
+    for (index, segment) in segments.iter_mut().enumerate() {
         if index == 0 {
             // The formula: drop the pure-Zz component terms.
-            segments[index] = eat_zz_formula_term(&segments[index]);
+            *segment = eat_zz_formula_term(segment);
             continue;
         }
-        let letter = segments[index].chars().next();
-        match letter {
+        match segment.chars().next() {
             Some('z') => {
-                segments[index] = hide_z_pattern(&segments[index]);
+                *segment = hide_z_pattern(segment);
             }
             Some('m') => {
-                segments[index] = eat_trailing(&segments[index], '.', n_pzz, 1);
+                *segment = eat_trailing(segment, '.', n_pzz, 1);
             }
             Some('p') | Some('s') | Some('f') => {}
             Some(_) | None => {
-                segments[index] = eat_trailing(&segments[index], ';', n_pzz, 0);
+                *segment = eat_trailing(segment, ';', n_pzz, 0);
             }
         }
     }
@@ -647,7 +651,11 @@ mod probe {
         let mut interim = parsed.clone();
         let mut interim_treated = treated.clone();
         treatment::cyclize_units(&mut interim, &mut interim_treated);
-        treatment::fill_backbones(&interim, &parsed.polymer.clone().unwrap(), &mut interim_treated);
+        treatment::fill_backbones(
+            &interim,
+            &parsed.polymer.clone().unwrap(),
+            &mut interim_treated,
+        );
         let ranks = crate::layers::hydrogen::canonical_ranks_for(&interim);
         for (index, unit) in interim_treated.units.iter().enumerate() {
             println!(
@@ -659,7 +667,8 @@ mod probe {
         }
         println!("ranks: {ranks:?}");
         let mut base = parsed.clone();
-        let applied = super::apply_frame_shift(&mut base, &mut treated, &interim, &interim_treated, &ranks);
+        let applied =
+            super::apply_frame_shift(&mut base, &mut treated, &interim, &interim_treated, &ranks);
         println!("applied: {applied}; bonds: {:?}", base.bonds);
         let _ = Structure::default();
     }

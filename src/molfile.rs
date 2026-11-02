@@ -121,7 +121,11 @@ fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
             // parse (mol_fmt1.c MolfileTreatPseudoElementAtoms:
             // `*` ===> "Zz" when pseudo-elements are allowed); the
             // engine's option gate decides permission.
-            element: if element == "*" { "Zz".to_string() } else { element },
+            element: if element == "*" {
+                "Zz".to_string()
+            } else {
+                element
+            },
             // The H-count code field is NEVER read by the release
             // engine: mol_fmt1.c walks it only under MOL_FMT_QUERY,
             // and mol_fmt.h:79 sets MOL_FMT_QUERY = MOL_FMT_ABSENT —
@@ -623,9 +627,7 @@ fn parse_sgroup_lines(
                         "CRO" => 5,
                         "MER" => 6,
                         _ => {
-                            return err(format!(
-                                "{CONTEXT}: unsupported Sgroup type {pair:?}"
-                            ));
+                            return err(format!("{CONTEXT}: unsupported Sgroup type {pair:?}"));
                         }
                     };
                     match find_unit(&units, id) {
@@ -653,13 +655,12 @@ fn parse_sgroup_lines(
                         "RAN" => 2,
                         "BLK" | "BLO" => 3,
                         _ => {
-                            return err(format!(
-                                "{CONTEXT}: unsupported Sgroup subtype {pair:?}"
-                            ));
+                            return err(format!("{CONTEXT}: unsupported Sgroup subtype {pair:?}"));
                         }
                     };
-                    let index = find_unit(&units, id)
-                        .ok_or_else(|| Error::new(format!("{CONTEXT}: SST names undeclared unit {id}")))?;
+                    let index = find_unit(&units, id).ok_or_else(|| {
+                        Error::new(format!("{CONTEXT}: SST names undeclared unit {id}"))
+                    })?;
                     units[index].subtype = subtype;
                 }
             }
@@ -683,8 +684,9 @@ fn parse_sgroup_lines(
                             ));
                         }
                     };
-                    let index = find_unit(&units, id)
-                        .ok_or_else(|| Error::new(format!("{CONTEXT}: SCN names undeclared unit {id}")))?;
+                    let index = find_unit(&units, id).ok_or_else(|| {
+                        Error::new(format!("{CONTEXT}: SCN names undeclared unit {id}"))
+                    })?;
                     units[index].conn = conn;
                 }
             }
@@ -697,14 +699,13 @@ fn parse_sgroup_lines(
                 if fields.len() < 2 + count {
                     return err(format!("{CONTEXT}: malformed SAL line: {line:?}"));
                 }
-                let index = find_unit(&units, id)
-                    .ok_or_else(|| Error::new(format!("{CONTEXT}: SAL names undeclared unit {id}")))?;
+                let index = find_unit(&units, id).ok_or_else(|| {
+                    Error::new(format!("{CONTEXT}: SAL names undeclared unit {id}"))
+                })?;
                 for field in &fields[2..2 + count] {
                     let atom: usize = field.parse().map_err(|_| bad(line))?;
                     if atom == 0 || atom > atom_count {
-                        return err(format!(
-                            "{CONTEXT}: SAL atom {atom} out of range: {line:?}"
-                        ));
+                        return err(format!("{CONTEXT}: SAL atom {atom} out of range: {line:?}"));
                     }
                     units[index].alist.push(atom - 1);
                 }
@@ -718,14 +719,13 @@ fn parse_sgroup_lines(
                 if fields.len() < 2 + count {
                     return err(format!("{CONTEXT}: malformed SBL line: {line:?}"));
                 }
-                let index = find_unit(&units, id)
-                    .ok_or_else(|| Error::new(format!("{CONTEXT}: SBL names undeclared unit {id}")))?;
+                let index = find_unit(&units, id).ok_or_else(|| {
+                    Error::new(format!("{CONTEXT}: SBL names undeclared unit {id}"))
+                })?;
                 for field in &fields[2..2 + count] {
                     let bond: usize = field.parse().map_err(|_| bad(line))?;
                     if bond == 0 || bond > bond_count {
-                        return err(format!(
-                            "{CONTEXT}: SBL bond {bond} out of range: {line:?}"
-                        ));
+                        return err(format!("{CONTEXT}: SBL bond {bond} out of range: {line:?}"));
                     }
                     units[index].blist.push(bond - 1);
                 }
@@ -736,8 +736,9 @@ fn parse_sgroup_lines(
                 }
                 let id: usize = fields[0].parse().map_err(|_| bad(line))?;
                 let label = fields[1..].join(" ");
-                let index = find_unit(&units, id)
-                    .ok_or_else(|| Error::new(format!("{CONTEXT}: SMT names undeclared unit {id}")))?;
+                let index = find_unit(&units, id).ok_or_else(|| {
+                    Error::new(format!("{CONTEXT}: SMT names undeclared unit {id}"))
+                })?;
                 units[index].smt = label;
             }
             "SDI" => {
@@ -752,8 +753,9 @@ fn parse_sgroup_lines(
                 for (slot, field) in coords.iter_mut().zip(&fields[2..6]) {
                     *slot = field.parse().map_err(|_| bad(line))?;
                 }
-                let index = find_unit(&units, id)
-                    .ok_or_else(|| Error::new(format!("{CONTEXT}: SDI names undeclared unit {id}")))?;
+                let index = find_unit(&units, id).ok_or_else(|| {
+                    Error::new(format!("{CONTEXT}: SDI names undeclared unit {id}"))
+                })?;
                 let seen = sdi_seen.iter().filter(|&&s| s == id).count();
                 if seen == 0 {
                     units[index].xbr1 = Some(coords);
@@ -768,7 +770,7 @@ fn parse_sgroup_lines(
     // Units with no STY line never materialize (SAL/SBL-only files are
     // rejected by the reference's GetIndexBySgroupId miss, surfaced
     // above); a declaration pass with zero units means no polymer.
-    Ok((!units.is_empty()).then(|| crate::graph::Polymer { units }))
+    Ok((!units.is_empty()).then_some(crate::graph::Polymer { units }))
 }
 
 fn line_or<'a>(lines: &'a [&'a str], index: usize, block: &str) -> Result<&'a str> {

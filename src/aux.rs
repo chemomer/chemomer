@@ -572,7 +572,8 @@ fn bond_char(kind: u32, stereo: u8, this_end_first: bool) -> char {
 
 /// The reference's `CleanOrigCoord`: fixed four-decimal coordinates
 /// with trailing zeros (and the trailing point) trimmed; a leading
-/// zero after the sign goes too — the oracle writes `-.7`.
+/// zero before the point goes too, the point staying — the oracle
+/// writes `.5` and `-.7`.
 fn clean_coord(value: f64) -> String {
     let mut text = format!("{value:.4}");
     while text.ends_with('0') {
@@ -585,7 +586,7 @@ fn clean_coord(value: f64) -> String {
         return format!("-.{rest}");
     }
     if let Some(rest) = text.strip_prefix("0.") {
-        return rest.to_string();
+        return format!(".{rest}");
     }
     text
 }
@@ -676,6 +677,7 @@ mod tests {
     fn coord_trimming_matches_the_reference() {
         assert_eq!(clean_coord(12.0), "12");
         assert_eq!(clean_coord(1.4), "1.4");
+        assert_eq!(clean_coord(0.5), ".5");
         assert_eq!(clean_coord(-0.7), "-.7");
         assert_eq!(clean_coord(0.0), "0");
     }

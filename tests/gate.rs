@@ -1391,3 +1391,107 @@ fn the_sdf_batch_matches_the_oracle() {
     );
     println!("sdf-batch gate: pass {pass}, total {}", cases.len());
 }
+
+/// The polymer gate: the corpus's polymers tranche records CRU
+/// molfiles with the oracle's per-mode identifier and aux line —
+/// `polymers` (the modern treatment: the /z layer, the InChI=1B
+/// flavor, the /Z: aux echo and the /U/ unedited-aux appendix),
+/// `polymers105` (the legacy cyclized flavor with the Zz hidden),
+/// the frame-shift variants, `npzz` — plus the recorded rejections
+/// (an `error` message in place of the identifier). Each recorded
+/// mode pipes through `Engine::with_options`; a missing tranche file
+/// reads as an empty one — the gate skips.
+#[test]
+fn the_polymer_layers_match_the_oracle() {
+    let dir = suite_dir();
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/polymers.json")) else {
+        println!("polymer gate: no polymers.json tranche recorded; skipped");
+        return;
+    };
+    let cases: Vec<serde_json::Value> = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("valid polymers.json fixtures: {error}"));
+    assert!(
+        !cases.is_empty(),
+        "the polymers.json file carries no fixtures"
+    );
+
+    fn mode_options(mode: &str) -> chemomer::Options {
+        use chemomer::options::{FrameShift, PolymersMode};
+        let mut options = chemomer::Options::default();
+        for part in mode.split('+') {
+            match part {
+                "polymers" => options.polymers = PolymersMode::Modern,
+                "polymers105" => options.polymers = PolymersMode::Legacy,
+                "npzz" => options.npzz = true,
+                "fs-none" => options.frame_shift = FrameShift::None,
+                "fs-stars" => options.frame_shift = FrameShift::Opened,
+                _ => {}
+            }
+        }
+        options
+    }
+
+    let mut pass = 0;
+    let mut rejects = 0;
+    let mut failures = Vec::new();
+    let mut total = 0;
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let molfile = case["molfile"].as_str().expect("molfile");
+        let modes = case["modes"].as_object().expect("modes");
+        for (mode, recording) in modes {
+            total += 1;
+            let recorded_error = recording.get("error").and_then(|v| v.as_str());
+            let Some(recorded_inchi) = recording.get("inchi").and_then(|v| v.as_str()) else {
+                // The recorded rejection: the engine must refuse the
+                // structure with the oracle's message.
+                let expected = recorded_error.expect("error or inchi recording");
+                match chemomer::Engine::with_options(molfile, mode_options(mode)) {
+                    Ok(_) => failures.push(format!(
+                        "{id} [{mode}]: assembled an identifier; the oracle rejects with {expected:?}"
+                    )),
+                    Err(error) if error.message() == expected => rejects += 1,
+                    Err(error) => failures.push(format!(
+                        "{id} [{mode}]: error {:?} != oracle {expected:?}",
+                        error.message()
+                    )),
+                }
+                continue;
+            };
+            let recorded_aux = recording.get("aux").and_then(|v| v.as_str());
+            match chemomer::Engine::with_options(molfile, mode_options(mode)) {
+                Ok(engine) => match (engine.inchi_string(), engine.aux_string()) {
+                    (Ok(assembled), Ok(aux)) => {
+                        if assembled != recorded_inchi {
+                            failures.push(format!(
+                                "{id} [{mode}]: assembled {assembled:?} != oracle {recorded_inchi:?}"
+                            ));
+                        } else if let Some(recorded) = recorded_aux {
+                            if aux != recorded {
+                                failures.push(format!(
+                                    "{id} [{mode}]: aux {aux:?} != oracle {recorded:?}"
+                                ));
+                            } else {
+                                pass += 1;
+                            }
+                        } else {
+                            pass += 1;
+                        }
+                    }
+                    (Ok(_), Err(error)) => {
+                        failures.push(format!("{id} [{mode}]: aux errored: {error}"))
+                    }
+                    (Err(error), _) => failures.push(format!("{id} [{mode}]: {error}")),
+                },
+                Err(error) => failures.push(format!("{id} [{mode}]: {error}")),
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} polymer mismatch(es):\n{}\n(polymer pass: {pass}, oracle rejections reproduced: {rejects}, total: {total})",
+        failures.len(),
+        failures.join("\n"),
+    );
+    println!("polymer gate: pass {pass}, rejections {rejects}, total {total}");
+}
