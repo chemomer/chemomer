@@ -110,18 +110,19 @@ impl PolymerLayer {
             out.push_str(if unit.smt.is_empty() { "n" } else { &unit.smt });
             out.push('-');
             push_compressed_range(&mut out, &unit.alist.iter().map(|a| a + 1).collect::<Vec<_>>());
-            if !unit.blist.is_empty() {
+            let echo_pairs = self
+                .treated
+                .units
+                .get(index)
+                .map(|state| state.echo_pairs.clone())
+                .unwrap_or_default();
+            if !echo_pairs.is_empty() {
                 out.push('(');
-                let endpoints: Vec<usize> = unit
-                    .blist
-                    .iter()
-                    .flat_map(|&bond| self.original_polymer_bond_endpoints(bond))
-                    .collect();
-                for (position, atom) in endpoints.iter().enumerate() {
+                for (position, &(a, b)) in echo_pairs.iter().enumerate() {
                     if position > 0 {
                         out.push(',');
                     }
-                    out.push_str(&atom.to_string());
+                    out.push_str(&format!("{a},{b}"));
                 }
                 out.push(')');
             }
@@ -130,14 +131,6 @@ impl PolymerLayer {
             }
         }
         out
-    }
-
-    /// The endpoint atoms of one crossing bond (0-based bond index).
-    fn original_polymer_bond_endpoints(&self, bond: usize) -> Vec<usize> {
-        match self.original.bonds.get(bond) {
-            Some(&(from, to, _)) => vec![from + 1, to + 1],
-            None => Vec::new(),
-        }
     }
 
     /// The `/z` segment over a numbering map (submitted 0-based index
@@ -434,6 +427,12 @@ pub fn hide_polymer_zz(identifier: &str, aux: &str, n_pzz: usize) -> (String, St
     (hide_line(identifier, n_pzz), hide_line(aux, n_pzz))
 }
 
+/// The aux line's share of the hide post-edit — the caller (the aux
+/// assembly) already knows the /z layer stands.
+pub fn hide_aux_line(aux: &str, n_pzz: usize) -> String {
+    hide_line(aux, n_pzz)
+}
+
 fn hide_line(line: &str, n_pzz: usize) -> String {
     let (prefix, body) = match line.split_once('/') {
         Some((prefix, body)) => (prefix, body),
@@ -454,7 +453,7 @@ fn hide_line(line: &str, n_pzz: usize) -> String {
             Some('m') => {
                 segments[index] = eat_trailing(&segments[index], '.', n_pzz, 1);
             }
-            Some('p') | Some('s') | Some('f') | Some('r') => {}
+            Some('p') | Some('s') | Some('f') => {}
             Some(_) | None => {
                 segments[index] = eat_trailing(&segments[index], ';', n_pzz, 0);
             }
@@ -587,6 +586,15 @@ pub fn apply_frame_shift(
         let state_now = &mut treated.units[index];
         state_now.end1 = end1;
         state_now.end2 = end2;
+        for edit in &edits {
+            let (rm_a, rm_b, add_a, add_b) = *edit;
+            for pair in &mut state_now.echo_pairs {
+                let hit = (*pair == (rm_a + 1, rm_b + 1)) || (*pair == (rm_b + 1, rm_a + 1));
+                if hit {
+                    *pair = (add_a + 1, add_b + 1);
+                }
+            }
+        }
         applied = true;
     }
     applied

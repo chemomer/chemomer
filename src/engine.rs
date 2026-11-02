@@ -95,14 +95,24 @@ impl Engine {
         // submitted atoms before the normalization): validation, the
         // v1.05 cyclization, the v1.06 frame shift.
         let polymer = polymer_treat(&mut base, &original, &options)?;
+        // The aux echo (and the reversibility block) speak the STORED
+        // structure — the post-treatment atoms, before the
+        // normalization (the reference's OrigAtData_StoreNativeInput).
+        let echo_structure = if polymer.is_some() {
+            base.clone()
+        } else {
+            original.clone()
+        };
         let noedits_aux = match (&polymer, options.polymers) {
-            (Some(_), crate::options::PolymersMode::Modern) => {
+            (Some(_), crate::options::PolymersMode::Modern)
+                if original.polymer.is_some() =>
+            {
                 let mut unedited = original.clone();
                 let unedited_options = crate::options::Options {
                     frame_shift: crate::options::FrameShift::None,
                     ..options.clone()
                 };
-                let _ = polymer_treat(&mut unedited, &original, &unedited_options)?;
+                let unedited_polymer = polymer_treat(&mut unedited, &original, &unedited_options)?;
                 let engine = Self::from_prepared(
                     unedited.clone(),
                     unedited,
@@ -110,7 +120,7 @@ impl Engine {
                     false,
                     false,
                     None,
-                    None,
+                    unedited_polymer,
                     None,
                 )?;
                 Some(engine.aux_string()?)
@@ -161,7 +171,7 @@ impl Engine {
         let metal_disconnected = crate::canonical::metals::disconnect_metals(&mut base);
         Self::from_prepared(
             base,
-            original,
+            echo_structure,
             options,
             salt_disconnected,
             metal_disconnected,
@@ -423,12 +433,23 @@ impl Engine {
         Ok(self.hidden(&out))
     }
 
-    /// The legacy Zz-hide post-edit over an assembled line
+    /// The legacy Zz-hide post-edit over an assembled identifier line
     /// (`EditINCHI_HidePolymerZz`); the text untouched otherwise.
     fn hidden(&self, text: &str) -> String {
         match &self.polymer {
             Some(layer) if self.options.polymers == crate::options::PolymersMode::Legacy => {
                 crate::layers::polymer::hide_polymer_zz(text, "", layer.star_count()).0
+            }
+            _ => text.to_string(),
+        }
+    }
+
+    /// The aux line's share of the hide post-edit: the gate reads the
+    /// identifier's /z presence (the caller knows it stands).
+    fn hidden_aux(&self, text: &str) -> String {
+        match &self.polymer {
+            Some(layer) if self.options.polymers == crate::options::PolymersMode::Legacy => {
+                crate::layers::polymer::hide_aux_line(text, layer.star_count())
             }
             _ => text.to_string(),
         }
@@ -730,6 +751,15 @@ impl Engine {
             if present {
                 out.push('/');
                 out.push_str(tag);
+                // The equivalence join drops the components without
+                // classes entirely (the reference's str_AuxEqu multi
+                // assembly: the detached star components' empty
+                // equivalence fields never print).
+                let fields: Vec<String> = if tag == "E:" {
+                    fields.into_iter().filter(|field| !field.is_empty()).collect()
+                } else {
+                    fields
+                };
                 out.push_str(&merge_runs(fields).join(";"));
             }
         }
@@ -874,7 +904,7 @@ impl Engine {
                 base.push_str(body);
             }
         }
-        let base = self.hidden(&base);
+        let base = self.hidden_aux(&base);
         match (&self.reconnected, self.options.rec_met) {
             (Some(reconnected), true) => {
                 let aux = reconnected.aux_string()?;
