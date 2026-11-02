@@ -1496,3 +1496,88 @@ fn the_polymer_layers_match_the_oracle() {
     );
     println!("polymer gate: pass {pass}, rejections {rejects}, total {total}");
 }
+
+/// The DoNotAddH aux gate: the auxiliary line under `-DoNotAddH` —
+/// the canonical numbering, equivalence and CRV fields over the
+/// un-augmented structure, plus the `/rA` echo whose unusual-valence
+/// digit reads the INPUT's hydrogen state (the reference's
+/// `WriteOrigAtoms` over orig_at_data, whose num_H the bDoNotAddH
+/// read left at the declared count — zero corpus-wide) — must equal
+/// the oracle's `donotaddh.aux` recording byte-for-byte. Expected
+/// failures are the union of the four dated ledgers: the identifier
+/// triage, the aux ledger, the DoNotAddH identifier ledger (whose
+/// debts span both sides of the mode), and the DoNotAddH AUX ledger —
+/// the CRV/numbering shadow of the reference's zero-H BNS
+/// π-restoration, a debt of its own. Fixtures without the field are
+/// skipped, the way the other mode gates skip missing recordings.
+#[test]
+fn the_do_not_addh_aux_equals_the_oracle_recording() {
+    let dir = suite_dir();
+    let cases = load_cases(&dir);
+    let triage = load_ledger(&dir, "triage.json");
+    let aux_triage = load_ledger(&dir, "aux-triage.json");
+    let dna_triage = load_ledger(&dir, "donotaddh-triage.json");
+    let dna_aux_triage = load_ledger(&dir, "donotaddh-aux-triage.json");
+
+    let mut pass = 0;
+    let mut skipped = 0;
+    let mut without_recording = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let Some(recorded) = case["donotaddh"]
+            .as_object()
+            .and_then(|s| s.get("aux"))
+            .and_then(|v| v.as_str())
+        else {
+            without_recording += 1;
+            continue;
+        };
+        let expected_failure = triage.get(id).map(|_| ()).is_some()
+            || aux_triage.get(id).map(|_| ()).is_some()
+            || dna_triage.get(id).map(|_| ()).is_some()
+            || dna_aux_triage.get(id).map(|_| ()).is_some();
+        let molfile = case["molfile"].as_str().expect("molfile");
+        match chemomer::Engine::with_options(
+            molfile,
+            chemomer::Options::default().with_do_not_add_h(),
+        )
+        .and_then(|engine| engine.aux_string())
+        {
+            Ok(assembled) => {
+                if assembled == recorded {
+                    pass += 1;
+                } else if !expected_failure {
+                    failures.push(format!(
+                        "{id}: assembled {assembled:?} != oracle {recorded:?}"
+                    ));
+                } else {
+                    skipped += 1;
+                }
+            }
+            Err(error) => {
+                if error.message().contains("beyond the ±1 corpus gate") {
+                    continue;
+                }
+                if !expected_failure {
+                    failures.push(format!("{id}: {error}"));
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} DoNotAddH aux mismatch(es):\n{}\n(DoNotAddH aux pass: {pass}, expected-failure skips: {skipped}, \
+         no recording: {without_recording}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!(
+        "DoNotAddH aux gate: pass {pass}, expected-failure skips {skipped}, \
+         no recording {without_recording}"
+    );
+}
