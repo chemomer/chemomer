@@ -104,9 +104,7 @@ impl Engine {
             original.clone()
         };
         let noedits_aux = match (&polymer, options.polymers) {
-            (Some(_), crate::options::PolymersMode::Modern)
-                if original.polymer.is_some() =>
-            {
+            (Some(_), crate::options::PolymersMode::Modern) if original.polymer.is_some() => {
                 let mut unedited = original.clone();
                 let unedited_options = crate::options::Options {
                     frame_shift: crate::options::FrameShift::None,
@@ -645,11 +643,10 @@ impl Engine {
             .collect();
         out.push_str(&formulas.join("."));
         // The layer kinds in the reference's order (formula, c, h, q,
-        // b, t, m, s, i — the /p comes last as the net). Each member
-        // of a group speaks its own segment; the join merges
-        // consecutive equal non-empty segments (`2*+1`) and keeps
-        // empty segments as bare slots.
-        let kinds = ['c', 'h', 'q', 'b', 't', 'm', 's', 'i'];
+        // p, z, b, t, m, s, i). Each member of a group speaks its own
+        // segment; the join merges consecutive equal non-empty
+        // segments (`2*+1`) and keeps empty segments as bare slots.
+        let kinds = ['c', 'h', 'q'];
         for kind in kinds {
             let mut present = false;
             let mut fields: Vec<String> = Vec::new();
@@ -670,6 +667,15 @@ impl Engine {
                 out.push_str(&merge_runs(fields).join(";"));
             }
         }
+        // The net proton shift: one segment, the sum of the
+        // components' shifts, omitted when nothing moved (the
+        // reference's /p rides after /q, before /z).
+        let net: i32 = self.siblings.iter().map(|s| s.proton_shift).sum();
+        if net != 0 {
+            let sign = if net > 0 { '+' } else { '-' };
+            out.push('/');
+            out.push_str(&format!("p{sign}{}", net.abs()));
+        }
         // The polymer /z: one whole-structure segment over the
         // combined canonical numbering (units never cross components;
         // the numbers continue across them).
@@ -684,13 +690,27 @@ impl Engine {
                 out.push_str(&segment);
             }
         }
-        // The proton layer: one NET segment, the sum of the
-        // components' shifts, omitted when nothing moved.
-        let net: i32 = self.siblings.iter().map(|s| s.proton_shift).sum();
-        if net != 0 {
-            let sign = if net > 0 { '+' } else { '-' };
-            out.push('/');
-            out.push_str(&format!("p{sign}{}", net.abs()));
+        // The remaining kinds after the polymer layer.
+        let kinds = ['b', 't', 'm', 's', 'i'];
+        for kind in kinds {
+            let mut present = false;
+            let mut fields: Vec<String> = Vec::new();
+            for members in &groups {
+                for &member in members {
+                    let segment = parts[member]
+                        .iter()
+                        .find(|(k, _)| *k == kind)
+                        .map(|(_, v)| v[1..].to_string())
+                        .unwrap_or_default();
+                    present = present || !segment.is_empty();
+                    fields.push(segment);
+                }
+            }
+            if present {
+                out.push('/');
+                out.push_str(kind.to_string().as_str());
+                out.push_str(&merge_runs(fields).join(";"));
+            }
         }
         // The fixed-H block: one /f over all components, in the same
         // sorted order, present when any component's /f is active.
@@ -751,15 +771,6 @@ impl Engine {
             if present {
                 out.push('/');
                 out.push_str(tag);
-                // The equivalence join drops the components without
-                // classes entirely (the reference's str_AuxEqu multi
-                // assembly: the detached star components' empty
-                // equivalence fields never print).
-                let fields: Vec<String> = if tag == "E:" {
-                    fields.into_iter().filter(|field| !field.is_empty()).collect()
-                } else {
-                    fields
-                };
                 out.push_str(&merge_runs(fields).join(";"));
             }
         }
@@ -1350,7 +1361,11 @@ fn polymer_treat(
         return Ok(None);
     }
     let mut poly = submitted.polymer.clone().unwrap_or_default();
-    let mut treated = treatment::validate(submitted, options.polymers != PolymersMode::No, options.npzz)?;
+    let mut treated = treatment::validate(
+        submitted,
+        options.polymers != PolymersMode::No,
+        options.npzz,
+    )?;
     match options.polymers {
         PolymersMode::No => {}
         PolymersMode::Modern => {
@@ -1359,10 +1374,7 @@ fn polymer_treat(
                     "CRU folding is not implemented (FoldCRU; ledgered beyond this tranche)",
                 );
             }
-            if treated.has_units()
-                && treated.pzz.len() >= 2
-                && options.frame_shift_edits()
-            {
+            if treated.has_units() && treated.pzz.len() >= 2 && options.frame_shift_edits() {
                 // The interim (105+) pass: cyclize a working copy,
                 // collect its backbones, derive the senior-bond
                 // rotation, apply it to `base`.

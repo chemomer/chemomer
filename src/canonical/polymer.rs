@@ -47,6 +47,10 @@ pub struct TreatedUnit {
     pub bkbonds: Vec<(usize, usize)>,
     /// Whether the legacy cyclization edit ran on this unit.
     pub cyclized: bool,
+    /// The aux `/Z:` echo's crossing-bond endpoint pairs (1-based, in
+    /// the drawn order the reader resolved; a frame shift rewrites the
+    /// shifted pair to `(end, cap)`).
+    pub echo_pairs: Vec<(usize, usize)>,
 }
 
 impl TreatedUnit {
@@ -162,6 +166,7 @@ pub fn validate(structure: &Structure, polymers: bool, npzz: bool) -> Result<Tre
             cyclizable: Closing::NotApplicable,
             bkbonds: Vec::new(),
             cyclized: false,
+            echo_pairs: Vec::new(),
         };
         if unit.alist.is_empty() {
             return err("Empty polymer unit");
@@ -183,6 +188,7 @@ pub fn validate(structure: &Structure, polymers: bool, npzz: bool) -> Result<Tre
                 let Some(&(a, b, _)) = structure.bonds.get(bond) else {
                     return err("Invalid polymer CRU crossing bond");
                 };
+                treated.echo_pairs.push((a + 1, b + 1));
                 let a_in = unit.alist.contains(&a);
                 let b_in = unit.alist.contains(&b);
                 if a_in && b_in {
@@ -266,7 +272,11 @@ pub fn validate(structure: &Structure, polymers: bool, npzz: bool) -> Result<Tre
 /// polymer reads its SRU as MON, suppresses conn, defaults COP
 /// subtype to RAN(2); structure-based SRU/MOD/CRO/MER default a
 /// missing conn to EU(3).
-pub fn header_digits(unit: &crate::graph::PolymerUnit, crossing: bool, any_structure: bool) -> (u8, u8, u8) {
+pub fn header_digits(
+    unit: &crate::graph::PolymerUnit,
+    crossing: bool,
+    any_structure: bool,
+) -> (u8, u8, u8) {
     let (mut ty, mut subtype, mut conn) = (unit.unit_type, unit.subtype, unit.conn);
     if !crossing && !any_structure {
         if ty == 1 {
@@ -339,7 +349,10 @@ pub fn collect_backbone_bonds(
 /// ring-system id for atoms inside a cycle of length > 2 (the
 /// reference's `OAD_Polymer_FindRingSystems`, with cyclized closure
 /// bonds temporarily broken so artificial rings never count).
-pub fn ring_systems(structure: &Structure, treated: &Treated) -> std::collections::HashMap<usize, usize> {
+pub fn ring_systems(
+    structure: &Structure,
+    treated: &Treated,
+) -> std::collections::HashMap<usize, usize> {
     let mut work = structure.clone();
     for unit in &treated.units {
         if unit.cyclized && unit.end1 != usize::MAX && unit.end2 != usize::MAX {
@@ -428,7 +441,9 @@ pub fn cyclize_units(structure: &mut Structure, treated: &mut Treated) {
             Closing::Ring => {
                 remove_bond(structure, cap1, end1);
                 remove_bond(structure, cap2, end2);
-                structure.bonds.push((end1, end2, 1));
+                if bond_index(structure, end1, end2).is_none() {
+                    structure.bonds.push((end1, end2, 1));
+                }
             }
             Closing::HigherOrder => {
                 raise_order(structure, end1, end2);
@@ -509,7 +524,10 @@ pub fn atom_props(structure: &Structure, treated: &Treated) -> Vec<AtomProps> {
     let mut max_by_ring: std::collections::HashMap<usize, u16> = Default::default();
     for (&atom, &id) in &ring {
         let rule2 = erank(&ERANK_RULE2, &structure.atoms[atom].element);
-        max_by_ring.entry(id).and_modify(|m| *m = (*m).max(rule2)).or_insert(rule2);
+        max_by_ring
+            .entry(id)
+            .and_modify(|m| *m = (*m).max(rule2))
+            .or_insert(rule2);
         props[atom].ring_size = 3; // membership (the size > 2 gate)
     }
     for (&atom, &id) in &ring {
@@ -678,7 +696,11 @@ pub fn sort_backbone_bonds(bonds: &[(usize, usize)], props: &[AtomProps]) -> Vec
 /// senior end (skipped when unchanged), then the senior bond cut and
 /// the original ends joined. The vec carries (remove_a, remove_b,
 /// add_a, add_b) tuples.
-pub fn frame_shift_edits(unit: &TreatedUnit, end1: usize, end2: usize) -> Vec<(usize, usize, usize, usize)> {
+pub fn frame_shift_edits(
+    unit: &TreatedUnit,
+    end1: usize,
+    end2: usize,
+) -> Vec<(usize, usize, usize, usize)> {
     let mut edits = Vec::new();
     let old_end1 = unit.end1;
     let old_end2 = unit.end2;
@@ -728,6 +750,28 @@ pub fn fill_backbones(structure: &Structure, poly: &crate::graph::Polymer, treat
         bonds.retain(|&(a, b)| match (ring.get(&a), ring.get(&b)) {
             (Some(&x), Some(&y)) => x != y,
             _ => true,
+        });
+        // Delist the tautomeric backbone bonds (the reference's
+        // OAD_PolymerUnit_DelistHighOrderBackboneBonds over the
+        // normalized composite: a bond the t-group registration made
+        // BOND_TAUTOM never carries the frame shift).
+        let counts = crate::layers::standardization::adjusted_hydrogens(structure);
+        let ranks = crate::layers::hydrogen::canonical_ranks_for(structure);
+        let groups = crate::canonical::tautomer::mobile_groups(structure, &counts, &ranks);
+        let mut taut_pairs: Vec<(u32, u32)> = Vec::new();
+        for group in &groups {
+            let mut members: Vec<u32> = group.ranks.clone();
+            members.sort_unstable();
+            for i in 0..members.len() {
+                for j in (i + 1)..members.len() {
+                    taut_pairs.push((members[i], members[j]));
+                }
+            }
+        }
+        bonds.retain(|&(a, b)| {
+            let (ra, rb) = (ranks[a], ranks[b]);
+            let (lo, hi) = (ra.min(rb), ra.max(rb));
+            !taut_pairs.contains(&(lo, hi))
         });
         if bonds.is_empty() {
             // Hold the ends bond when every candidate delisted (the
