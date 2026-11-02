@@ -609,6 +609,171 @@ fn the_rinchi_equals_the_oracle_recording() {
     println!("rinchi gate: pass {pass}, total {}", cases.len());
 }
 
+/// The decode gate: every recorded RInChI string reads back into a
+/// reaction whose re-assembly reproduces the recording byte-for-byte —
+/// the identifier line, the RAuxInfo companion, and all three key
+/// shapes (the RInChI string is canonical, so decode∘encode is the
+/// identity). The decoded components' carried identifiers must equal
+/// the recorded per-component InChIs (order-free: the reader sorts
+/// within a role, and the byte-exact direction flag proves the role
+/// recovery itself — a swapped decode re-encodes with the opposite
+/// flag).
+#[test]
+fn the_rinchi_decode_round_trips() {
+    let dir = suite_dir();
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/rinchi-reactions.json")) else {
+        println!("decode gate: no rinchi-reactions tranche recorded; skipped");
+        return;
+    };
+    let cases: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid rinchi fixtures");
+    assert!(!cases.is_empty(), "rinchi fixture file is empty");
+
+    let mut pass = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let recorded = case["rinchi"].as_str().expect("rinchi");
+        let recorded_aux = case["rauxinfo"].as_str().expect("rauxinfo");
+        let mut ok = true;
+
+        // The two-line decode: every recorded output line re-assembles
+        // byte-for-byte from the decoded reaction alone.
+        let check = |what: &str,
+                     assembled: chemomer::Result<String>,
+                     expected: &str,
+                     ok: &mut bool,
+                     failures: &mut Vec<String>| {
+            match assembled {
+                Ok(value) if value == expected => {}
+                Ok(value) => {
+                    *ok = false;
+                    failures.push(format!(
+                        "{id}: decode re-encodes {what} {value:?} != oracle {expected:?}"
+                    ));
+                }
+                Err(error) => {
+                    *ok = false;
+                    failures.push(format!("{id}: decode {what} errored: {error}"));
+                }
+            }
+        };
+        match chemomer::rinchi::reaction_from_rinchi_with_auxinfo(recorded, recorded_aux) {
+            Err(error) => {
+                ok = false;
+                failures.push(format!("{id}: decode errored: {error}"));
+            }
+            Ok(reaction) => {
+                check(
+                    "rinchi",
+                    reaction.rinchi_string(),
+                    recorded,
+                    &mut ok,
+                    &mut failures,
+                );
+                check(
+                    "rauxinfo",
+                    reaction.rinchi_auxinfo(),
+                    recorded_aux,
+                    &mut ok,
+                    &mut failures,
+                );
+                check(
+                    "rinchikey",
+                    reaction.rinchi_short_key().map(|key| {
+                        key.strip_prefix("Short-RInChIKey=")
+                            .map(str::to_owned)
+                            .unwrap_or(key)
+                    }),
+                    case["rinchikey"].as_str().expect("rinchikey"),
+                    &mut ok,
+                    &mut failures,
+                );
+                check(
+                    "longKey",
+                    reaction.rinchi_long_key().map(|key| {
+                        key.strip_prefix("Long-RInChIKey=")
+                            .map(str::to_owned)
+                            .unwrap_or(key)
+                    }),
+                    case["longKey"].as_str().expect("longKey"),
+                    &mut ok,
+                    &mut failures,
+                );
+                check(
+                    "webKey",
+                    reaction.rinchi_web_key().map(|key| {
+                        key.strip_prefix("Web-RInChIKey=")
+                            .map(str::to_owned)
+                            .unwrap_or(key)
+                    }),
+                    case["webKey"].as_str().expect("webKey"),
+                    &mut ok,
+                    &mut failures,
+                );
+
+                // The decoded components carry the recorded per-role
+                // identities (No-Structures included, their bare
+                // identifier recorded like the corpus does).
+                let mut decoded: Vec<String> = reaction
+                    .reactants()
+                    .iter()
+                    .chain(reaction.products().iter())
+                    .chain(reaction.agents().iter())
+                    .map(|component| component.inchi_string().expect("decoded inchi"))
+                    .collect();
+                let mut recorded_components: Vec<String> = case["components"]
+                    .as_array()
+                    .expect("components")
+                    .iter()
+                    .map(|component| {
+                        component["inchi"]
+                            .as_str()
+                            .expect("component inchi")
+                            .to_owned()
+                    })
+                    .collect();
+                decoded.sort();
+                recorded_components.sort();
+                if decoded != recorded_components {
+                    ok = false;
+                    failures.push(format!(
+                        "{id}: decoded components {decoded:?} != oracle {recorded_components:?}"
+                    ));
+                }
+            }
+        }
+
+        // The identifier-only decode (no RAuxInfo companion at hand)
+        // reads the same reaction.
+        match chemomer::reaction_from_rinchi(recorded) {
+            Err(error) => {
+                ok = false;
+                failures.push(format!("{id}: bare decode errored: {error}"));
+            }
+            Ok(reaction) => check(
+                "bare rinchi",
+                reaction.rinchi_string(),
+                recorded,
+                &mut ok,
+                &mut failures,
+            ),
+        }
+
+        if ok {
+            pass += 1;
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} decode mismatch(es):\n{}\n(decode pass: {pass}, total: {})",
+        failures.len(),
+        failures.join("\n"),
+        cases.len()
+    );
+    println!("decode gate: pass {pass}, total {}", cases.len());
+}
+
 /// The key-extension gate: the corpus tranche records the oracle's
 /// 256-bit hash extensions (`inchikey_xhash1`, `inchikey_xhash2`) and
 /// the merged `InChIHash=` line (`inchikey_merged`) for a family-

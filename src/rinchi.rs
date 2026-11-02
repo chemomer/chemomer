@@ -103,25 +103,45 @@ pub enum Directionality {
     Equilibrium,
 }
 
-/// One reaction component: a molecule as drawn by its V2000 molfile
-/// block (the `$MOL` body, header lines through `M  END`), or a
-/// No-Structure placeholder.
+/// One reaction component: either a molecule as drawn by its V2000
+/// molfile block (the `$MOL` body, header lines through `M  END`), a
+/// No-Structure placeholder, or — after a RInChI decode — a bare
+/// identifier carried over from the string (see
+/// [`reaction_from_rinchi`]).
 #[derive(Debug, Clone)]
 pub struct RinchiComponent {
     molfile: String,
+    /// The identity taken from a decoded RInChI string; set only on
+    /// decode-created components, whose `identity()` returns it
+    /// verbatim instead of recomputing through the engine.
+    identity: Option<Identity>,
 }
 
 impl RinchiComponent {
-    /// The component's V2000 molfile block exactly as parsed.
+    /// The component's V2000 molfile block exactly as parsed; empty
+    /// for a component decoded from a RInChI string (which carries no
+    /// drawing).
     pub fn molfile(&self) -> &str {
         &self.molfile
+    }
+
+    /// The component's standard InChI — computed through the engine
+    /// for drawn components, carried over verbatim for
+    /// identifier-decoded ones.
+    pub fn inchi_string(&self) -> Result<String> {
+        Ok(self.identity()?.inchi)
     }
 
     /// A No-Structure: the block holds no atoms, or a single
     /// placeholder atom (`A`, `X`, `R#`, `R`, `*`) — both are the
     /// reference's "unknown structure" (mdl_molfile_reader.cpp's
     /// special-atom rule, which bypasses the InChI library entirely).
+    /// A decoded component is a No-Structure exactly when its carried
+    /// identity is the bare No-Structure identifier.
     fn is_no_structure(&self) -> bool {
+        if let Some(identity) = &self.identity {
+            return identity.inchi == NOSTRUCT_INCHI;
+        }
         let lines: Vec<&str> = self.molfile.lines().collect();
         let Some(counts) = lines.get(3) else {
             return false;
@@ -142,8 +162,12 @@ impl RinchiComponent {
     /// The component's identity triple: standard InChI, AuxInfo, and
     /// InChIKey — computed through the existing engine for molecules,
     /// fixed constants for No-Structures (the reference never feeds a
-    /// No-Structure to the InChI library; inchi_generator.cpp).
+    /// No-Structure to the InChI library; inchi_generator.cpp), and
+    /// the carried-over triple for identifier-decoded components.
     fn identity(&self) -> Result<Identity> {
+        if let Some(identity) = &self.identity {
+            return Ok(identity.clone());
+        }
         if self.is_no_structure() {
             return Ok(Identity {
                 inchi: NOSTRUCT_INCHI.to_string(),
@@ -764,7 +788,289 @@ fn read_component(lines: &[&str], cursor: &mut usize) -> Result<RinchiComponent>
     }
     Ok(RinchiComponent {
         molfile: block.join("\n"),
+        identity: None,
     })
+}
+
+/// Decodes a RInChI string back into the reaction it identifies —
+/// the reader half of the layer (rinchi_reader.cpp's
+/// `split_into_reaction`). The components carry their identities
+/// straight from the string (no structures are rebuilt); the
+/// direction flag recovers which `<>` group held which role: `/d-`
+/// stores the products group first (it sorts before the reactants
+/// group on assembly), `/d+` the reactants group, `/d=` reads
+/// equilibrium with the reactants stored first. Re-assembling a
+/// decoded reaction reproduces the canonical input byte-for-byte.
+pub fn reaction_from_rinchi(rinchi: &str) -> Result<RinchiReaction> {
+    reaction_from_rinchi_with_auxinfo(rinchi, "")
+}
+
+/// The reader's two-line form: the identifier plus its RAuxInfo
+/// companion line, whose per-component aux bodies distribute over the
+/// decoded components in group order (rinchi_reader.cpp's
+/// `add_auxinfo_to_components`). An empty `rauxinfo` leaves every
+/// component's aux empty.
+pub fn reaction_from_rinchi_with_auxinfo(rinchi: &str, rauxinfo: &str) -> Result<RinchiReaction> {
+    let mut line = split_groups(rinchi, RINCHI_STD_HEADER)?;
+    // The trailing tags ride the tail of the last output group —
+    // the third when present, else the second, else the first.
+    let (direction_flag, nostruct_data) = extract_tags(&mut line.groups[line.last])?;
+
+    // The flag assigns the roles: forward/equilibrium store the
+    // reactants first, backward stores the products first.
+    let (reactant_group, product_group, reactant_role, product_role) = match direction_flag {
+        DIRECTION_FORWARD | DIRECTION_EQUILIBRIUM => (
+            &line.groups[0],
+            &line.groups[1],
+            "first group (reactants)",
+            "second group (products)",
+        ),
+        DIRECTION_REVERSE => (
+            &line.groups[1],
+            &line.groups[0],
+            "first group (products)",
+            "second group (reactants)",
+        ),
+        other => {
+            return err(format!(
+                "{CONTEXT}: unknown direction flag {other:?} - expected one of \
+                 '{DIRECTION_FORWARD}' '{DIRECTION_REVERSE}' '{DIRECTION_EQUILIBRIUM}'"
+            ))
+        }
+    };
+
+    let mut reactants = components_from_group(reactant_group)?;
+    let mut products = components_from_group(product_group)?;
+    let mut agents = components_from_group(&line.groups[2])?;
+
+    // The RAuxInfo companion mirrors the same role assignment.
+    let nostruct_aux = if rauxinfo.is_empty() {
+        String::new()
+    } else {
+        let aux_line = split_groups(rauxinfo, RINCHI_AUXINFO_HEADER)?;
+        add_auxinfo_to_components(
+            &aux_line.groups[if direction_flag == DIRECTION_REVERSE {
+                1
+            } else {
+                0
+            }],
+            &mut reactants,
+            reactant_role,
+        )?;
+        add_auxinfo_to_components(
+            &aux_line.groups[if direction_flag == DIRECTION_REVERSE {
+                0
+            } else {
+                1
+            }],
+            &mut products,
+            product_role,
+        )?;
+        add_auxinfo_to_components(&aux_line.groups[2], &mut agents, "third group (agents)")?;
+        NOSTRUCT_AUXINFO.to_string()
+    };
+
+    // No-Structures ride the /u counts (output order), not the
+    // groups; a reversed output swaps the reactant/product counts.
+    if let Some(data) = &nostruct_data {
+        let mut nostruct_counts = parse_nostruct_counts(data)?;
+        if direction_flag == DIRECTION_REVERSE {
+            nostruct_counts.swap(0, 1);
+        }
+        for (role, &count) in [&mut reactants, &mut products, &mut agents]
+            .into_iter()
+            .zip(&nostruct_counts)
+        {
+            for _ in 0..count {
+                role.push(RinchiComponent {
+                    molfile: String::new(),
+                    identity: Some(Identity {
+                        inchi: NOSTRUCT_INCHI.to_string(),
+                        aux: nostruct_aux.clone(),
+                        key: NOSTRUCT_RINCHI_LONGKEY.to_string(),
+                    }),
+                });
+            }
+        }
+    }
+
+    Ok(RinchiReaction {
+        reactants,
+        products,
+        agents,
+        directionality: if direction_flag == DIRECTION_EQUILIBRIUM {
+            Directionality::Equilibrium
+        } else {
+            Directionality::Directional
+        },
+    })
+}
+
+/// One decoded identifier line: the `<>`-separated role groups in
+/// wire order (empty when a role contributes nothing) plus the index
+/// of the last group present — the trailing tags ride its tail.
+struct DecodedLine {
+    groups: [String; 3],
+    last: usize,
+}
+
+/// Splits an identifier line into its groups after the header —
+/// rinchi_reader.cpp's group walk (the first group may be all there
+/// is; everything after the second delimiter is the third group
+/// wholesale).
+fn split_groups(line: &str, header: &str) -> Result<DecodedLine> {
+    let body = line.strip_prefix(header).ok_or_else(|| {
+        bad(&format!(
+            "invalid or incompatible header - expected {header:?}: {line:?}"
+        ))
+    })?;
+    let mut fields = body.splitn(3, DELIM_GROUP);
+    let first = fields.next().unwrap_or("").to_string();
+    let mut last = 0;
+    let mut second = String::new();
+    let mut third = String::new();
+    if let Some(field) = fields.next() {
+        second = field.to_string();
+        last = 1;
+    }
+    if let Some(field) = fields.next() {
+        third = field.to_string();
+        last = 2;
+    }
+    Ok(DecodedLine {
+        groups: [first, second, third],
+        last,
+    })
+}
+
+/// Strips the trailing `/u` (No-Structure counts) and `/d` (direction)
+/// tags off the last group — rinchi_reader.cpp's tag walk, which
+/// examines the group tail twice. Returns the direction character
+/// (`+` when the line carries no tag) and the No-Structure tag when
+/// present.
+fn extract_tags(last_group: &mut String) -> Result<(char, Option<String>)> {
+    let mut no_struct_data: Option<String> = None;
+    let mut direction_data: Option<String> = None;
+    for _ in 0..2 {
+        let Some(layer_pos) = last_group.rfind(DELIM_LAYER) else {
+            break;
+        };
+        // A trailing bare layer delimiter is not a tag.
+        if layer_pos + 1 >= last_group.len() {
+            break;
+        }
+        let tag = last_group.get(layer_pos..layer_pos + 2).unwrap_or("");
+        if tag == NOSTRUCT_TAG {
+            if no_struct_data.is_some() {
+                return err(format!(
+                    "{CONTEXT}: duplicate No-Structure tag in RInChI input string"
+                ));
+            }
+            no_struct_data = Some(last_group[layer_pos..].to_string());
+            last_group.truncate(layer_pos);
+        } else if tag == DIRECTION_TAG {
+            if direction_data.is_some() {
+                return err(format!(
+                    "{CONTEXT}: duplicate direction tag in RInChI input string"
+                ));
+            }
+            direction_data = Some(last_group[layer_pos..].to_string());
+            last_group.truncate(layer_pos);
+        } else {
+            break;
+        }
+    }
+    let direction_flag = match &direction_data {
+        None => DIRECTION_FORWARD,
+        Some(data) => data
+            .chars()
+            .nth(2)
+            .ok_or_else(|| bad(&format!("direction tag without a flag character: {data:?}")))?,
+    };
+    Ok((direction_flag, no_struct_data))
+}
+
+/// Parses the No-Structure counts out of the captured `/u` tag —
+/// three dash-separated counts in output order.
+fn parse_nostruct_counts(data: &str) -> Result<[usize; 3]> {
+    let counts = &data[NOSTRUCT_TAG.len()..];
+    let parse = |field: &str| -> Result<usize> {
+        field
+            .parse::<usize>()
+            .map_err(|_| bad(&format!("malformed No-Structure count in {data:?}")))
+    };
+    let (reactants, rest) = counts
+        .split_once(NOSTRUCT_DELIM)
+        .ok_or_else(|| bad(&format!("malformed No-Structure tag {data:?}")))?;
+    let (products, agents) = rest
+        .rsplit_once(NOSTRUCT_DELIM)
+        .ok_or_else(|| bad(&format!("malformed No-Structure tag {data:?}")))?;
+    Ok([parse(reactants)?, parse(products)?, parse(agents)?])
+}
+
+/// Builds the identity-carried components of one `!`-separated group —
+/// rinchi_reader.cpp's `create_components_from_inchigroup`: each body
+/// is a headerless standard InChI; the header is restored and the
+/// identity validated through the native key machinery (the reference
+/// validates through the InChI library here).
+fn components_from_group(group: &str) -> Result<Vec<RinchiComponent>> {
+    let mut components = Vec::new();
+    if group.is_empty() {
+        return Ok(components);
+    }
+    for body in group.split(DELIM_COMP) {
+        let body = body.trim_matches(' ');
+        if body.is_empty() {
+            return err(format!(
+                "{CONTEXT}: empty component identifier in group {group:?}"
+            ));
+        }
+        if body.contains([' ', '\n', '\t']) {
+            return err(format!(
+                "{CONTEXT}: invalid trailing text in component InChI {body:?}"
+            ));
+        }
+        let inchi = format!("{INCHI_STD_HEADER}{body}");
+        let key = key::inchikey(&inchi)
+            .map_err(|error| bad(&format!("invalid component identifier {inchi:?}: {error}")))?;
+        components.push(RinchiComponent {
+            molfile: String::new(),
+            identity: Some(Identity {
+                inchi,
+                aux: String::new(),
+                key,
+            }),
+        });
+    }
+    Ok(components)
+}
+
+/// Distributes one RAuxInfo group's `!`-separated aux bodies over the
+/// role's components in order — rinchi_reader.cpp's
+/// `add_auxinfo_to_components`; more bodies than components is a
+/// reader error, fewer leaves the rest empty.
+fn add_auxinfo_to_components(
+    group: &str,
+    components: &mut [RinchiComponent],
+    group_name: &str,
+) -> Result<()> {
+    if group.is_empty() {
+        return Ok(());
+    }
+    for (index, body) in group.split(DELIM_COMP).enumerate() {
+        let component = components.get_mut(index).ok_or_else(|| {
+            bad(&format!(
+                "RAuxInfo contains too many elements in the {group_name}."
+            ))
+        })?;
+        let Some(identity) = &mut component.identity else {
+            return err(format!(
+                "{CONTEXT}: RAuxInfo cannot attach to a molfile-drawn component"
+            ));
+        };
+        identity.aux = format!("{INCHI_AUXINFO_HEADER}{body}");
+    }
+    Ok(())
 }
 
 fn bad(message: &str) -> crate::error::Error {
@@ -783,6 +1089,7 @@ mod tests {
                 .iter()
                 .map(|molfile| RinchiComponent {
                     molfile: (*molfile).to_string(),
+                    identity: None,
                 })
                 .collect()
         };
@@ -993,5 +1300,173 @@ mod tests {
     #[test]
     fn a_missing_rxn_tag_is_rejected_not_guessed() {
         assert!(parse_rxn("not a reaction\n").is_err());
+    }
+
+    /// The reader half: the R005a oracle string decodes back into the
+    /// reaction — the `/d-` flag recovers the swapped roles (the
+    /// products group is stored first) — and re-assembling reproduces
+    /// the canonical input byte-for-byte, all five lines.
+    #[test]
+    fn a_rinchi_string_decodes_back_into_its_reaction() {
+        let rinchi = "RInChI=1.00.1S/C4H8O/c1-3-4(2)5-3/h3-4H,1-2H3/t3-,4?/m0/s1<>C4H9BrO/c1-3(5)4(2)6/h3-4,6H,1-2H3/t3-,4+/m1/s1!Na.H2O/h;1H2/q+1;/p-1/d-";
+        let reaction = reaction_from_rinchi(rinchi).expect("decodes");
+        // The reversed wire order reads back into real roles: the
+        // epoxide product, then the two reactants.
+        assert_eq!(reaction.products().len(), 1);
+        assert_eq!(reaction.reactants().len(), 2);
+        assert_eq!(reaction.agents().len(), 0);
+        assert_eq!(reaction.directionality(), Directionality::Directional);
+        assert_eq!(
+            reaction.products()[0].inchi_string().expect("inchi"),
+            "InChI=1S/C4H8O/c1-3-4(2)5-3/h3-4H,1-2H3/t3-,4?/m0/s1"
+        );
+        assert_eq!(
+            reaction.rinchi_string().expect("re-assembled"),
+            rinchi,
+            "decode then re-encode is the identity"
+        );
+        assert_eq!(
+            reaction.rinchi_long_key().expect("long key"),
+            "Long-RInChIKey=SA-BUHFF-PQXKWPLDPFFDJP-WUCPZUCCSA-N--JCYSVJNMXBWPHS-DMTCNVIQSA-N-HEMHJVSKTPXQMS-UHFFFAOYSA-M"
+        );
+        assert_eq!(
+            reaction.rinchi_short_key().expect("short key"),
+            "Short-RInChIKey=SA-BUHFF-PQXKWPLDPF-LSZRVNUIRJ-UHFFFADPSC-NIBFB-MCQMH-NUHFF-ZZZ"
+        );
+        assert_eq!(
+            reaction.rinchi_web_key().expect("web key"),
+            "Web-RInChIKey=UFEYRRLMNYPCDUWUI-MSZCBGVVHVRIXSA"
+        );
+
+        // The RAuxInfo companion distributes over the same roles and
+        // re-assembles byte-for-byte too.
+        let rauxinfo = "RAuxInfo=1.00.1/0/N:4,1,3,2,5/E:(1,2)(3,4)/it:im/rA:5nCCCCO/rB:N1;s2;P3;s2s3;/rC:-1.127,-.5635,0;-.4125,-.151,0;.4125,-.151,0;1.127,-.5635,0;0,.5635,0;<>0/N:4,1,3,2,6,5/it:im/rA:6nCCCCOBr/rB:s1;s2;s3;N2;P3;/rC:-.825,-.7557,0;-.4125,-.0412,0;.4125,-.0412,0;.825,.6733,0;-.626,.7557,0;.825,-.7557,0;!1/N:1;2/rA:2nNaO/rB:s1;/rC:-.4125,0,0;.4125,0,0;";
+        let paired = reaction_from_rinchi_with_auxinfo(rinchi, rauxinfo).expect("decodes");
+        assert_eq!(paired.rinchi_auxinfo().expect("re-assembled"), rauxinfo);
+        assert_eq!(
+            paired.reactants()[1].inchi_string().expect("inchi"),
+            "InChI=1S/Na.H2O/h;1H2/q+1;/p-1"
+        );
+        assert!(
+            paired.reactants()[1].molfile().is_empty(),
+            "decoded components carry identifiers, not drawings"
+        );
+    }
+
+    /// The forward flag stores the reactants group first; the
+    /// equilibrium flag reads equilibrium; an empty products group
+    /// (a reaction recorded with no products at all) sorts first and
+    /// reads backward — the reader recovers each role from the flag.
+    #[test]
+    fn the_direction_flag_recovers_the_roles() {
+        let forward =
+            reaction_from_rinchi("RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d+").expect("decodes");
+        assert_eq!(forward.reactants().len(), 1);
+        assert_eq!(forward.products().len(), 1);
+        assert_eq!(forward.directionality(), Directionality::Directional);
+        assert_eq!(
+            forward.rinchi_string().expect("re-assembled"),
+            "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d+"
+        );
+
+        let equilibrium =
+            reaction_from_rinchi("RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d=").expect("decodes");
+        assert_eq!(equilibrium.directionality(), Directionality::Equilibrium);
+        assert_eq!(
+            equilibrium.rinchi_string().expect("re-assembled"),
+            "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d="
+        );
+
+        // Recorded from the built oracle: two reactants, no products —
+        // the empty products group sorts first, the flag reads `-`,
+        // and no /u tag rides along (nothing is a No-Structure).
+        let backward =
+            reaction_from_rinchi("RInChI=1.00.1S/<>ClH/h1H!H3N/h1H3/d-").expect("decodes");
+        assert_eq!(backward.reactants().len(), 2);
+        assert_eq!(backward.products().len(), 0);
+        assert_eq!(
+            backward.rinchi_string().expect("re-assembled"),
+            "RInChI=1.00.1S/<>ClH/h1H!H3N/h1H3/d-"
+        );
+    }
+
+    /// A line without a direction tag decodes as forward (the
+    /// reference's default), but the input is then not canonical —
+    /// re-assembly emits the flag the canonical form carries.
+    #[test]
+    fn a_flagless_line_decodes_forward_and_reassembles_canonically() {
+        let reaction = reaction_from_rinchi("RInChI=1.00.1S/H2O/h1H2").expect("decodes");
+        assert_eq!(reaction.reactants().len(), 1);
+        assert_eq!(reaction.products().len(), 0);
+        assert_eq!(
+            reaction.rinchi_string().expect("re-assembled"),
+            "RInChI=1.00.1S/<>H2O/h1H2/d-",
+            "the empty products group sorts first"
+        );
+    }
+
+    /// No-Structures ride the /u counts, not the groups: the count
+    /// synthesizes placeholder components into the role the flag
+    /// names — the reversed output's first count is the products'.
+    #[test]
+    fn a_nostruct_count_decodes_into_placeholder_components() {
+        let rinchi = "RInChI=1.00.1S/<>H2O/h1H2/d-/u1-0-0";
+        let reaction = reaction_from_rinchi(rinchi).expect("decodes");
+        assert_eq!(reaction.reactants().len(), 1);
+        assert_eq!(reaction.products().len(), 1);
+        assert!(reaction.products()[0].inchi_string().is_ok());
+        assert_eq!(
+            reaction.products()[0].inchi_string().expect("inchi"),
+            "InChI=1S/",
+            "the No-Structure identifier"
+        );
+        assert_eq!(reaction.rinchi_string().expect("re-assembled"), rinchi);
+        // Without a RAuxInfo companion the placeholders carry no aux.
+        assert_eq!(
+            reaction.rinchi_auxinfo().expect("re-assembled"),
+            "RAuxInfo=1.00.1/<>/",
+            "the drawn reactant's empty aux body is a bare delimiter"
+        );
+    }
+
+    #[test]
+    fn a_decode_rejects_malformed_input() {
+        let cases = [
+            ("RInChI=2.00.1S/H2O/h1H2", "incompatible header"),
+            ("RInChI=1.00.1S/H2O/h1H2/d+/d+", "duplicate direction tag"),
+            (
+                "RInChI=1.00.1S/H2O/h1H2/d+/u1-0-0/u0-0-0",
+                "duplicate No-Structure tag",
+            ),
+            ("RInChI=1.00.1S/H2O/h1H2/d*", "unknown direction flag"),
+            ("RInChI=1.00.1S/H2O/h1H2/d", "flagless direction tag"),
+            (
+                "RInChI=1.00.1S/H2O/h1H2 x!H2O/h1H2/d+",
+                "trailing text in a component body",
+            ),
+            (
+                "RInChI=1.00.1S/H2O/h1H2/u1-0",
+                "malformed No-Structure counts",
+            ),
+            (
+                "RInChI=1.00.1S/H2O/h1H2/u1-x-0",
+                "non-numeric No-Structure count",
+            ),
+        ];
+        for (rinchi, why) in cases {
+            assert!(
+                reaction_from_rinchi(rinchi).is_err(),
+                "expected rejection: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rauxinfo_with_too_many_bodies_is_rejected() {
+        assert!(reaction_from_rinchi_with_auxinfo(
+            "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d+",
+            "RAuxInfo=1.00.1/0/N:1/rA:1nO/rB:/rC:12,12,0;!0/N:1/rA:1nO/rB:/rC:12,12,0;",
+        )
+        .is_err());
     }
 }
