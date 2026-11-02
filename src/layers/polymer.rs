@@ -637,39 +637,3 @@ impl PolymerLayer {
         self.treated.pzz.len()
     }
 }
-
-#[cfg(test)]
-mod probe {
-    use crate::canonical::polymer as treatment;
-    use crate::graph::Structure;
-
-    #[test]
-    fn shift_pieces() {
-        let mol = std::fs::read_to_string("/tmp/polymers-fixtures/nchain.mol").unwrap();
-        let parsed = crate::molfile::parse(&mol).unwrap();
-        let mut treated = treatment::validate(&parsed, true, false).unwrap();
-        let mut interim = parsed.clone();
-        let mut interim_treated = treated.clone();
-        treatment::cyclize_units(&mut interim, &mut interim_treated);
-        treatment::fill_backbones(
-            &interim,
-            &parsed.polymer.clone().unwrap(),
-            &mut interim_treated,
-        );
-        let ranks = crate::layers::hydrogen::canonical_ranks_for(&interim);
-        for (index, unit) in interim_treated.units.iter().enumerate() {
-            println!(
-                "unit {index}: bistar={} bk={:?} kind={:?}",
-                unit.bistar(),
-                unit.bkbonds,
-                unit.cyclizable
-            );
-        }
-        println!("ranks: {ranks:?}");
-        let mut base = parsed.clone();
-        let applied =
-            super::apply_frame_shift(&mut base, &mut treated, &interim, &interim_treated, &ranks);
-        println!("applied: {applied}; bonds: {:?}", base.bonds);
-        let _ = Structure::default();
-    }
-}
