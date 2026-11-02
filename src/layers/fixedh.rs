@@ -38,10 +38,71 @@ pub struct FixedHLayer {
     options: Options,
 }
 
+/// The per-component fixed-H state the multi-component list writers
+/// consume (ichiprt3.c's str_HillFormula2 / str_FixedH_atoms /
+/// str_Charge2 second pass read the same per-component diff the
+/// single-component writer renders). One component's slice of the
+/// `/f` block.
+pub(crate) struct FixedHComponent {
+    /// The fixed-H representation's Hill formula (printed for EVERY
+    /// component whenever the formula segment fills).
+    pub formula: String,
+    /// Whether the fixed formula differs from the mobile one — the
+    /// NEQ bit that fills the formula segment at all.
+    pub formula_differs: bool,
+    /// The `/f /h` delta text (`None` = the empty slot).
+    pub h_text: Option<String>,
+    /// The component's atom count — the fixed-H arrays compare only
+    /// between equal-length components (str_FixedH_atoms' eq2prev).
+    pub atoms: usize,
+    /// The `/f /q` FIELD: empty (fixed charge zero), the `m`
+    /// repetition mark (fixed charge equals the nonzero mobile one),
+    /// or the signed total (str_Charge2's second pass).
+    pub q_field: String,
+    /// Whether this component's charge carries a NEQ or IS_EMPTY bit —
+    /// one such bit fills the whole /q segment.
+    pub q_differs: bool,
+    /// Whether the component's /f block carries any content at all
+    /// (MarkUnusedAndEmptyLayers over the component's bits).
+    pub active: bool,
+    /// Whether the /f content is NON-isotopic — the flag behind the
+    /// aux second pass (bNonTautNonIsoIdentifierNotEmpty).
+    pub non_iso_content: bool,
+}
+
 impl FixedHLayer {
     #[must_use]
     pub fn new(fixed: FixedH, options: Options) -> Self {
         Self { fixed, options }
+    }
+
+    /// The component's slice of the `/f` block (see
+    /// [`FixedHComponent`]).
+    pub(crate) fn component(&self, structure: &Structure) -> Result<FixedHComponent> {
+        let segments = self.segments(structure)?;
+        let mobile_charge = structure.total_charge();
+        let fixed_charge = self.fixed.total_charge;
+        let q_field = match (mobile_charge, fixed_charge) {
+            (_, 0) => String::new(),
+            (m, f) if m != 0 && f == m => "m".to_string(),
+            (_, f) => format!("{f:+}"),
+        };
+        let active = segments.formula_differs
+            || segments.h_text.is_some()
+            || segments.q_segment.is_some()
+            || segments.stereo_diff
+            || segments.fi_segment.is_some();
+        let h_text = segments.h_text;
+        Ok(FixedHComponent {
+            formula: self.fixed.formula.clone(),
+            formula_differs: segments.formula_differs,
+            h_text,
+            atoms: structure.atoms.len(),
+            q_field,
+            q_differs: segments.q_segment.is_some(),
+            active,
+            non_iso_content: segments.non_iso_content,
+        })
     }
 
     /// Whether the identifier's /f block carries NON-isotopic content
