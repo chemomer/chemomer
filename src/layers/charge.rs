@@ -64,6 +64,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(ChargeLayer.emit(&s).unwrap(), Some("q+1".to_string()));
     }
@@ -84,6 +85,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(ChargeLayer.emit(&s).unwrap(), Some("q-1".to_string()));
 
@@ -98,6 +100,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert_eq!(ChargeLayer.emit(&s).unwrap(), Some("q-1".to_string()));
     }
@@ -122,6 +125,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         standardization::normalize_internal_salts(&mut s);
         assert!(s.atoms.iter().all(|atom| atom.charge == 0));
@@ -155,6 +159,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         standardization::normalize_internal_salts(&mut s);
         assert_eq!(s.atoms[0].charge, 1);

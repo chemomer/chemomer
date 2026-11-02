@@ -247,6 +247,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         }
     }
 
@@ -300,6 +301,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert!(segments(
             &structure,
@@ -335,6 +337,7 @@ mod tests {
             fold_source: Vec::new(),
             taut_ext: Default::default(),
             chiral_flag: false,
+            polymer: None,
         };
         assert!(segments(
             &structure,

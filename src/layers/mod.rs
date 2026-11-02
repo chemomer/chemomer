@@ -10,6 +10,7 @@ pub mod fixedh;
 pub mod formula;
 pub mod hydrogen;
 pub mod isotope;
+pub mod polymer;
 pub mod proton;
 pub mod standardization;
 pub mod stereo;
@@ -25,12 +26,15 @@ pub mod order {
     pub const H: u8 = 2;
     pub const Q: u8 = 3;
     pub const P: u8 = 4;
-    pub const B: u8 = 5;
-    pub const T: u8 = 6;
-    pub const M: u8 = 7;
-    pub const S: u8 = 8;
-    pub const I: u8 = 9;
-    pub const O: u8 = 10;
+    /// The polymer `/z` layer: after the charge/proton layers, before
+    /// the stereo layers (ichiprt1.c 1744-1752).
+    pub const Z: u8 = 5;
+    pub const B: u8 = 6;
+    pub const T: u8 = 7;
+    pub const M: u8 = 8;
+    pub const S: u8 = 9;
+    pub const I: u8 = 10;
+    pub const O: u8 = 11;
 }
 
 /// The layer kinds a registered set must cover before the engine may

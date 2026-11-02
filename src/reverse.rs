@@ -1373,6 +1373,7 @@ fn reconstruct(layers: Layers) -> Result<Structure> {
         taut_ext: Default::default(),
         fold_source: Vec::new(),
         chiral_flag: false,
+        polymer: None,
     };
     if has_stereo {
         synthesize_stereo(
