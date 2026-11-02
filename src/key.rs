@@ -97,20 +97,25 @@ struct Blocks {
     minor: String,
     proton: Option<String>,
     /// The calculation flag character: S standard, N full (the
-    /// FixedH /f layer).
+    /// FixedH /f layer), B experimental (the LargeMolecules beta
+    /// flavor).
     flag: char,
 }
 
 fn split_blocks(inchi: &str) -> Result<Blocks> {
-    // Both identifier flavors hash through the same tables; the flag
+    // All identifier flavors hash through the same tables; the flag
     // character carries which: S standard, N full (the FixedH /f
-    // layer, ichiparm.c "FixedH").
+    // layer, ichiparm.c "FixedH"), B experimental — the version the
+    // reference writes past the large-molecule bound (ikey_dll.c:192
+    // flagexptl, ichiprt1.c:1684-1688).
     let (body, flag) = if let Some(rest) = inchi.strip_prefix("InChI=1S/") {
         (rest, 'S')
+    } else if let Some(rest) = inchi.strip_prefix("InChI=1B/") {
+        (rest, 'B')
     } else if let Some(rest) = inchi.strip_prefix("InChI=1/") {
         (rest, 'N')
     } else {
-        return err("inchikey: not an InChI=1[S/] identifier");
+        return err("inchikey: not an InChI=1[SBN/] identifier");
     };
     let body = body.to_string();
     let segments: Vec<&str> = body.split('/').collect();
@@ -394,6 +399,15 @@ mod tests {
         // what the 1.07.5 oracle produces.)
         let key = inchikey("InChI=1S/H2O/h1H2").expect("keys");
         assert_eq!(key, "XLYOFNOQVPJJNP-UHFFFAOYSA-N");
+    }
+
+    #[test]
+    fn the_beta_flavor_speaks_the_experimental_key_flag() {
+        // Same digests as the standard flavor, the flag letter B
+        // (ikey_dll.c:131 flagexptl): the oracle keys its
+        // LargeMolecules identifiers -UHFFFAOYBA-, never -YSA-.
+        let key = inchikey("InChI=1B/H2O/h1H2").expect("keys");
+        assert_eq!(key, "XLYOFNOQVPJJNP-UHFFFAOYBA-N");
     }
 
     #[test]
