@@ -12,6 +12,18 @@ pub struct AtomRecord {
     /// from the valence gap).
     pub h_count: u32,
     pub charge: i32,
+    /// The molfile valence code (V2000 atom-column `vvv` or the V3000
+    /// `VAL=` attribute; the reference's `ctab.atoms[].valence`): 1-14
+    /// pin the chemical valence, 15 (V3000 may spell -1) marks zero
+    /// valence, 0 = unset (derive from the valence gap as before).
+    /// Unlike [`Self::h_count`] — source-proven never read by the
+    /// release engine — this column IS consumed by the oracle's
+    /// identity pipeline (get_num_H, util.c:894-899) and shifts
+    /// identifiers on every corpus-recorded probe carrying a code.
+    /// Signed i16: the V3000 reader casts the raw integer through the
+    /// C `char`, so out-of-15 spellings stay truthy negatives whose
+    /// H gap clamps to zero exactly as the reference's.
+    pub valence_code: i16,
     /// The hydrogen count is final as read: the internal-salt
     /// annihilation pins the neutralized anion at its anionic reading
     /// (zero implicit H) — the reference never re-derives H after
@@ -487,12 +499,24 @@ impl Structure {
     }
 
     /// Implicit/explicit hydrogen count per atom: MDL H-count codes
-    /// win, otherwise the valence gap (the oracle does the same for
-    /// code-0 atoms — a bare `O` line derives H2O). Charged atoms read
-    /// their charge-shifted table: anions take the next admitted
-    /// charged valence (a bond-less O⁻ reads hydroxide's one H, a
-    /// carboxylate's bonded O⁻ reads none; see
-    /// [`Self::charged_valences`]), cations read the onium gap.
+    /// win, then the molfile valence code, otherwise the valence gap
+    /// (the oracle does the same for code-0 atoms — a bare `O` line
+    /// derives H2O). The valence code mirrors get_num_H's release
+    /// branches (util.c:894-899) exactly: codes 1-14 pin the count at
+    /// the bond-order gap `max(0, code − Σ)` (short-circuiting the
+    /// charge/anion/cation pools and the metal-neighbor rule — a
+    /// coded O⁻ keeps /q−1 while carrying the coded hydrogens), code
+    /// 15 reads zero H on a bond-less atom and the 15-minus-bonds gap
+    /// on a bonded one (the reference's literal first branch; a
+    /// singly-bonded coded C records H14). The oracle's aromatic
+    /// paths fold into the same sum: two aromatic bonds count 3 as
+    /// here, and its odd-aromatic replacement-by-singles is the same
+    /// integer the half-unit round lands on (3 aromatic would count
+    /// 4 there, 4.5 rounding to the same integer here — unreachable
+    /// in practice, the oracle rejects such atoms outright). After
+    /// the code, the salt-annihilation pin keeps its place: the pin
+    /// is a mid-pipeline mechanic the reference has no counterpart
+    /// for, and the code is input-declared, so the code reads first.
     pub fn hydrogens(&self) -> Vec<u32> {
         let sums = self.bond_order_sums();
         self.atoms
@@ -501,6 +525,12 @@ impl Structure {
             .map(|(atom, sum)| {
                 if atom.h_count > 0 {
                     atom.h_count
+                } else if atom.valence_code != 0 {
+                    if atom.valence_code == 15 && *sum == 0.0 {
+                        0
+                    } else {
+                        (atom.valence_code as f64 - *sum).round().max(0.0) as u32
+                    }
                 } else if atom.h_pinned {
                     0
                 } else if atom.charge < 0 {
@@ -595,6 +625,7 @@ mod tests {
             element: element.to_string(),
             h_count: 0,
             h_pinned: false,
+            valence_code: 0,
             isotope: 0,
             charge: 0,
         }

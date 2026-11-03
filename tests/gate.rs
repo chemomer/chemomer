@@ -1581,3 +1581,36 @@ fn the_do_not_addh_aux_equals_the_oracle_recording() {
          no recording {without_recording}"
     );
 }
+
+/// The molfile valence-code gate: the corpus's valence-codes tranche
+/// records hand-built V2000/V3000 molfiles carrying valence codes in
+/// the reference-read column (V2000 chars 49-51, the walk's
+/// cumulative 48..51; V3000 `VAL=`), each with the oracle's
+/// identifier over that exact input. The parked "the reader ignores
+/// the valence column" theory died by probe: get_num_H's release
+/// branches (util.c:894-899) consume the code — codes 1-14 pin the
+/// implicit H at the bond gap, 15 (V3000 spells -1) marks zero
+/// valence, and a bonded 15 takes the literal 15-minus-bonds gap
+/// (the recorded H14 case). The H-count column beside it stays
+/// unread — the hcount-ignored control is recorded here too.
+#[test]
+fn the_valence_code_input_matches_the_oracle() {
+    let dir = suite_dir();
+    check_identity_tranche(&dir, "valence-codes.json", "valence-code");
+}
+
+/// The metal-hydride/coordination input gate: the corpus's
+/// identity-metal2 tranche records the probes the parked nNoMetal
+/// theory called for — bare and explicitly-bonded metal hydrides
+/// (the implicit-H extraction of DisconnectMetals, strutil.c
+/// 2960-3007: every marked metal's read-time H leaves as its own
+/// free component, the gap the engine shipped without), chelates,
+/// metal-metal bonds, main-group coordination numbers the first
+/// metal tranche lacks, charged bare metals, and the skip-adding-H
+/// controls. Oracle recordings over hand-built molfiles, byte for
+/// byte through `Engine::from_molfile`.
+#[test]
+fn the_metal_hydride_input_matches_the_oracle() {
+    let dir = suite_dir();
+    check_identity_tranche(&dir, "identity-metal2.json", "metal-hydride");
+}

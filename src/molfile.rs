@@ -129,12 +129,31 @@ fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
             // The H-count code field is NEVER read by the release
             // engine: mol_fmt1.c walks it only under MOL_FMT_QUERY,
             // and mol_fmt.h:79 sets MOL_FMT_QUERY = MOL_FMT_ABSENT —
-            // inp_num_H reaches get_num_H (util.c:862) as zero and
-            // the implicit H derive purely from the chemical valence
-            // (an over-bonded atom's stale code is thereby ignored:
-            // the sodium-citrate quaternary C carrying code 2 reads
-            // zero H).
+            // inp_num_H reaches get_num_H (util.c:862) as zero
+            // (probe-proven: a bare N carrying H-count 2 still reads
+            // H3N, oracle recording valence-codes/hcount-ignored).
             h_count: 0,
+            // The valence code column, by contrast, IS read in the
+            // release path: the same MolfileReadField walk reads it
+            // unconditionally (mol_fmt1.c:728), calculate_valences
+            // hands it to get_num_H (mol2atom.c:963) and codes 1-15
+            // re-derive the implicit H (bonded N with code 1 reads
+            // CH3N, bare N with 15 reads bare N, a singly-bonded C
+            // with 15 reads H14 — oracle-recorded probes; the parked
+            // sodium-citrate quaternary C with code 2 reads zero H
+            // either way, max(0, 2−4) = the gap, the one case that
+            // masked the read when this unit was parked). Column
+            // arithmetic is the walk's cumulative offsets: element
+            // 31..34, mass-difference 34..36, charge 36..39, parity
+            // 39..42, the skipped query pair 42..48, valence 48..51.
+            // Malformed or out-of-S_CHAR-range bytes store 0 there
+            // (util.c MolfileReadField) — the same tolerant default.
+            valence_code: line
+                .get(48..51)
+                .unwrap_or("")
+                .trim()
+                .parse::<i32>()
+                .map_or(0, |v| i16::try_from(v).unwrap_or(0)),
             charge,
             h_pinned: false,
             isotope: 0,
@@ -326,6 +345,9 @@ fn parse_v3000_atom(line: &str) -> Result<(usize, AtomRecord, (f64, f64))> {
         },
         h_count: 0,
         charge: 0,
+        // The VAL= attribute loop below fills this (V3000 spells zero
+        // valence -1, normalized to the V2000 code 15 there).
+        valence_code: 0,
         h_pinned: false,
         isotope: 0,
     };
@@ -338,11 +360,24 @@ fn parse_v3000_atom(line: &str) -> Result<(usize, AtomRecord, (f64, f64))> {
         match key {
             "CHG" => atom.charge = v30_value(value, line)?,
             "MASS" => atom.isotope = v30_value(value, line)?,
+            // The V3000 valence attribute feeds the same
+            // get_num_H branch as the V2000 column (mol_fmt3.c:1134-
+            // 1145 reads VAL= into ctab.atoms[].valence): -1 is the
+            // V3000 spelling of zero valence and normalizes to the
+            // V2000 code 15, every other value takes the code's seat
+            // through the C `char` cast (VAL=-2 probe reads zero H —
+            // the truthy-negative gap clamps to zero, exactly what
+            // the i16 field carries).
+            "VAL" => {
+                let raw: i32 = v30_value(value, line)?;
+                atom.valence_code = if raw == -1 { 15 } else { (raw as i8) as i16 };
+            }
             // Read-and-ignored attributes: the reference consumes the
-            // value and moves on (query, reaction and valence hints
-            // never reach the identity pipeline).
-            "VAL" | "HCOUNT" | "RAD" | "CFG" | "STBOX" | "INVRET" | "EXACHG" | "SUBST"
-            | "UNSAT" | "RBCNT" | "ATTCHPT" | "RGROUPS" | "ATTCHORD" | "CLASS" | "SEQID" => {}
+            // value and moves on (query and reaction hints never
+            // reach the identity pipeline — the V2000 H-count column
+            // probe (hcount ignored) covers HCOUNT's seat too).
+            "HCOUNT" | "RAD" | "CFG" | "STBOX" | "INVRET" | "EXACHG" | "SUBST" | "UNSAT"
+            | "RBCNT" | "ATTCHPT" | "RGROUPS" | "ATTCHORD" | "CLASS" | "SEQID" => {}
             other => {
                 return err(format!("{CONTEXT} V3000: unknown atom attribute {other:?}"));
             }

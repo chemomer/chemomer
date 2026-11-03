@@ -465,10 +465,15 @@ pub(crate) fn reversibility_block(original: &Structure, options: &Options) -> St
     for (index, atom) in original.atoms.iter().enumerate() {
         let el = crate::canonical::protons::el_number(&atom.element).unwrap_or(0);
         let cbv = echo_context.cbv2[index] / 2;
+        // The standard read threads the molfile valence code (the
+        // same seat get_num_H's caller passes atom_input_valence);
+        // DoNotAddH keeps the submitted count — its flag rides the
+        // same get_num_H in the reference and keeps inp_num_H, which
+        // is what the read left here.
         let num_h = if options.do_not_add_h {
             atom.h_count
         } else {
-            crate::canonical::metals::get_num_h(el, atom.charge, cbv)
+            crate::canonical::metals::get_num_h(el, atom.charge, cbv, atom.valence_code)
         };
         let valence = crate::canonical::metals::needed_unusual_valence(
             el,
@@ -679,6 +684,7 @@ mod tests {
             h_count: 0,
             charge: 0,
             h_pinned: false,
+            valence_code: 0,
             isotope: 0,
         }
     }
@@ -771,6 +777,7 @@ mod tests {
             h_count: 0,
             charge: -1,
             h_pinned: false,
+            valence_code: 0,
             isotope: 0,
         };
         let mut working = Structure {

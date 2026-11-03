@@ -194,17 +194,36 @@ impl MetalContext {
 }
 
 /// The per-atom read-time implicit-hydrogen count (util.c:862
-/// `get_num_H`): the smallest registered valence at the atom's
-/// CHARGE state that absorbs the chemical valence (anion rows
-/// included — a bare O⁻ reads one H), with the reference's N(IV) and
-/// S(III) special cases. The `bSkipAddingH` elements never derive
-/// (`util.c:912`), charges outside the cValence table keep
-/// inp_num_H — zero (util.c:66-68) — and the H-count code field
-/// never feeds this (`MOL_FMT_QUERY` is absent). Radicals are not
-/// read by the corpus reader, so the radical branch does not arise.
+/// `get_num_H`): the molfile valence code when present (codes 1-14
+/// pin the count at `max(0, code − cbv)` — short-circuiting the
+/// charge pool, the N(IV)/S(III) cases and the skip window; code 15
+/// reads zero H on a bond-less atom and the 15-minus-bonds gap on a
+/// bonded one, the reference's literal first branch), otherwise the
+/// smallest registered valence at the atom's CHARGE state that
+/// absorbs the chemical valence (anion rows included — a bare O⁻
+/// reads one H), with the reference's N(IV) and S(III) special
+/// cases. The `bSkipAddingH` elements never derive (`util.c:912`),
+/// charges outside the cValence table keep inp_num_H — zero
+/// (util.c:66-68) — and the H-count code field never feeds this
+/// (`MOL_FMT_QUERY` is absent; probe-proven: bare N with H-count 2
+/// reads H3N). Radicals are not read by the corpus reader, so the
+/// radical branch does not arise; aliases fold into real atoms at
+/// parse, so the bAliased branch does not either. The code branches
+/// sit before every gate, exactly as in the reference — a coded O⁻
+/// keeps its /q−1 charge while carrying the coded hydrogens.
 /// `cbv` is the chemical bond valence INCLUDING one per folded
-/// explicit H (a bonded H atom in the reference).
-pub(crate) fn get_num_h(el: i32, charge: i32, cbv: i32) -> u32 {
+/// explicit H (a bonded H atom in the reference). The reference's
+/// aromatic-ring code adjustment (mol2atom.c:919-934, decrement when
+/// `code == chem_valence − 1`) is a no-op for alias-free atoms — it
+/// shifts cbv by one and the code branch re-adds the same one — so
+/// it folds into this arithmetic.
+pub(crate) fn get_num_h(el: i32, charge: i32, cbv: i32, input_valence: i16) -> u32 {
+    if input_valence != 0 && (input_valence != 15 || cbv != 0) {
+        return (i32::from(input_valence) - cbv).max(0) as u32;
+    }
+    if input_valence == 15 {
+        return 0;
+    }
     if skip_adding_h(el) {
         return 0;
     }
@@ -246,7 +265,7 @@ pub(crate) fn read_time_hydrogens(structure: &Structure) -> Vec<u32> {
             // plus one per folded explicit H (a bonded H atom in the
             // reference).
             let cbv = context.cbv2[i] / 2 + drawn as i32;
-            drawn + get_num_h(el, charge, cbv)
+            drawn + get_num_h(el, charge, cbv, structure.atoms[i].valence_code)
         })
         .collect()
 }
@@ -269,10 +288,13 @@ pub(crate) fn needed_unusual_valence(
     // an isolated atom's expected count is its own, so the walk — not
     // the derivation mismatch — decides, and a zero-bond zero-H atom
     // lands on the −1 sentinel (the lone `F0`, the carbide `C0-` of
-    // the DoNotAddH echo).
+    // the DoNotAddH echo). The expected count re-derives WITHOUT the
+    // molfile valence code (util.c:536 passes atom_input_valence =
+    // 0) — a coded atom's actual-vs-pool mismatch is what flags the
+    // digit.
     let inferred = positions != 0 && el != 0;
     let num_h_expected = if inferred {
-        get_num_h(el, charge, cbv) as i32
+        get_num_h(el, charge, cbv, 0) as i32
     } else {
         num_h as i32
     };
