@@ -1430,6 +1430,16 @@ fn fresh_state(n: usize) -> Registration {
 /// and re-marking bonds, to a fixpoint. Returns the co-member
 /// adjacency and the settled registration state (the group walk
 /// seeds from it).
+///
+/// The bound: the reference's master loop carries no iteration
+/// counter at all — its guards are pure fixpoint conditions
+/// (`for (taut_found = 0; 0 < MarkTautomerGroups(...); taut_found++)`
+/// inside `do {...} while (taut_found && !bError)`, ichi_bns.c
+/// 5671–5727: termination on no-change or error, nothing else). The
+/// `0..8` here is that fixpoint plus a safety bound the corpus never
+/// touches: the whole recorded corpus converges by pass 6 (the
+/// pass histogram over the 5600-fixture suite: 944k entries at 0,
+/// 642k at 1, 248k at 2, 24k at 3, 4.4k at 4, 540 at 5, 153 at 6).
 fn build_links(context: &Context) -> (Vec<BTreeSet<usize>>, Registration) {
     let n = context.structure.atoms.len();
     let mut state = Registration {
@@ -2448,7 +2458,14 @@ struct AnchorSpec {
     /// The seed→centerpoint bond classes (the C's first bond-type
     /// test). The PT_13_00/PT_18_00 blocks also admit real singles;
     /// the BOND_ALT_13 class (single/triple) never occurs in our
-    /// structures — no ride mark produces it.
+    /// structures — no ride mark produces it. Oracle-verified with
+    /// probes (propyne, diacetylene, propargylamine, allene,
+    /// butenyne, cyanoform under both modes): the BNS flows resolve
+    /// to plain SINGLE/DOUBLE/TRIPLE orders everywhere (the ALT_13
+    /// mark needs an edge whose flows are {0, 2}, ichi_bns.c
+    /// 571–577) and the engine reproduces every probe identifier
+    /// byte-for-byte in both modes; no recorded corpus input reaches
+    /// the class either.
     seed_bonds: &'static [BondType],
     centerpoint_elements: &'static [&'static str],
     /// The centerpoint's heavy-atom valence when the flag pins it
