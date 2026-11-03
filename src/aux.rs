@@ -312,8 +312,13 @@ pub fn aux_info(
     // bonded fixed-cation/anion pair the reference's norm_at KEEPS
     // (its BNS rides the valence internally), so those two atoms read
     // their submitted charges. The unusual valence reads the
-    // BNS-resolved integer bond valence, not the 1.5 aromatic sums.
-    let bond_sums = working.bond_order_sums();
+    // BNS-resolved integer bond valence (norm_at's
+    // `chem_bonds_valence` = valence + resolved flow — the aromatic
+    // bonds resolve one π per matched bond over the atoms whose
+    // registered valence still lacks a unit), not the 1.5 aromatic
+    // sums (witnessed: naphthalene's bridgeheads read cbv 4 —
+    // unflagged — against round(4.5) = 5).
+    let resolved = crate::canonical::bns::resolved_chem_valence(working, &counts);
     let degrees = working.degrees();
     let kept = kept_ion_pair_charges(original);
     let original_sums = original.bond_order_sums();
@@ -333,7 +338,7 @@ pub fn aux_info(
             let (charge, bond_valence) = if a.charge == 0 && kept != 0 {
                 (kept, original_sums[original_index[atom]].round() as i32)
             } else {
-                (a.charge, bond_sums[atom].round() as i32)
+                (a.charge, resolved[atom])
             };
             let unusual = crate::canonical::protons::unusual_el_valence(
                 el,
@@ -474,9 +479,15 @@ pub(crate) fn reversibility_block(original: &Structure, options: &Options) -> St
     let echo_context = crate::canonical::metals::MetalContext::new(original);
     for (index, atom) in original.atoms.iter().enumerate() {
         let el = crate::canonical::protons::el_number(&atom.element).unwrap_or(0);
-        let cbv = echo_context.cbv2[index] / 2;
+        // The read-time bond valences: the aromatic-blended chemical
+        // valence (pyrrole decrement applied) and the writer's own
+        // bond sum — they differ exactly when the decrement fired,
+        // which is the reference's needs-hydrogen branch trigger.
+        let (cbv, actual) = echo_context.read_cbv(original, index);
         // The standard read threads the molfile valence code (the
-        // same seat get_num_H's caller passes atom_input_valence);
+        // same seat get_num_H's caller passes atom_input_valence),
+        // deriving from the decremented valence the way the
+        // reference's calculate_valences orders its steps;
         // DoNotAddH keeps the submitted count — its flag rides the
         // same get_num_H in the reference and keeps inp_num_H, which
         // is what the read left here.
@@ -489,6 +500,7 @@ pub(crate) fn reversibility_block(original: &Structure, options: &Options) -> St
             el,
             atom.charge,
             cbv,
+            actual,
             num_h,
             echo_context.degrees[index],
         );

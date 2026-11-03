@@ -7,6 +7,8 @@
 //! Stone balanced flow, with blossoms) can move one dot of H from the
 //! single-bond side to the double-bond side.
 
+use crate::graph::Structure;
+
 pub(crate) const NO_VERTEX: i32 = -2;
 const BLOSSOM_BASE: i32 = -1;
 const TREE_IN_2: u8 = 1;
@@ -1446,6 +1448,235 @@ pub(crate) fn any_alt_path(net: &Network, roles: &Roles, first: usize, second: u
     }
     let mut backward = net.clone();
     exists(&mut backward, roles, second, first)
+}
+
+// ─── The resolved integer bond valence ──────────────────────────────
+
+/// The reference's read-back of the normalization's resolved bond
+/// state (`norm_at`: `chem_bonds_valence` = valence + resolved flow).
+/// Two passes compose, both witnessed by the instrumented oracle:
+///
+/// 1. The ion-pair promotion `remove_ion_pairs` type 18 performs in
+///    PreprocessOneStructure before the taut cycle — its zero-charge
+///    branch `C(IV)=N–C(II) => C(IV)=N#C(IV)`: a neutral N carrying
+///    two bonds and cbv 3 between two neutral carbons whose
+///    bond-plus-hydrogen valences sum to 6 within two of each other
+///    pulls the single-sided carbon (valence 2, its far neighbor not
+///    a nitrogen) to a triple, cbv 4 on that carbon and 5 on the
+///    nitrogen (the witnessed breadth-17 guanidine rewrite; a plain
+///    terminal imine keeps its submitted orders — cbv 3/2 — because
+///    the C-II census never fires). Only the zero-charge branch is
+///    ported here; the charged twins ride the engine's salt
+///    normalization.
+/// 2. The aromatic bonds the input left alternating resolve one π per
+///    matched bond — a maximum matching restricted to the atoms whose
+///    preferred registered valence still lacks one unit after their σ
+///    bonds and real multiples (furan's O resolves π-free at cbv 2
+///    while its four carbons take one π each; naphthalene's
+///    bridgeheads match once for cbv 4 against the outer carbons' 3).
+///
+/// `counts` are the structure's per-atom H counts (zero under
+/// DoNotAddH, the read state otherwise).
+pub(crate) fn resolved_chem_valence(structure: &Structure, counts: &[u32]) -> Vec<i32> {
+    let n = structure.atoms.len();
+    let element = |atom: usize| -> i32 {
+        crate::canonical::protons::el_number(&structure.atoms[atom].element).unwrap_or(-1)
+    };
+    // Per-atom bond valence over the current orders (the reference's
+    // chem_bonds_valence; aromatic bonds read their blend), the bond
+    // orders themselves, and the adjacency.
+    let mut orders: Vec<u32> = structure.bonds.iter().map(|&(_, _, order)| order).collect();
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (bond, &(from, to, _)) in structure.bonds.iter().enumerate() {
+        adjacency[from].push(bond);
+        adjacency[to].push(bond);
+    }
+    let bond_valence = |atom: usize, orders: &[u32]| -> i32 {
+        let aromatic_count = adjacency[atom]
+            .iter()
+            .filter(|&&bond| orders[bond] > 3)
+            .count();
+        let real: i32 = adjacency[atom]
+            .iter()
+            .map(|&bond| (orders[bond] as i32).min(3) - 1)
+            .sum();
+        adjacency[atom].len() as i32
+            + real
+            + match aromatic_count {
+                0 => 0,
+                1 => 1,
+                k => k as i32 + 1,
+            }
+    };
+    let carbon_ii = |atom: usize, orders: &[u32]| -> bool {
+        let record = &structure.atoms[atom];
+        record.charge == 0
+            && counts[atom] == 0
+            && element(atom) == 6
+            && bond_valence(atom, orders) == 2
+    };
+    // Type 18, zero-charge branch — gated on the structure-wide
+    // neutral C-II census (the reference counts 2-bond valence-4
+    // carbons before any pair type may fire). Atoms in ascending
+    // order (the reference's scan); each promotion feeds the next
+    // gate's valences.
+    let census_ii = (0..n).filter(|&atom| carbon_ii(atom, &orders)).count();
+    let mut promotions = 0;
+    for atom in 0..n {
+        let record = &structure.atoms[atom];
+        if record.charge != 0 || counts[atom] != 0 || element(atom) != 7 {
+            continue;
+        }
+        if census_ii <= promotions {
+            break; // the census drained
+        }
+        let bonds = &adjacency[atom];
+        if bonds.len() != 2 || bond_valence(atom, &orders) != 3 {
+            continue;
+        }
+        let (a, b) = {
+            let first = structure.bonds[bonds[0]];
+            let second = structure.bonds[bonds[1]];
+            let other = |bond: (usize, usize, u32)| {
+                if bond.0 == atom {
+                    bond.1
+                } else {
+                    bond.0
+                }
+            };
+            (other(first), other(second))
+        };
+        let va = bond_valence(a, &orders) + counts[a] as i32;
+        let vb = bond_valence(b, &orders) + counts[b] as i32;
+        if element(a) != 6 || element(b) != 6 {
+            continue;
+        }
+        if structure.atoms[a].charge != 0 || structure.atoms[b].charge != 0 {
+            continue;
+        }
+        if va + vb != 6 || (va - vb).abs() > 2 {
+            continue;
+        }
+        // The reference's side split: v == 4 (or v == 3 over a single
+        // bond) reads the Cm side — its bond keeps its order; v == 2
+        // (or v == 3 over a double) the C-II side pulled to the
+        // triple.
+        let side = |index: usize, bond: usize| -> Option<bool> {
+            let v = if index == 0 { va } else { vb };
+            let order = orders[bond];
+            if v == 4 || (v == 3 && order == 1) {
+                Some(false) // Cm
+            } else if v == 2 || (v == 3 && order == 2) {
+                Some(true) // Cp
+            } else {
+                None
+            }
+        };
+        let (cp, _cm) = match (side(0, bonds[0]), side(1, bonds[1])) {
+            (Some(true), Some(false)) => (a, b),
+            (Some(false), Some(true)) => (b, a),
+            _ => continue,
+        };
+        let cp_bond = *bonds
+            .iter()
+            .find(|&&bond| {
+                let (from, to, _) = structure.bonds[bond];
+                (from == atom && to == cp) || (from == cp && to == atom)
+            })
+            .expect("the N–C bond is in the adjacency");
+        if adjacency[cp].len() + counts[cp] as usize != 2 {
+            continue;
+        }
+        // The C-II's far neighbor must not be a nitrogen (the
+        // reference's nitrile guard).
+        let far = adjacency[cp]
+            .iter()
+            .map(|&bond| {
+                let (from, to, _) = structure.bonds[bond];
+                if from == cp {
+                    to
+                } else {
+                    from
+                }
+            })
+            .find(|&other| other != atom);
+        if matches!(far, Some(other) if element(other) == 7) {
+            continue;
+        }
+        // Promote: delta = 4 − v(cp) on the N–C bond.
+        let v_cp = bond_valence(cp, &orders) + counts[cp] as i32;
+        let delta = (4 - v_cp).max(0);
+        if delta > 0 {
+            orders[cp_bond] += delta as u32;
+        }
+        promotions += 1;
+    }
+    // Aromatic matching over the (possibly promoted) orders.
+    let mut degree = vec![0i32; n];
+    let mut real_pi = vec![0i32; n];
+    let mut aromatic: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (bond, &(from, to, _)) in structure.bonds.iter().enumerate() {
+        let order = orders[bond];
+        degree[from] += 1;
+        degree[to] += 1;
+        if order > 3 {
+            aromatic[from].push(to);
+            aromatic[to].push(from);
+        } else {
+            let unit = order as i32 - 1;
+            real_pi[from] += unit;
+            real_pi[to] += unit;
+        }
+    }
+    let eligible: Vec<bool> = (0..n)
+        .map(|atom| {
+            let record = &structure.atoms[atom];
+            let Some(el) = crate::canonical::protons::el_number(&record.element) else {
+                return false;
+            };
+            let preferred = i32::from(crate::canonical::protons::el_valences(el, record.charge)[0]);
+            if preferred == 0 {
+                return false;
+            }
+            preferred - counts[atom] as i32 - degree[atom] - real_pi[atom] >= 1
+        })
+        .collect();
+    let mut partner: Vec<Option<usize>> = vec![None; n];
+    for atom in 0..n {
+        if eligible[atom] {
+            let mut seen = vec![false; n];
+            kuhn_augment(atom, &aromatic, &eligible, &mut partner, &mut seen);
+        }
+    }
+    (0..n)
+        .map(|atom| degree[atom] + real_pi[atom] + i32::from(partner[atom].is_some()))
+        .collect()
+}
+
+/// One Kuhn augmentation round from `atom` over the aromatic subgraph.
+fn kuhn_augment(
+    atom: usize,
+    aromatic: &[Vec<usize>],
+    eligible: &[bool],
+    partner: &mut [Option<usize>],
+    seen: &mut [bool],
+) -> bool {
+    for &neigh in &aromatic[atom] {
+        if !eligible[neigh] || seen[neigh] {
+            continue;
+        }
+        seen[neigh] = true;
+        let free = match partner[neigh] {
+            None => true,
+            Some(prev) => kuhn_augment(prev, aromatic, eligible, partner, seen),
+        };
+        if free {
+            partner[neigh] = Some(atom);
+            partner[atom] = Some(neigh);
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

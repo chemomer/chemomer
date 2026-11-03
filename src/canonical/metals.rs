@@ -152,6 +152,8 @@ pub(crate) struct MetalContext {
     pub(crate) cbv2: Vec<i32>,
     pub(crate) degrees: Vec<u32>,
     pub(crate) h: Vec<u32>,
+    /// Per atom, the input's aromatic (alternating) bond count.
+    pub(crate) aromatic_count: Vec<u32>,
 }
 
 impl MetalContext {
@@ -189,6 +191,81 @@ impl MetalContext {
             cbv2,
             degrees,
             h: structure.hydrogens(),
+            aromatic_count,
+        }
+    }
+
+    /// The `/rA` echo's read-time bond valences (mol2atom.c
+    /// `calculate_valences` + ichi_bns.c `nBondsValenceInpAt`):
+    /// `(bonds_valence, actual_bonds_valence)`. The first is the
+    /// aromatic-blended chemical valence with the pyrrole-type
+    /// decrement applied — an aromatic atom whose blend reads an
+    /// unusual valence that the one-lower blend would make standard
+    /// loses one (the furan O: blend 3 → 2; the pyrrole N likewise)
+    /// — the second counts the same bonds the way the writer's gate
+    /// does: single/double/triple by order, aromatics as `n + 1`
+    /// (one aromatic reads 1, two read 3, three read 4). The two
+    /// differ exactly when the decrement fired, which is what the
+    /// writer's `bonds_valence != actual_bonds_valence` branch tests.
+    /// `num_h` is the atom's own submitted count (the inp num_H the
+    /// reference's decrement checks read).
+    pub(crate) fn read_cbv(&self, structure: &Structure, index: usize) -> (i32, i32) {
+        let atom = &structure.atoms[index];
+        let mut bv = self.cbv2[index] / 2;
+        let n_alt = self.aromatic_count[index];
+        let abv = self.bonds_valence_inp_at(structure, index);
+        if n_alt > 0 {
+            let num_h = atom.h_count as i32;
+            let degree = self.degrees[index] as i32;
+            let el = self.element[index];
+            let unusual = super::protons::unusual_el_valence(
+                el,
+                atom.charge,
+                bv,
+                atom.h_count,
+                degree as u32,
+            ) != 0;
+            let unusual_lower = bv > 0
+                && super::protons::unusual_el_valence(
+                    el,
+                    atom.charge,
+                    bv - 1,
+                    atom.h_count,
+                    degree as u32,
+                ) != 0;
+            if atom.valence_code == 0 {
+                if unusual && !unusual_lower {
+                    bv -= 1;
+                }
+            } else if i32::from(atom.valence_code) == bv + num_h - 1 {
+                bv -= 1;
+            }
+        }
+        (bv, abv)
+    }
+
+    /// The writer's bond-valence sum (ichi_bns.c
+    /// `nBondsValenceInpAt`): real orders by value, aromatics as
+    /// `n_alt + 1` (a lone aromatic reads 1 — the replaced-single
+    /// rule).
+    pub(crate) fn bonds_valence_inp_at(&self, structure: &Structure, index: usize) -> i32 {
+        let mut sum = 0i32;
+        let mut alt = 0u32;
+        for &(from, to, order) in &structure.bonds {
+            let incident = (from == index) as u32 + (to == index) as u32;
+            if incident == 0 {
+                continue;
+            }
+            if order > 3 {
+                alt += incident;
+            } else {
+                sum += incident as i32 * order as i32;
+            }
+        }
+        sum + match alt {
+            0 => 0,
+            1 => 1,
+            k => k as i32 + 1,
         }
     }
 }
@@ -275,10 +352,18 @@ pub(crate) fn read_time_hydrogens(structure: &Structure) -> Vec<u32> {
 /// derivation cannot reconstruct unambiguously. Zero when exactly one
 /// registered valence fits the bonds without implicit H; −1 (printed
 /// as `0` by the writer) when the chemical valence itself reads zero.
+/// `actual_bonds_valence` is the writer's own bond sum
+/// (nBondsValenceInpAt): when it differs from the read-time blended
+/// valence — exactly the pyrrole-decrement case — or the expected
+/// implicit H (re-derived from that bond sum, the reference passing
+/// `actual_bonds_valence` to its inner get_num_H with no valence
+/// code) misses the read count, the digit falls out of the
+/// needs-hydrogen branch as `bonds_valence + num_H`.
 pub(crate) fn needed_unusual_valence(
     el: i32,
     charge: i32,
     cbv: i32,
+    actual_bonds_valence: i32,
     num_h: u32,
     positions: u32,
 ) -> i32 {
@@ -290,25 +375,20 @@ pub(crate) fn needed_unusual_valence(
     // lands on the −1 sentinel (the lone `F0`, the carbide `C0-` of
     // the DoNotAddH echo). The expected count re-derives WITHOUT the
     // molfile valence code (util.c:536 passes atom_input_valence =
-    // 0) — a coded atom's actual-vs-pool mismatch is what flags the
-    // digit.
+    // 0) and from the ACTUAL bond sum.
     let inferred = positions != 0 && el != 0;
     let num_h_expected = if inferred {
-        get_num_h(el, charge, cbv, 0) as i32
+        get_num_h(el, charge, actual_bonds_valence, 0) as i32
     } else {
         num_h as i32
     };
-    // The `positions` argument is the reference's num_bonds parameter:
-    // besides gating the derivation above it reads the
-    // bonds_valence != actual_bonds_valence gate, which never fires
-    // here (both read the same aromatic-blended chemical valence —
-    // ichi_bns.c nBondsValenceInpAt).
     if !(-2..=2).contains(&charge)
         || metal_valence(el, charge, 0) == 0
         || skip_adding_h(el)
+        || cbv != actual_bonds_valence
         || num_h_expected != num_h as i32
     {
-        if num_h as i32 == 0 && num_h_expected == 0 {
+        if num_h as i32 == 0 && num_h_expected == 0 && cbv == actual_bonds_valence {
             return 0; // no H
         }
         return chem_valence; // needs H atoms added
