@@ -695,6 +695,51 @@ mod tests {
     }
 
     #[test]
+    fn do_not_addh_echo_carries_the_unusual_valence_zero() {
+        // The reference's WriteOrigAtoms over a bDoNotAddH read: the
+        // bare water oxygen's chemical valence (0) matches no
+        // registered valence, `needed_unusual_el_valence` returns −1
+        // and the writer prints `0`; the plain echo prints nothing
+        // (the derived H2 makes the valence exact).
+        let original = crate::molfile::parse(WATER_MOL).expect("parses");
+        let dna = Options::default().with_do_not_add_h();
+        assert_eq!(
+            reversibility_block(&original, &dna),
+            "/rA:1nO0/rB:/rC:12,12,0;"
+        );
+        assert_eq!(
+            reversibility_block(&original, &Options::default()),
+            "/rA:1nO/rB:/rC:12,12,0;"
+        );
+    }
+
+    #[test]
+    fn the_isotope_dot_marks_an_empty_prefix_not_a_short_element() {
+        // The reference's `len == len0` test: the dot rides the
+        // isotope only when no valence digit or charge preceded — the
+        // plain bare isotope reads `C.i13`, the DoNotAddH one `C0i13`
+        // (the `0` consuming the dot), a charged isotope `O-i18`.
+        let mut carbon = crate::molfile::parse(WATER_MOL).expect("parses");
+        carbon.atoms[0].element = "C".to_string();
+        carbon.atoms[0].isotope = 13;
+        assert_eq!(
+            reversibility_block(&carbon, &Options::default()),
+            "/rA:1nC.i13/rB:/rC:12,12,0;"
+        );
+        assert_eq!(
+            reversibility_block(&carbon, &Options::default().with_do_not_add_h()),
+            "/rA:1nC0i13/rB:/rC:12,12,0;"
+        );
+        carbon.atoms[0].element = "O".to_string();
+        carbon.atoms[0].isotope = 18;
+        carbon.atoms[0].charge = -1;
+        assert_eq!(
+            reversibility_block(&carbon, &Options::default()),
+            "/rA:1nO-i18/rB:/rC:12,12,0;"
+        );
+    }
+
+    #[test]
     fn coord_trimming_matches_the_reference() {
         assert_eq!(clean_coord(12.0), "12");
         assert_eq!(clean_coord(1.4), "1.4");
