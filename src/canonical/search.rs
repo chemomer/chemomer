@@ -266,9 +266,9 @@ pub fn canonical_ranks_and_symmetry(
 fn orbit_minima(ranks: &[u32], orbits: &Orbits) -> Vec<u32> {
     let n = ranks.len();
     let mut min_by_root = vec![u32::MAX; n];
-    for atom in 0..n {
+    for (atom, &rank) in ranks.iter().enumerate() {
         let root = orbits.representative(atom);
-        min_by_root[root] = min_by_root[root].min(ranks[atom]);
+        min_by_root[root] = min_by_root[root].min(rank);
     }
     (0..n)
         .map(|atom| min_by_root[orbits.representative(atom)])
@@ -577,8 +577,12 @@ fn descend_stereo(
     };
     let mut candidates: Vec<usize> = partition.at_number()[cell.0..cell.1].to_vec();
     candidates.sort_by_key(|&atom| (aux_rank[atom], atom));
-    for &v in &candidates {
-        if orbits.representative(v) != v {
+    // The L14 theta skip covers only backtracking-iterated candidates;
+    // a freshly entered cell's first vertex is the L2 descent's
+    // unconditional `CellGetMinNode(..., 0, ...)` (see the stereo-free
+    // walk).
+    for (index, &v) in candidates.iter().enumerate() {
+        if index > 0 && orbits.representative(v) != v {
             continue;
         }
         let mut branch = partition.clone();
@@ -828,10 +832,7 @@ fn descend_hinformed(
             if let Some(first_partition) = first {
                 if matches(first_partition) {
                     if tracing() {
-                        eprintln!(
-                            "S2 merge-FIRST nu_atnum={:?}",
-                            partition.at_number()
-                        );
+                        eprintln!("S2 merge-FIRST nu_atnum={:?}", partition.at_number());
                     }
                     for position in 0..adjacency.len() {
                         orbits.union(
@@ -850,10 +851,7 @@ fn descend_hinformed(
                     // (the (1,2,5,6)(3,4) cyclohexadiene witness).
                     if equals(best_partition) {
                         if tracing() {
-                            eprintln!(
-                                "S2 merge-RHO nu_atnum={:?}",
-                                partition.at_number()
-                            );
+                            eprintln!("S2 merge-RHO nu_atnum={:?}", partition.at_number());
                         }
                         for position in 0..adjacency.len() {
                             orbits.union(
@@ -933,12 +931,20 @@ fn descend_hinformed(
         eprintln!("S2 cell=[{},{}] arms", cell.0, cell.1);
     }
     // Candidates within the cell ordered by auxiliary rank, then atom
-    // number — the reference's aux-informed CellGetMinNode — skipping
-    // candidates an automorphism already relates to a tried one.
+    // number — the reference's aux-informed CellGetMinNode. The theta
+    // skip (ichican2.c L14) applies ONLY to the candidates backtracking
+    // iterates after the branch's first one: a freshly entered cell's
+    // first vertex is `CellGetMinNode(..., 0, ...)` inside the L2
+    // descent, chosen before any theta test — the branch it opens is
+    // explored even when theta already relates it to a tried one, and
+    // the equal-terminal pair it witnesses is a generator the skip
+    // would otherwise hide (the breadth-439 witness: the (5,6) branch
+    // opened after theta held {5,6} still yields the second gamma that
+    // completes the orbit partition).
     let mut candidates: Vec<usize> = partition.at_number()[cell.0..cell.1].to_vec();
     candidates.sort_by_key(|&atom| (aux_rank[atom], atom));
-    for &v in &candidates {
-        if orbits.representative(v) != v {
+    for (index, &v) in candidates.iter().enumerate() {
+        if index > 0 && orbits.representative(v) != v {
             if tracing() {
                 eprintln!("S2 skip v={} (orbit)", v + 1);
             }

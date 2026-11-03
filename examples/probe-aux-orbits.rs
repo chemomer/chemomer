@@ -47,9 +47,57 @@ fn main() {
                 continue;
             };
             if assembled == recorded {
-                passing.push(id);
+                passing.push(id.clone());
             } else {
-                failing.push((id, assembled, recorded.into()));
+                failing.push((id.clone(), assembled, recorded.into()));
+            }
+            // The cross-mode aux tails the other gates read: a triage
+            // entry may only retire when EVERY recorded aux tail
+            // matches — the fixedh / recmet / snon / donotaddh
+            // recordings ride the same partition.
+            for (field, label, opts) in [
+                (
+                    "fixedh",
+                    "fixedh",
+                    chemomer::Options::default().with_fixed_h(),
+                ),
+                (
+                    "recmet",
+                    "recmet",
+                    chemomer::Options::default().with_rec_met(),
+                ),
+                (
+                    "snon",
+                    "snon",
+                    chemomer::Options::default().with_no_stereo(),
+                ),
+                (
+                    "donotaddh",
+                    "donotaddh",
+                    chemomer::Options::default().with_do_not_add_h(),
+                ),
+            ] {
+                let Some(rec) = case[field]
+                    .as_object()
+                    .and_then(|s| s.get("aux"))
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                let assembled =
+                    chemomer::Engine::with_options(case["molfile"].as_str().unwrap(), opts)
+                        .and_then(|e| e.aux_string());
+                match assembled {
+                    Ok(a) if a == rec => {}
+                    other => {
+                        println!("  {} [{label}] aux mismatch:", id);
+                        println!(
+                            "    ours   {}",
+                            other.as_ref().map(|s| s.as_str()).unwrap_or("ERROR")
+                        );
+                        println!("    oracle {rec}");
+                    }
+                }
             }
         }
     }
@@ -61,12 +109,14 @@ fn main() {
     for (id, assembled, oracle) in &failing {
         println!("  {id}\n    ours   {assembled}\n    oracle {oracle}");
         // The /E: fields side by side when both carry one.
-        let ours_e = assembled.split("/E:").nth(1).map(|s| {
-            s.split('/').next().unwrap_or("").to_string()
-        });
-        let oracle_e = oracle.split("/E:").nth(1).map(|s| {
-            s.split('/').next().unwrap_or("").to_string()
-        });
+        let ours_e = assembled
+            .split("/E:")
+            .nth(1)
+            .map(|s| s.split('/').next().unwrap_or("").to_string());
+        let oracle_e = oracle
+            .split("/E:")
+            .nth(1)
+            .map(|s| s.split('/').next().unwrap_or("").to_string());
         if let (Some(o), Some(r)) = (ours_e, oracle_e) {
             println!("    /E: ours {o}\n    /E: oracle   {r}");
         }
