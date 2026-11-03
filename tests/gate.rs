@@ -459,6 +459,17 @@ fn the_aux_info_equals_the_oracle_recording() {
     println!("aux gate: pass {pass}, expected-failure skips {skipped}");
 }
 
+/// The RInChI encode gate: every recorded reaction — RXNfile and
+/// RDfile input alike — assembles byte-for-byte to the oracle's five
+/// output lines (identifier, RAuxInfo, three key shapes), and every
+/// recorded component's standard InChI reproduces through the engine.
+/// The tranche carries four families: the base reactions, the metal-O
+/// family (connected metal-oxygen components in every role — the
+/// parked item that died once the metal machinery landed), the
+/// equilibrium family (recorded under the oracle's
+/// /force-equilibrium; the `/d=` flag and the E key codes), and the
+/// RDfile family (the `$DATUM $MFMT` agent scan: catalysts read,
+/// non-agent repeats drop, a variation change ends the scan).
 #[test]
 fn the_rinchi_equals_the_oracle_recording() {
     let dir = suite_dir();
@@ -472,14 +483,25 @@ fn the_rinchi_equals_the_oracle_recording() {
     let mut failures = Vec::new();
     for case in &cases {
         let id = case["id"].as_str().expect("id");
-        let rxnfile = case["rxnfile"].as_str().expect("rxnfile");
-        let reaction = match chemomer::parse_rxnfile(rxnfile) {
+        // Two input edges: the RXNfile (the rxnfile field) and the
+        // RDfile (the rdfile field — the $RXN block verbatim plus the
+        // $DATUM $MFMT agent scan). The equilibrium family records
+        // under the oracle's /force-equilibrium flag.
+        let parsed = if let Some(rdfile) = case["rdfile"].as_str() {
+            chemomer::parse_rdfile(rdfile)
+        } else {
+            chemomer::parse_rxnfile(case["rxnfile"].as_str().expect("rxnfile"))
+        };
+        let mut reaction = match parsed {
             Ok(reaction) => reaction,
             Err(error) => {
                 failures.push(format!("{id}: {error}"));
                 continue;
             }
         };
+        if case["forceEquilibrium"].as_bool().unwrap_or(false) {
+            reaction.set_directionality(chemomer::rinchi::Directionality::Equilibrium);
+        }
         let mut ok = true;
         let check = |what: &str,
                      value: chemomer::Result<String>,
