@@ -254,22 +254,33 @@ pub(crate) fn read_time_hydrogens(structure: &Structure) -> Vec<u32> {
 /// The rA echo's unusual-valence digit (ichiprt1.c:2494
 /// `needed_unusual_el_valence`): the chemical valence the read-time
 /// derivation cannot reconstruct unambiguously. Zero when exactly one
-/// registered valence fits the bonds without implicit H; −1 (no
-/// digit) when the chemical valence itself reads zero.
+/// registered valence fits the bonds without implicit H; −1 (printed
+/// as `0` by the writer) when the chemical valence itself reads zero.
 pub(crate) fn needed_unusual_valence(
     el: i32,
     charge: i32,
     cbv: i32,
     num_h: u32,
-    _positions: u32,
+    positions: u32,
 ) -> i32 {
     let chem_valence = cbv + num_h as i32;
-    let num_h_expected = get_num_h(el, charge, cbv) as i32;
-    // The `positions` argument mirrors the reference's num_bonds
-    // parameter, consulted only in the bonds_valence !=
-    // actual_bonds_valence gate that never fires here: both read the
-    // same aromatic-blended chemical valence (ichi_bns.c
-    // nBondsValenceInpAt).
+    // The reference consults the derivation only for a BONDED atom of
+    // a known element (`num_bonds && get_element_chemical_symbol()`);
+    // an isolated atom's expected count is its own, so the walk — not
+    // the derivation mismatch — decides, and a zero-bond zero-H atom
+    // lands on the −1 sentinel (the lone `F0`, the carbide `C0-` of
+    // the DoNotAddH echo).
+    let inferred = positions != 0 && el != 0;
+    let num_h_expected = if inferred {
+        get_num_h(el, charge, cbv) as i32
+    } else {
+        num_h as i32
+    };
+    // The `positions` argument is the reference's num_bonds parameter:
+    // besides gating the derivation above it reads the
+    // bonds_valence != actual_bonds_valence gate, which never fires
+    // here (both read the same aromatic-blended chemical valence —
+    // ichi_bns.c nBondsValenceInpAt).
     if !(-2..=2).contains(&charge)
         || metal_valence(el, charge, 0) == 0
         || skip_adding_h(el)
