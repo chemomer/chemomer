@@ -727,12 +727,12 @@ pub fn apply_edit(structure: &mut Structure, edit: &(usize, usize, usize, usize)
 }
 
 /// The backbone bonds for every unit (`OAD_Polymer_FindBackbones`):
-/// all simple end-to-end paths within each unit, intra-ring bonds
-/// delisted (the ring perception breaks cyclized closure bonds), and
-/// the ends-bond held when everything delisted. The tautomeric
-/// delisting of the reference runs only against normalized composite
-/// data the treatment does not have here — the polymers-by-tautomer
-/// corner is a ledgered debt.
+/// all simple end-to-end paths within each unit, then the delists —
+/// intra-ring bonds (the ring perception breaks cyclized closure
+/// bonds), higher-order bonds and the bonds the tautomer registration
+/// marked (`BOND_TAUTOM` — the cyclization bond itself marks when its
+/// closure creates a tautomeric system, the N-oxide corner) — and the
+/// ends-bond held when everything delisted.
 pub fn fill_backbones(structure: &Structure, poly: &crate::graph::Polymer, treated: &mut Treated) {
     let ring = ring_systems(structure, treated);
     for index in 0..treated.units.len() {
@@ -751,27 +751,24 @@ pub fn fill_backbones(structure: &Structure, poly: &crate::graph::Polymer, treat
             (Some(&x), Some(&y)) => x != y,
             _ => true,
         });
+        // Higher-order bonds never carry the frame shift (the
+        // reference's DelistHighOrderBackboneBonds namesake filter).
+        bonds.retain(|&(a, b)| {
+            bond_index(structure, a, b)
+                .map(|index| structure.bonds[index].2 <= 1)
+                .unwrap_or(true)
+        });
         // Delist the tautomeric backbone bonds (the reference's
         // OAD_PolymerUnit_DelistHighOrderBackboneBonds over the
         // normalized composite: a bond the t-group registration made
-        // BOND_TAUTOM never carries the frame shift).
+        // BOND_TAUTOM never carries the frame shift — the cyclization
+        // bond itself marks when its closure creates a tautomeric
+        // system, the N-oxide corner).
         let counts = crate::layers::standardization::adjusted_hydrogens(structure);
-        let ranks = crate::layers::hydrogen::canonical_ranks_for(structure);
-        let groups = crate::canonical::tautomer::mobile_groups(structure, &counts, &ranks);
-        let mut taut_pairs: Vec<(u32, u32)> = Vec::new();
-        for group in &groups {
-            let mut members: Vec<u32> = group.ranks.clone();
-            members.sort_unstable();
-            for i in 0..members.len() {
-                for j in (i + 1)..members.len() {
-                    taut_pairs.push((members[i], members[j]));
-                }
-            }
-        }
-        bonds.retain(|&(a, b)| {
-            let (ra, rb) = (ranks[a], ranks[b]);
-            let (lo, hi) = (ra.min(rb), ra.max(rb));
-            !taut_pairs.contains(&(lo, hi))
+        let marks = crate::canonical::tautomer::tautomeric_bond_marks(structure, &counts);
+        bonds.retain(|&(a, b)| match bond_index(structure, a, b) {
+            Some(index) => !marks[index],
+            None => true,
         });
         if bonds.is_empty() {
             // Hold the ends bond when every candidate delisted (the
@@ -780,4 +777,192 @@ pub fn fill_backbones(structure: &Structure, poly: &crate::graph::Polymer, treat
         }
         state.bkbonds = bonds;
     }
+}
+
+/// Whether the FoldCRU attempt fails the way the oracle's does. The
+/// reference folds a CRU whose backbone fragments between cuts repeat
+/// (runichi2.c `analyze_CRU_folding`): fragments split at every
+/// single, non-cyclic backbone bond, signed by the interim's blind
+/// equivalence classes, and a class sequence with a repeating period
+/// held ≥ 2 whole times prepares fold edits. Every attempt that
+/// prepares edits then fails downstream (the edited unit's crossing
+/// bonds no longer read 0 or 2), which is the identifier-level error
+/// the option produces; CRUs without a repeating pattern fall through
+/// and the identifier speaks unedited. Multi-component structures
+/// skip silently (the reference's aux-class extraction reads one
+/// component — the two-cru recording stays plain).
+pub fn cru_folding_fails(
+    structure: &Structure,
+    poly: &crate::graph::Polymer,
+    treated: &Treated,
+) -> bool {
+    if !single_component(structure) {
+        return false;
+    }
+    // The interim cyclized copy supplies the equivalence classes (the
+    // reference reads them from the 105+ aux).
+    let mut interim = structure.clone();
+    let mut interim_treated = treated.clone();
+    cyclize_units(&mut interim, &mut interim_treated);
+    fill_backbones(&interim, poly, &mut interim_treated);
+    let counts = crate::layers::standardization::adjusted_hydrogens(&interim);
+    let (adjacency, invariants) = crate::canonical::graph_of(&interim);
+    let mask = crate::canonical::tautomer::endpoint_mask(&interim, &counts);
+    let groups = crate::canonical::group_membership(&interim, &counts);
+    let (_, symmetry) = crate::canonical::canonical_ranks_and_symmetry(
+        &adjacency,
+        &invariants,
+        &crate::canonical::tautomer::without_mobile_h(&counts, &mask),
+        &groups,
+    );
+
+    for (index, state) in interim_treated.units.iter().enumerate() {
+        let Some(unit) = poly.units.get(index) else {
+            continue;
+        };
+        // Bi-star CRUs with at least two atoms and two crossing bonds.
+        if !state.bistar() || unit.alist.len() < 2 || unit.blist.len() < 2 {
+            continue;
+        }
+        // Cuts: the delisted backbone bonds that survive as single
+        // bonds of the submitted structure.
+        let cuts: Vec<(usize, usize)> = state
+            .bkbonds
+            .iter()
+            .copied()
+            .filter(|&(a, b)| {
+                bond_index(structure, a, b)
+                    .map(|bond| structure.bonds[bond].2 <= 1)
+                    .unwrap_or(false)
+            })
+            .collect();
+        if cuts.is_empty() {
+            continue;
+        }
+        let Some(fragments) = backbone_fragments(structure, unit, state, &cuts) else {
+            continue;
+        };
+        // Class-count signatures, classes numbered by first sighting.
+        let mut signatures: Vec<Vec<usize>> = Vec::new();
+        let mut sequence: Vec<usize> = Vec::with_capacity(fragments.len());
+        for fragment in &fragments {
+            let mut signature: Vec<usize> = fragment
+                .iter()
+                .map(|&atom| symmetry[atom] as usize)
+                .collect();
+            signature.sort_unstable();
+            let class = match signatures.iter().position(|known| *known == signature) {
+                Some(class) => class,
+                None => {
+                    signatures.push(signature);
+                    signatures.len() - 1
+                }
+            };
+            sequence.push(class);
+        }
+        // A repeating pattern held at least twice.
+        let total = sequence.len();
+        for period in 1..total {
+            if !total.is_multiple_of(period) || total / period < 2 {
+                continue;
+            }
+            if (0..total).all(|step| sequence[step] == sequence[step % period]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The backbone fragments: the connected pieces of the unit's
+/// subgraph after the cut bonds come out, ordered along the backbone
+/// from end1 (a BFS over the piece adjacency the cuts join).
+fn backbone_fragments(
+    structure: &Structure,
+    unit: &crate::graph::PolymerUnit,
+    state: &TreatedUnit,
+    cuts: &[(usize, usize)],
+) -> Option<Vec<Vec<usize>>> {
+    let in_unit = |atom: usize| unit.alist.contains(&atom);
+    // Union-find over the unit's atoms; cut bonds never merge.
+    let mut parent: std::collections::HashMap<usize, usize> = Default::default();
+    let find = |parent: &std::collections::HashMap<usize, usize>, mut atom: usize| -> usize {
+        while let Some(&up) = parent.get(&atom) {
+            if up == atom {
+                break;
+            }
+            atom = up;
+        }
+        atom
+    };
+    for &atom in &unit.alist {
+        parent.insert(atom, atom);
+    }
+    for &(from, to, _) in &structure.bonds {
+        if !in_unit(from) || !in_unit(to) || cuts.contains(&(from.min(to), from.max(to))) {
+            continue;
+        }
+        let (ra, rb) = (find(&parent, from), find(&parent, to));
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+    let mut members: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+    for &atom in &unit.alist {
+        members.entry(find(&parent, atom)).or_default().push(atom);
+    }
+    let pieces: Vec<Vec<usize>> = members.into_values().collect();
+    if pieces.len() != cuts.len() + 1 {
+        return None;
+    }
+    // Order the pieces from the end1 side: walk the cut graph.
+    let root_of = |atom: usize| find(&parent, atom);
+    let mut order: Vec<Vec<usize>> = Vec::with_capacity(pieces.len());
+    let mut seen: Vec<usize> = Vec::new();
+    let mut queue = vec![root_of(state.end1)];
+    while let Some(root) = queue.pop() {
+        if seen.contains(&root) {
+            continue;
+        }
+        seen.push(root);
+        let piece = pieces.iter().find(|piece| root_of(piece[0]) == root)?;
+        order.push(piece.clone());
+        for &(a, b) in cuts {
+            if root_of(a) == root {
+                queue.push(root_of(b));
+            } else if root_of(b) == root {
+                queue.push(root_of(a));
+            }
+        }
+    }
+    Some(order)
+}
+
+/// Whether the structure's atoms form one connected component.
+fn single_component(structure: &Structure) -> bool {
+    let n = structure.atoms.len();
+    if n <= 1 {
+        return true;
+    }
+    let mut seen = vec![false; n];
+    let mut queue = vec![0];
+    seen[0] = true;
+    let mut count = 1;
+    while let Some(atom) = queue.pop() {
+        for &(from, to, _) in &structure.bonds {
+            let other = if from == atom {
+                to
+            } else if to == atom {
+                from
+            } else {
+                continue;
+            };
+            if !seen[other] {
+                seen[other] = true;
+                count += 1;
+                queue.push(other);
+            }
+        }
+    }
+    count == n
 }

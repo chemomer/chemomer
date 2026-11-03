@@ -48,7 +48,7 @@ impl LayerEmitter for IsotopeLayer {
         if entries.is_empty() && mobile_d == 0 && mobile_t == 0 {
             return Ok(None);
         }
-        let ranks = crate::layers::hydrogen::canonical_ranks_for(structure);
+        let ranks = isotope_informed_ranks(structure);
         entries.sort_by_key(|(index, _)| ranks[*index as usize]);
         let mut segment = String::from("i");
         for (index, entry) in entries {
@@ -75,6 +75,85 @@ impl LayerEmitter for IsotopeLayer {
         }
         Ok(Some(segment))
     }
+}
+
+/// The isotopically-informed canonical numbering: the blind numbering
+/// with each symmetry class's marked atoms moved to the class's
+/// smallest ranks. A marked atom carries a heavy isotope or a fixed
+/// isotopic-H load; its sort key reads (mass delta, T, D) ascending —
+/// the reference's `iso_sort_key` packing (ichiisot.c
+/// `make_iso_sort_key`, H-counts inside the mass delta), unmarked
+/// atoms LAST (`EMPTY_ISO_SORT_KEY`). The reference realizes this as
+/// a second canonicalization seeded from the base classes with the
+/// iso keys as the auxiliary rank (ichican2.c CanonGraph06, the aux
+/// ranking built from `nSymmRankBase` + `iso_sort_keyBase`); within a
+/// class the base connection table ties, so the iso rows decide, and
+/// they minimize with the marked atoms at the class's smallest
+/// canonical numbers — identical to reassigning the class's rank
+/// slots, marked atoms first. Unmarked members keep their blind
+/// relative order.
+pub fn isotope_informed_ranks(structure: &Structure) -> Vec<u32> {
+    let ranks = crate::layers::hydrogen::canonical_ranks_for(structure);
+    let marks: Vec<Option<(i32, u32, u32)>> = (0..structure.atoms.len())
+        .map(|index| mark_of(structure, index))
+        .collect();
+    if marks.iter().all(Option::is_none) {
+        return ranks;
+    }
+    let (adjacency, invariants) = crate::canonical::graph_of(structure);
+    let counts = standardization::adjusted_hydrogens(structure);
+    let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
+    let groups = crate::canonical::group_membership(structure, &counts);
+    let (_, symmetry) = crate::canonical::canonical_ranks_and_symmetry(
+        &adjacency,
+        &invariants,
+        &crate::canonical::tautomer::without_mobile_h(&counts, &mask),
+        &groups,
+    );
+    let mut informed = ranks.clone();
+    // One class at a time: its rank slots (sorted), its members
+    // (marked ascending by key, then unmarked by blind rank).
+    let mut classes: Vec<Vec<usize>> = Vec::new();
+    for atom in 0..structure.atoms.len() {
+        let position = classes
+            .iter()
+            .position(|members| symmetry[members[0]] == symmetry[atom]);
+        match position {
+            Some(index) => classes[index].push(atom),
+            None => classes.push(vec![atom]),
+        }
+    }
+    for members in &classes {
+        let mut slots: Vec<u32> = members.iter().map(|&atom| ranks[atom]).collect();
+        slots.sort_unstable();
+        let mut ordered: Vec<usize> = members.clone();
+        // Marked atoms first (ascending iso key — `EMPTY_ISO_SORT_KEY`
+        // holds the blind order's tail, never the head).
+        ordered.sort_by_key(|&atom| match marks[atom] {
+            Some(key) => (0u8, key, ranks[atom]),
+            None => (1u8, (0, 0, 0), ranks[atom]),
+        });
+        for (&atom, &slot) in ordered.iter().zip(&slots) {
+            informed[atom] = slot;
+        }
+    }
+    informed
+}
+
+/// The atom's isotopic mark: `Some((mass delta, T, D))` for a heavy
+/// isotope or a fixed isotopic-H carrier, `None` for a plain atom.
+fn mark_of(structure: &Structure, index: usize) -> Option<(i32, u32, u32)> {
+    let atom = &structure.atoms[index];
+    let delta = if atom.isotope != 0 && atom.element != "H" {
+        atom.isotope as i32 - standard_mass(&atom.element)?
+    } else {
+        0
+    };
+    let (d, t) = structure.isotopic_h.get(&index).copied().unwrap_or((0, 0));
+    if delta == 0 && d == 0 && t == 0 {
+        return None;
+    }
+    Some((delta, t, d))
 }
 
 /// The recorded mass minus the element's standard mass, signed —
