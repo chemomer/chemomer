@@ -21,7 +21,8 @@ fn main() {
         let input = std::fs::read_to_string(&path).expect("read the reaction file");
         // The reference CLI's input detection: $RXN reads as an RXNfile,
         // a RInChI header as string input, everything else as RDfile.
-        let mut reaction = if input.starts_with("$RXN\n") {
+        let first_line = input.lines().next().unwrap_or("").trim_end_matches('\r');
+        let mut reaction = if first_line == "$RXN" {
             chemomer::parse_rxnfile(&input)
         } else {
             chemomer::parse_rdfile(&input)

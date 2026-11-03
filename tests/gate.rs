@@ -470,6 +470,14 @@ fn the_aux_info_equals_the_oracle_recording() {
 /// /force-equilibrium; the `/d=` flag and the E key codes), and the
 /// RDfile family (the `$DATUM $MFMT` agent scan: catalysts read,
 /// non-agent repeats drop, a variation change ends the scan).
+///
+/// Dated note (2026-11-03, the parked-items pass): the distribution's
+/// R005a_with_agents.rxn still rejects on its `M  STY ... SUP`
+/// superatom Sgroup property lines — the V2000 reader does not expand
+/// superatoms yet (a molfile-reader feature outside the RInChI
+/// layer's canvas; the oracle expands them and encodes the reaction).
+/// R005a itself, the undefined-stereo `/t3-,4?` witness, encodes
+/// byte-for-byte and rides the unit tests.
 #[test]
 fn the_rinchi_equals_the_oracle_recording() {
     let dir = suite_dir();
