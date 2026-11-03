@@ -1361,18 +1361,39 @@ fn polymer_treat(
         return Ok(None);
     }
     let mut poly = submitted.polymer.clone().unwrap_or_default();
-    let mut treated = treatment::validate(
+    let mut treated = match treatment::validate(
         submitted,
         options.polymers != PolymersMode::No,
         options.npzz,
-    )?;
+    ) {
+        Ok(treated) => treated,
+        Err(error) => {
+            // The fold flow validates the unedited input first; its
+            // failure speaks the fold prefix (the units-only and
+            // mixed-caps FoldCRU recordings).
+            if options.fold_cru && options.polymers == PolymersMode::Modern {
+                return crate::error::err(format!(
+                    "CRU folding and frame shift analysis failed; {}",
+                    error.message()
+                ));
+            }
+            return Err(error);
+        }
+    };
     match options.polymers {
         PolymersMode::No => {}
         PolymersMode::Modern => {
             if treated.has_units() && options.fold_cru {
-                return crate::error::err(
-                    "CRU folding is not implemented (FoldCRU; ledgered beyond this tranche)",
-                );
+                // The fold attempt: CRUs with in-unit repeats prepare
+                // fold edits and the edit application always fails
+                // downstream (the oracle's FoldCRU contract); CRUs
+                // without a repeating pattern fall through and the
+                // identifier speaks unedited.
+                if treatment::cru_folding_fails(submitted, &poly, &treated) {
+                    return crate::error::err(
+                        "CRU folding failed; Frame shift analysis failed; Number of crossing bonds in polymer unit is not 0 or 2",
+                    );
+                }
             }
             if treated.has_units() && treated.pzz.len() >= 2 && options.frame_shift_edits() {
                 // The interim (105+) pass: cyclize a working copy,

@@ -3838,6 +3838,22 @@ fn components(
     groups
 }
 
+/// The bonds the settled registration marked tautomeric — the
+/// `BOND_TAUTOM` set the normalized composite carries (per-bond, in
+/// bond-index order). The polymer backbone delist reads it: a bond
+/// the tautomer machinery may alternate never carries the frame
+/// shift (runichi3.c `OAD_PolymerUnit_DelistHighOrderBackboneBonds`
+/// over `composite_norm_data`).
+pub fn tautomeric_bond_marks(structure: &Structure, hydrogens: &[u32]) -> Vec<bool> {
+    let context = Context::new(structure, hydrogens);
+    let (_, state) = build_links(&context);
+    let mut marks = vec![false; structure.bonds.len()];
+    for &index in &state.marks {
+        marks[index] = true;
+    }
+    marks
+}
+
 pub fn mobile_groups(structure: &Structure, hydrogens: &[u32], ranks: &[u32]) -> Vec<MobileGroup> {
     let context = Context::new(structure, hydrogens);
     let state = fresh_state(structure.atoms.len());

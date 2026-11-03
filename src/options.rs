@@ -133,10 +133,11 @@ pub struct Options {
     /// the atoms.
     pub npzz: bool,
     /// `FoldCRU` / `FoldSRU` — fold CRUs with in-unit repeats before
-    /// the frame shift (ichiparm.c:463–473). Unimplemented: the
-    /// reference's fold derives edits from a second interim pass and
-    /// aborts on inputs where the analysis fails — the corpus ledger
-    /// carries the debt.
+    /// the frame shift (ichiparm.c:463–473). The oracle contract the
+    /// engine speaks: CRUs whose backbone fragments repeat prepare
+    /// fold edits the reference then fails to apply — the option
+    /// rejects with the oracle's message; CRUs without a repeating
+    /// pattern leave the identifier unedited.
     pub fold_cru: bool,
     /// `FrameShift:` scheme (ichiparm.c:478–508) — whether the modern
     /// frame shift may rewire the cap bonds at all, and whether the
@@ -369,7 +370,9 @@ impl Options {
         self
     }
 
-    /// `FoldCRU` — CRU fold analysis (unimplemented; ledger).
+    /// `FoldCRU` — CRU fold analysis (the oracle's contract: repeats
+    /// reject with the fold failure, otherwise the identifier is
+    /// unedited).
     #[must_use]
     pub fn with_fold_cru(mut self) -> Self {
         self.fold_cru = true;

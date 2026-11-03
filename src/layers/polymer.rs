@@ -564,10 +564,14 @@ pub fn apply_frame_shift(
     let mut applied = false;
     for index in 0..treated.units.len() {
         let state = &interim_treated.units[index];
-        if !state.bistar() || state.bkbonds.len() < 2 {
-            // The reference's parser skips the "(cap-end,...)" and
-            // short patterns: only multi-backbone-bond bistar units
-            // shift.
+        // The reference's senior-bond read parses the interim 105+
+        // identifier's /z patterns (GetFrameShiftInfoFrom105PlusInChI):
+        // only the cyclized ring-comma list "(a,b,..." speaks a senior
+        // bond. The crossing "(a-b,...", the higher-order "(a.b)" and
+        // the diradical "(a)" forms reject — a ring-closing CRU (its
+        // ends adjacent on a pre-existing ring) never settles.
+        if !state.cyclized || state.cyclizable != polymer::Closing::Ring || state.bkbonds.len() < 2
+        {
             continue;
         }
         let bk_cano: Vec<(usize, usize)> = state

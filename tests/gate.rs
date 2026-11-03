@@ -1425,6 +1425,7 @@ fn the_polymer_layers_match_the_oracle() {
                 "npzz" => options.npzz = true,
                 "fs-none" => options.frame_shift = FrameShift::None,
                 "fs-stars" => options.frame_shift = FrameShift::Opened,
+                "foldcru" => options.fold_cru = true,
                 _ => {}
             }
         }

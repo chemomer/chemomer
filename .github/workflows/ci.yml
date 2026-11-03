@@ -14,7 +14,7 @@ jobs:
         with:
           repository: chemomer/inchi-tests
           path: .inchi-tests
-          ref: v0.3.24
+          ref: v0.3.26
       - run: echo "INCHI_TESTS=$(pwd)/.inchi-tests" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:

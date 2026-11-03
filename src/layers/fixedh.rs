@@ -159,14 +159,18 @@ impl FixedHLayer {
 
         // The FI block — the fixed representation's isotopic entries
         // (every isotopic H fixed on its carrier) against the mobile
-        // /i text.
+        // /i text. Heavy isotopes ride the mobile /i only: a fixed
+        // block over a heavy-isotope structure carries no FI segment
+        // at all (the 13C-acetic recording `/i2+1/f/h3H`), and their
+        // absence never summons the block (the 13C-ethane recording:
+        // no /f).
         let mi_text = IsotopeLayer.emit(structure)?;
         let fi_text = self.fixed_isotopes(structure)?;
         let fi_segment = match (&mi_text, &fi_text) {
             (None, None) => None,
-            (Some(_), None) => Some(String::new()), // IS_EMPTY
-            (a, b) if a == b => None,               // EQL2PRECED
+            (a, b) if a == b => None, // EQL2PRECED
             (_, Some(text)) => Some(text.clone()),
+            (Some(_), None) => None,
         };
 
         // The segment-difference bits that can activate the F layer
@@ -234,16 +238,13 @@ impl FixedHLayer {
         Ok(segments)
     }
 
-    /// The fixed representation's isotopic text: every isotopic H
+    /// The fixed representation's isotopic text: the ISOTOPIC HYDROGEN
     /// fixed on its carrier (no exchangeable aggregate), entries at
-    /// the fixed-H numbering.
+    /// the fixed-H numbering. Heavy isotopes never speak here — the
+    /// fixed block rides the mobile /i for them (the D2O and T2O
+    /// recordings `/f/i1D2` `/f/i1T2` are the H-isotope case).
     fn fixed_isotopes(&self, structure: &Structure) -> Result<Option<String>> {
         let mut entries: Vec<(u32, String)> = Vec::new();
-        for (index, atom) in structure.atoms.iter().enumerate() {
-            if let Some(entry) = heavy_entry(atom.isotope, &atom.element) {
-                entries.push((self.fixed.ranks[index], entry));
-            }
-        }
         for (carrier, (d, t)) in &structure.isotopic_h {
             entries.push((self.fixed.ranks[*carrier], h_entry(*t, *d)));
         }
@@ -264,14 +265,6 @@ impl FixedHLayer {
     }
 }
 
-fn heavy_entry(isotope: u16, element: &str) -> Option<String> {
-    if isotope == 0 || element == "H" {
-        return None;
-    }
-    let delta = isotope as i32 - standard_mass(element)?;
-    Some(format!("{delta:+}"))
-}
-
 fn h_entry(t: u32, d: u32) -> String {
     let mut entry = String::new();
     if t > 0 {
@@ -287,25 +280,6 @@ fn h_entry(t: u32, d: u32) -> String {
         }
     }
     entry
-}
-
-fn standard_mass(element: &str) -> Option<i32> {
-    Some(match element {
-        "H" => 1,
-        "B" => 11,
-        "C" => 12,
-        "N" => 14,
-        "O" => 16,
-        "F" => 19,
-        "P" => 31,
-        "S" => 32,
-        "Cl" => 35,
-        "Br" => 79,
-        "I" => 127,
-        "Se" => 80,
-        "Te" => 128,
-        _ => return None,
-    })
 }
 
 /// The computed segment-difference pieces (CompINChILayers' DIFL_F
