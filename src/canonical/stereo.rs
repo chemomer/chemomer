@@ -412,7 +412,7 @@ pub(crate) fn informed_verdict(
         )
         .1
     } else {
-        let groups = crate::canonical::group_membership(structure, counts);
+        let groups = crate::canonical::main_canon_groups(structure, counts);
         crate::canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, counts, &groups).1
     };
     let centers = center_inputs(structure, counts, ranks, &ligand_symmetry, allow_at_pseudo);
@@ -428,7 +428,7 @@ pub(crate) fn informed_verdict(
     } else {
         (
             counts.to_vec(),
-            crate::canonical::group_membership(structure, counts),
+            crate::canonical::main_canon_groups(structure, counts),
         )
     };
     let (ranks, symmetry, (main_pairs, inv_pairs, sign)) =

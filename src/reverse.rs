@@ -1401,7 +1401,7 @@ fn perceived_stereo(structure: &Structure) -> Vec<(char, String)> {
     let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
     let no_taut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
     let symmetry = crate::canonical::base_symmetry(&adjacency, &invariants);
-    let groups = crate::canonical::group_membership(structure, &counts);
+    let groups = crate::canonical::main_canon_groups(structure, &counts);
     let ligand_symmetry =
         crate::canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, &no_taut, &groups)
             .1;
@@ -1452,7 +1452,7 @@ fn synthesis_ranks(
     let (adjacency, invariants) = crate::canonical::graph_of(structure);
     let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
     let no_taut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
-    let groups = crate::canonical::group_membership(structure, &counts);
+    let groups = crate::canonical::main_canon_groups(structure, &counts);
     let ranks = crate::canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
     let mut atom_of: std::collections::BTreeMap<u32, usize> = Default::default();
     for (atom, &rank) in ranks.iter().enumerate() {

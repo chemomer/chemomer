@@ -165,7 +165,7 @@ pub fn aux_info(
         ranks_aux = ranks;
         symmetry = classes;
     } else {
-        let groups_rows = crate::canonical::group_membership(working, &counts);
+        let groups_rows = crate::canonical::main_canon_groups(working, &counts);
         let (ranks, classes) = crate::canonical::canonical_ranks_and_symmetry(
             &adjacency,
             &invariants,

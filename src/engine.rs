@@ -943,7 +943,7 @@ fn fixed_h_centers(working: &Structure, options: &Options) -> Vec<(usize, Vec<us
     let ranks = crate::layers::hydrogen::canonical_ranks_for(working);
     let (adjacency, invariants) = crate::canonical::graph_of(working);
     let mask = crate::canonical::tautomer::endpoint_mask(working, &counts);
-    let groups = crate::canonical::group_membership(working, &counts);
+    let groups = crate::canonical::main_canon_groups(working, &counts);
     let ligand_symmetry = crate::canonical::canonical_ranks_and_symmetry(
         &adjacency,
         &invariants,

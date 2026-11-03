@@ -1288,7 +1288,9 @@ pub fn endpoint_mask(structure: &Structure, hydrogens: &[u32]) -> Vec<bool> {
 
 /// The mobile groups rank-free, as (hydrogen count, member atoms) —
 /// the terminal-compare rows inside the canonicalization search (the
-/// reference's t-group CT section).
+/// reference's t-group CT section). Unfiltered: the FixedH second pass
+/// reads this state (a pinned charge-only group reorders the /f
+/// numbering, breadth2-429).
 pub fn group_membership(structure: &Structure, hydrogens: &[u32]) -> Vec<(u32, Vec<usize>)> {
     let context = Context::new(structure, hydrogens);
     let state = fresh_state(structure.atoms.len());
@@ -1299,6 +1301,24 @@ pub fn group_membership(structure: &Structure, hydrogens: &[u32]) -> Vec<(u32, V
             let count = members.iter().map(|&m| hydrogens[m]).sum();
             (count, members)
         })
+        .collect()
+}
+
+/// The main-canonicalization group rows: [`group_membership`] with the
+/// groups holding NO mobile hydrogen dropped. The reference's
+/// CountTautomerGroups throws the charge-only registrations out
+/// before any main canonicalization reads the group list
+/// (IGNORE_TGROUP_WITHOUT_H: `num[0] == num[1]` — mobile units equal
+/// mobile minus, i.e. zero net H; the instrumented state for the
+/// DoNotAddH sulfate says `num_t_groups = 0` outright). Without the
+/// drop the zero-H rows perturb the terminal compare and the sulfate
+/// O₄/O₃ tie numbers the wrong way round (the within-class ordering
+/// the aux /N: speaks). The FixedH second pass keeps the raw list —
+/// its breadth2-429 deltas ride the charge-only registration.
+pub fn main_canon_groups(structure: &Structure, hydrogens: &[u32]) -> Vec<(u32, Vec<usize>)> {
+    group_membership(structure, hydrogens)
+        .into_iter()
+        .filter(|&(count, _)| count > 0)
         .collect()
 }
 
