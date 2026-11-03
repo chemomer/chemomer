@@ -379,7 +379,7 @@ pub fn aux_info(
         out.push_str(&text.join(","));
     }
 
-    out.push_str(&reversibility_block(original, options.do_not_add_h));
+    out.push_str(&reversibility_block(original, options));
     Ok(out)
 }
 
@@ -449,12 +449,8 @@ fn kept_ion_pair_charges(original: &Structure) -> Option<std::collections::HashM
 }
 
 /// The `/rA` `/rB` `/rC` echo of the submitted structure, in the
-/// input's own atom order, explicit hydrogens included. Under
-/// DoNotAddH the H-count codes are ignored at read (ichiparm.c
-/// "only drawn hydrogens exist") — the echoed atom reads zero H, so
-/// a valence deficiency prints the unusual-valence digit (a CH2
-/// chain echoes `C2`, the single-bonded carbon `C1`).
-pub(crate) fn reversibility_block(original: &Structure, do_not_add_h: bool) -> String {
+/// input's own atom order, explicit hydrogens included.
+pub(crate) fn reversibility_block(original: &Structure, options: &Options) -> String {
     let n = original.atoms.len();
     // The atom-block prefix letter records the counts-line chiral
     // flag (the reference's WriteOrigAtoms: `c` chiral, `n`
@@ -465,15 +461,29 @@ pub(crate) fn reversibility_block(original: &Structure, do_not_add_h: bool) -> S
     // SUBMITTED structure (ichiprt1.c WriteOrigAtoms): the digit is
     // the valence the read-time derivation cannot reconstruct
     // unambiguously (the two-bond Na of the diethylamide recording
-    // echoes `Na2`), printed before the charge.
+    // echoes `Na2`), printed before the charge. The digit's `num_H`
+    // is the count the READ left on the atom: the standard read
+    // derived it from the same chemical bond valence (mol2atom.c
+    // calculate_valences), so the substitution below is exact —
+    // while DoNotAddH threads its flag into the very same get_num_H,
+    // which then keeps the submitted `inp_num_H` (util.c: the
+    // H-count column the reader never reads) — zero here — and the
+    // digit fires on the raw bond valence (the sodium-citrate
+    // deprotonated hydroxyl: the C–O⁻ oxygen and the H-short carbons
+    // echo `C2C3CO1`).
     let echo_context = crate::canonical::metals::MetalContext::new(original);
     for (index, atom) in original.atoms.iter().enumerate() {
         let el = crate::canonical::protons::el_number(&atom.element).unwrap_or(0);
         let cbv = echo_context.cbv2[index] / 2;
-        let num_h = if do_not_add_h {
-            0
+        // The standard read threads the molfile valence code (the
+        // same seat get_num_H's caller passes atom_input_valence);
+        // DoNotAddH keeps the submitted count — its flag rides the
+        // same get_num_H in the reference and keeps inp_num_H, which
+        // is what the read left here.
+        let num_h = if options.do_not_add_h {
+            atom.h_count
         } else {
-            crate::canonical::metals::get_num_h(el, atom.charge, cbv)
+            crate::canonical::metals::get_num_h(el, atom.charge, cbv, atom.valence_code)
         };
         let valence = crate::canonical::metals::needed_unusual_valence(
             el,
@@ -483,8 +493,11 @@ pub(crate) fn reversibility_block(original: &Structure, do_not_add_h: bool) -> S
             echo_context.degrees[index],
         );
         out.push_str(&atom.element);
-        if valence > 0 {
-            out.push_str(&valence.to_string());
+        // The −1 sentinel (chemical valence zero: no valence fits an
+        // isolated atom) prints as `0` (ichiprt1.c: `val > 0 ? val :
+        // 0`); zero itself prints nothing.
+        if valence != 0 {
+            out.push_str(&valence.max(0).to_string());
         }
         match atom.charge {
             0 => {}
@@ -501,7 +514,12 @@ pub(crate) fn reversibility_block(original: &Structure, do_not_add_h: bool) -> S
                 }
             }
         }
-        let dotted = atom.element.chars().count() == 1;
+        // The isotope dot separates the `i` marker from a BARE element
+        // symbol only (ichiprt1.c: `len == len0 ? "." : ""`) — a
+        // valence digit or charge sign ahead of it swallows the dot
+        // (the DoNotAddH lone isotopes: `I0i125`, `O0i18` — not
+        // `I0.i125`).
+        let dotted = valence == 0 && atom.charge == 0;
         if atom.isotope != 0 {
             if dotted {
                 out.push('.');
@@ -676,6 +694,7 @@ mod tests {
             h_count: 0,
             charge: 0,
             h_pinned: false,
+            valence_code: 0,
             isotope: 0,
         }
     }
@@ -689,6 +708,51 @@ mod tests {
         working.fold_explicit_hydrogens();
         let aux = aux_info(&original, &working, 0, &Options::default(), None, false).expect("aux");
         assert_eq!(aux, "AuxInfo=1/0/N:1/rA:1nO/rB:/rC:12,12,0;");
+    }
+
+    #[test]
+    fn do_not_addh_echo_carries_the_unusual_valence_zero() {
+        // The reference's WriteOrigAtoms over a bDoNotAddH read: the
+        // bare water oxygen's chemical valence (0) matches no
+        // registered valence, `needed_unusual_el_valence` returns −1
+        // and the writer prints `0`; the plain echo prints nothing
+        // (the derived H2 makes the valence exact).
+        let original = crate::molfile::parse(WATER_MOL).expect("parses");
+        let dna = Options::default().with_do_not_add_h();
+        assert_eq!(
+            reversibility_block(&original, &dna),
+            "/rA:1nO0/rB:/rC:12,12,0;"
+        );
+        assert_eq!(
+            reversibility_block(&original, &Options::default()),
+            "/rA:1nO/rB:/rC:12,12,0;"
+        );
+    }
+
+    #[test]
+    fn the_isotope_dot_marks_an_empty_prefix_not_a_short_element() {
+        // The reference's `len == len0` test: the dot rides the
+        // isotope only when no valence digit or charge preceded — the
+        // plain bare isotope reads `C.i13`, the DoNotAddH one `C0i13`
+        // (the `0` consuming the dot), a charged isotope `O-i18`.
+        let mut carbon = crate::molfile::parse(WATER_MOL).expect("parses");
+        carbon.atoms[0].element = "C".to_string();
+        carbon.atoms[0].isotope = 13;
+        assert_eq!(
+            reversibility_block(&carbon, &Options::default()),
+            "/rA:1nC.i13/rB:/rC:12,12,0;"
+        );
+        assert_eq!(
+            reversibility_block(&carbon, &Options::default().with_do_not_add_h()),
+            "/rA:1nC0i13/rB:/rC:12,12,0;"
+        );
+        carbon.atoms[0].element = "O".to_string();
+        carbon.atoms[0].isotope = 18;
+        carbon.atoms[0].charge = -1;
+        assert_eq!(
+            reversibility_block(&carbon, &Options::default()),
+            "/rA:1nO-i18/rB:/rC:12,12,0;"
+        );
     }
 
     #[test]
@@ -723,6 +787,7 @@ mod tests {
             h_count: 0,
             charge: -1,
             h_pinned: false,
+            valence_code: 0,
             isotope: 0,
         };
         let mut working = Structure {

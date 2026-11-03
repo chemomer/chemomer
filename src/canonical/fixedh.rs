@@ -479,6 +479,7 @@ mod tests {
             h_count,
             charge,
             h_pinned: false,
+            valence_code: 0,
             isotope: 0,
         }
     }

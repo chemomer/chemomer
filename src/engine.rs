@@ -840,7 +840,7 @@ impl Engine {
         }
         out.push_str(&crate::aux::reversibility_block(
             &self.original,
-            self.options.do_not_add_h,
+            &self.options,
         ));
         Ok(out)
     }

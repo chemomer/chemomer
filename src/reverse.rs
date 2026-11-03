@@ -1348,6 +1348,9 @@ fn reconstruct(layers: Layers) -> Result<Structure> {
                 element: atom.element,
                 h_count: atom.hydrogens,
                 charge: atom.charge,
+                // Reverse reconstruction builds from the identifier's
+                // own layers — no molfile valence code exists there.
+                valence_code: 0,
                 h_pinned: false,
                 isotope,
             }

@@ -14,7 +14,7 @@
 //! selected by those bits.
 
 use super::protons::el_valences;
-use crate::graph::Structure;
+use crate::graph::{AtomRecord, Structure};
 
 /// The reference's `METAL` bit (incomdef.h:115).
 pub(crate) const METAL: u32 = 1;
@@ -194,17 +194,36 @@ impl MetalContext {
 }
 
 /// The per-atom read-time implicit-hydrogen count (util.c:862
-/// `get_num_H`): the smallest registered valence at the atom's
-/// CHARGE state that absorbs the chemical valence (anion rows
-/// included — a bare O⁻ reads one H), with the reference's N(IV) and
-/// S(III) special cases. The `bSkipAddingH` elements never derive
-/// (`util.c:912`), charges outside the cValence table keep
-/// inp_num_H — zero (util.c:66-68) — and the H-count code field
-/// never feeds this (`MOL_FMT_QUERY` is absent). Radicals are not
-/// read by the corpus reader, so the radical branch does not arise.
+/// `get_num_H`): the molfile valence code when present (codes 1-14
+/// pin the count at `max(0, code − cbv)` — short-circuiting the
+/// charge pool, the N(IV)/S(III) cases and the skip window; code 15
+/// reads zero H on a bond-less atom and the 15-minus-bonds gap on a
+/// bonded one, the reference's literal first branch), otherwise the
+/// smallest registered valence at the atom's CHARGE state that
+/// absorbs the chemical valence (anion rows included — a bare O⁻
+/// reads one H), with the reference's N(IV) and S(III) special
+/// cases. The `bSkipAddingH` elements never derive (`util.c:912`),
+/// charges outside the cValence table keep inp_num_H — zero
+/// (util.c:66-68) — and the H-count code field never feeds this
+/// (`MOL_FMT_QUERY` is absent; probe-proven: bare N with H-count 2
+/// reads H3N). Radicals are not read by the corpus reader, so the
+/// radical branch does not arise; aliases fold into real atoms at
+/// parse, so the bAliased branch does not either. The code branches
+/// sit before every gate, exactly as in the reference — a coded O⁻
+/// keeps its /q−1 charge while carrying the coded hydrogens.
 /// `cbv` is the chemical bond valence INCLUDING one per folded
-/// explicit H (a bonded H atom in the reference).
-pub(crate) fn get_num_h(el: i32, charge: i32, cbv: i32) -> u32 {
+/// explicit H (a bonded H atom in the reference). The reference's
+/// aromatic-ring code adjustment (mol2atom.c:919-934, decrement when
+/// `code == chem_valence − 1`) is a no-op for alias-free atoms — it
+/// shifts cbv by one and the code branch re-adds the same one — so
+/// it folds into this arithmetic.
+pub(crate) fn get_num_h(el: i32, charge: i32, cbv: i32, input_valence: i16) -> u32 {
+    if input_valence != 0 && (input_valence != 15 || cbv != 0) {
+        return (i32::from(input_valence) - cbv).max(0) as u32;
+    }
+    if input_valence == 15 {
+        return 0;
+    }
     if skip_adding_h(el) {
         return 0;
     }
@@ -246,7 +265,7 @@ pub(crate) fn read_time_hydrogens(structure: &Structure) -> Vec<u32> {
             // plus one per folded explicit H (a bonded H atom in the
             // reference).
             let cbv = context.cbv2[i] / 2 + drawn as i32;
-            drawn + get_num_h(el, charge, cbv)
+            drawn + get_num_h(el, charge, cbv, structure.atoms[i].valence_code)
         })
         .collect()
 }
@@ -254,22 +273,36 @@ pub(crate) fn read_time_hydrogens(structure: &Structure) -> Vec<u32> {
 /// The rA echo's unusual-valence digit (ichiprt1.c:2494
 /// `needed_unusual_el_valence`): the chemical valence the read-time
 /// derivation cannot reconstruct unambiguously. Zero when exactly one
-/// registered valence fits the bonds without implicit H; −1 (no
-/// digit) when the chemical valence itself reads zero.
+/// registered valence fits the bonds without implicit H; −1 (printed
+/// as `0` by the writer) when the chemical valence itself reads zero.
 pub(crate) fn needed_unusual_valence(
     el: i32,
     charge: i32,
     cbv: i32,
     num_h: u32,
-    _positions: u32,
+    positions: u32,
 ) -> i32 {
     let chem_valence = cbv + num_h as i32;
-    let num_h_expected = get_num_h(el, charge, cbv) as i32;
-    // The `positions` argument mirrors the reference's num_bonds
-    // parameter, consulted only in the bonds_valence !=
-    // actual_bonds_valence gate that never fires here: both read the
-    // same aromatic-blended chemical valence (ichi_bns.c
-    // nBondsValenceInpAt).
+    // The reference consults the derivation only for a BONDED atom of
+    // a known element (`num_bonds && get_element_chemical_symbol()`);
+    // an isolated atom's expected count is its own, so the walk — not
+    // the derivation mismatch — decides, and a zero-bond zero-H atom
+    // lands on the −1 sentinel (the lone `F0`, the carbide `C0-` of
+    // the DoNotAddH echo). The expected count re-derives WITHOUT the
+    // molfile valence code (util.c:536 passes atom_input_valence =
+    // 0) — a coded atom's actual-vs-pool mismatch is what flags the
+    // digit.
+    let inferred = positions != 0 && el != 0;
+    let num_h_expected = if inferred {
+        get_num_h(el, charge, cbv, 0) as i32
+    } else {
+        num_h as i32
+    };
+    // The `positions` argument is the reference's num_bonds parameter:
+    // besides gating the derivation above it reads the
+    // bonds_valence != actual_bonds_valence gate, which never fires
+    // here (both read the same aromatic-blended chemical valence —
+    // ichi_bns.c nBondsValenceInpAt).
     if !(-2..=2).contains(&charge)
         || metal_valence(el, charge, 0) == 0
         || skip_adding_h(el)
@@ -599,17 +632,81 @@ pub fn disconnect_metals(structure: &mut Structure) -> bool {
     if !marked.iter().any(|&m| m) {
         return false;
     }
+    // The implicit-hydrogen extraction (strutil.c 2960-3007): every
+    // marked metal's materialized hydrogen leaves as its own FREE
+    // component — the reference moves num_H and the isotopic counts
+    // onto fresh explicit H ATOMS appended past the original atoms
+    // (move_explicit_Hcation places the coordinates and the H bonds
+    // to the metal), then the ligand loop below breaks those new
+    // metal-H bonds like any non-metal ligand's. H is no heteroatom,
+    // so nothing renormalizes: a bare Li reads Li.H, an explicit
+    // Na-H bond reads Na.H, a bare Mg its Mg.2H — the skip-adding-H
+    // metals (Fe, Zn, Pt) derive no H and pass through as bare
+    // atoms. This is the arm the reference re-derives from
+    // bMayDisconnectMetals' bDisconnectCoord = num_impl_H + 1; the
+    // counts agree by construction (the salt pass between the two
+    // walks moves no metal hydrogen).
+    let mut extracted = false;
+    for (i, &is_marked) in marked.iter().enumerate() {
+        if !is_marked {
+            continue;
+        }
+        // The fold's provenance grows with the structure: an
+        // extracted H belongs to its metal's submitted position (the
+        // reference numbers the new H atoms past the originals).
+        let metal_source = if structure.fold_source.is_empty() {
+            None
+        } else {
+            Some(structure.fold_source[i])
+        };
+        let push_h = |structure: &mut Structure, isotope: u16| {
+            structure.atoms.push(AtomRecord {
+                element: "H".to_string(),
+                h_count: 0,
+                valence_code: 0,
+                charge: 0,
+                h_pinned: true,
+                isotope,
+            });
+            if !structure.positions.is_empty() {
+                structure.positions.push((0.0, 0.0));
+            }
+            if let Some(source) = metal_source {
+                structure.fold_source.push(source);
+            }
+        };
+        while structure.atoms[i].h_count > 0 {
+            structure.atoms[i].h_count -= 1;
+            push_h(structure, 0);
+            extracted = true;
+        }
+        // The isotopic slots (k = 1 D, k = 2 T): the folded counts
+        // leave the carrier map onto real isotope-tagged H atoms.
+        if let Some((deuterium, tritium)) = structure.isotopic_h.remove(&i) {
+            for (count, isotope) in [(deuterium, 2u16), (tritium, 3)] {
+                for _ in 0..count {
+                    push_h(structure, isotope);
+                }
+            }
+            extracted |= deuterium + tritium > 0;
+        }
+    }
     // Non-metal ligands first (strutil.c 3035-3050), then M-M (3060-
     // 3075): each ligand disconnects ONCE, taking ALL its bonds to
-    // marked metals with it.
-    let mut changed = false;
+    // marked metals with it. The outer walk covers the ORIGINAL
+    // atoms only (num_atoms in the reference) — the extracted H
+    // atoms sit past it and never mark.
+    let mut changed = extracted;
     for pass in [false, true] {
-        for i in 0..structure.atoms.len() {
-            if !marked[i] {
+        for (i, &is_marked) in marked.iter().enumerate() {
+            if !is_marked {
                 continue;
             }
             for ligand in neighbors_of(structure, i) {
-                if marked[ligand] == pass && disconnect_one_ligand(structure, &marked, i, ligand) {
+                if ligand < marked.len()
+                    && marked[ligand] == pass
+                    && disconnect_one_ligand(structure, &marked, i, ligand)
+                {
                     changed = true;
                 }
             }
@@ -676,7 +773,17 @@ fn disconnect_one_ligand(
     // above) plus the read-time hydrogen count, matched against the
     // registered valences at charges -1, 0, +1 in that order, the
     // FIRST match naming the new charge. A valence of 0 renormalizes
-    // a HALOGEN to -1 (any other element stays).
+    // a HALOGEN to -1 (any other element stays). The recomputed
+    // remaining-bond sum stands in for the reference's adjusted
+    // stored chem_bonds_valence (mol2atom.c:3155 subtracts only the
+    // aromatic-blend delta floor(T/2) - floor((T-D)/2)); the two
+    // readings part ways only when AROMATIC metal bonds disconnect,
+    // and the oracle cannot observe that: a metal with one aromatic
+    // bond is rejected outright (probe: "Cannot process aromatic
+    // bonds", Error -9986 / 132) and the all-bridged spellings die
+    // the same death, so the renormalization never sees a
+    // metal-aromatic survivor (probes F8/F11, recorded here as
+    // findings).
     let mut aromatic = 0u32;
     let mut cbv: i32 = 0;
     for &(from, to, order) in &structure.bonds {
