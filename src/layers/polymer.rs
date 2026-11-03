@@ -540,21 +540,25 @@ pub fn apply_frame_shift(
     interim_treated: &Treated,
     interim_ranks: &[u32],
 ) -> bool {
-    // The stereo-bond codes ride their BONDS, not their positions:
-    // the edits below remove and append bond entries, shifting every
-    // later index, so the wedge map re-keys by endpoints once the
-    // edits settle (a code whose bond the edit removed goes with it —
-    // the caps carry no wedges in anything witnessed).
-    let stereo_by_ends: std::collections::BTreeMap<(usize, usize), u8> = structure
-        .stereo_bonds
-        .iter()
-        .filter_map(|(&index, &code)| {
+    // The stereo codes leave the index-keyed map: the edits below
+    // remove and append bond entries, shifting every later index, so
+    // the map rebuilds by endpoints once the edits settle. The value
+    // keeps the drawn-first atom (the wedge origin) so each edit's
+    // capture can speak the reference's per-endpoint sign.
+    let taken = std::mem::take(&mut structure.stereo_bonds);
+    let mut stereo_by_ends: std::collections::BTreeMap<(usize, usize), (usize, u8)> = taken
+        .into_iter()
+        .filter_map(|(index, code)| {
             structure
                 .bonds
                 .get(index)
-                .map(|&(a, b, _)| ((a.min(b), a.max(b)), code))
+                .map(|&(a, b, _)| ((a.min(b), a.max(b)), (a, code)))
         })
         .collect();
+    // Codes the edits moved onto rewritten bonds, keyed by the new
+    // bond's sorted endpoints (the index map rebuilds at the end).
+    let mut moved_stereo: std::collections::BTreeMap<(usize, usize), u8> =
+        std::collections::BTreeMap::new();
     // Submitted index -> 1-based interim canonical number, and the
     // reverse (ties keep atom order, the aux numbering's stable sort).
     let mut order: Vec<usize> = (0..interim.atoms.len()).collect();
@@ -604,7 +608,48 @@ pub fn apply_frame_shift(
             continue;
         }
         for edit in &edits {
+            let (rm_a, rm_b, add_a, add_b) = *edit;
+            // The stereo rides the edit the way the reference's bond
+            // modify moves it (runichi.c OrigAtData edits):
+            // `OrigAtData_RemoveBond(rm_a, rm_b)` captures the bond's
+            // stereo value at rm_b's endpoint slot — the second
+            // half-bond removal's capture overwrites the first — and
+            // `OrigAtData_AddBond(add_a, add_b)` re-applies that one
+            // captured value verbatim to BOTH endpoints of the new
+            // bond. The capture reads +code when the drawn-first atom
+            // (the wedge origin) WAS rm_b, -code otherwise.
+            let captured: i32 = match stereo_by_ends.remove(&(rm_a.min(rm_b), rm_a.max(rm_b))) {
+                Some((origin, code)) if origin == rm_b => i32::from(code),
+                Some((_, code)) => -i32::from(code),
+                None => 0,
+            };
             polymer::apply_edit(structure, edit);
+            if captured != 0 {
+                // One sign on both endpoints has two observable
+                // shapes. Both-negative (a capture read at the
+                // negative side): the pointed-edge perception reads
+                // neither end, so the moved code carries the inert
+                // marker and the drawn origin sits at the lower end —
+                // the `/rB` reader at the higher end then speaks `P`
+                // (up from the neighbor). Both-positive: the origin
+                // sits at the higher end (`p` there); no witnessed
+                // edit produces it — a cap bond wedged from its star
+                // atom would.
+                let code = u8::try_from(captured.unsigned_abs()).unwrap_or(1);
+                let (first, second) = if captured > 0 {
+                    (add_a.max(add_b), add_a.min(add_b))
+                } else {
+                    (add_a.min(add_b), add_a.max(add_b))
+                };
+                let index = structure.bonds.len() - 1;
+                structure.bonds[index] = (first, second, 1);
+                let moved = if captured > 0 {
+                    code
+                } else {
+                    code | crate::graph::STEREO_MOVED_INERT
+                };
+                moved_stereo.insert((first.min(second), first.max(second)), moved);
+            }
         }
         let state_now = &mut treated.units[index];
         state_now.end1 = end1;
@@ -620,17 +665,25 @@ pub fn apply_frame_shift(
         }
         applied = true;
     }
-    if applied && !stereo_by_ends.is_empty() {
-        structure.stereo_bonds = stereo_by_ends
-            .into_iter()
-            .filter_map(|(ends, code)| {
-                structure
-                    .bonds
-                    .iter()
-                    .position(|&(a, b, _)| (a.min(b), a.max(b)) == ends)
-                    .map(|index| (index, code))
-            })
-            .collect();
+    if applied {
+        // Every surviving code re-keys onto the settled bond list:
+        // the untouched codes by their (unchanged) endpoints, the
+        // moved ones onto the rewritten bonds.
+        let untouched = stereo_by_ends.into_iter().filter_map(|(ends, (_, code))| {
+            structure
+                .bonds
+                .iter()
+                .position(|&(a, b, _)| (a.min(b), a.max(b)) == ends)
+                .map(|index| (index, code))
+        });
+        let moved = moved_stereo.into_iter().filter_map(|(ends, code)| {
+            structure
+                .bonds
+                .iter()
+                .position(|&(a, b, _)| (a.min(b), a.max(b)) == ends)
+                .map(|index| (index, code))
+        });
+        structure.stereo_bonds = untouched.chain(moved).collect();
     }
     applied
 }
@@ -666,5 +719,92 @@ impl PolymerLayer {
     /// The polymer-related star count (the hide's n_pzz).
     pub fn star_count(&self) -> usize {
         self.treated.pzz.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::options::PolymersMode;
+
+    /// Zz–C–C*(CH3)(–)–… : a methyl-branched CRU whose wedge bond
+    /// (3→2) IS the unit's senior backbone bond — the frame shift
+    /// rewrites that very bond, and the wedge's fate is the contract
+    /// (witnessed on oneb/cru-methyl-stereo, oracle 1.07.5).
+    const METHYL_STEREO_CRU: &str = "cru-methyl-stereo.mol\n  chemomer\n\n  \
+7  6  0  0  0  0  0  0  0  0999 V2000\n   \
+12.0000   17.0000    0.0000 Zz  0  0  0  0  0  0  0  0  0  0  0  0  0\n   \
+72.0000   17.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   \
+132.0000   17.0000    0.0000 C   0  0  1  2  0  0  0  0  0  0  0  0  0\n   \
+192.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   \
+192.0000   62.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   \
+252.0000   62.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   \
+312.0000   62.0000    0.0000 Zz  0  0  0  0  0  0  0  0  0  0  0  0  0\n  \
+1  2  1  0  0  0  0\n  3  2  1  1  0  0  0\n  3  4  1  0  0  0  0\n  \
+3  5  1  0  0  0  0\n  5  6  1  0  0  0  0\n  6  7  1  0  0  0  0\n\
+M  STY  1   1 SRU\nM  SCN  1   1  HT\nM  SAL   1  5   2   3   4   5   6\n\
+M  SBL   1  2   1   6\nM  SMT   1 n\nM  END\n";
+
+    /// The senior-bond rewrite moves the wedge: the edit pair captures
+    /// the old bond's stereo at the second edit atom (`OrigAtData_
+    /// RemoveBond`'s second half-bond capture) and re-applies it to
+    /// BOTH endpoints of the join bond — both-negative, so the echo's
+    /// `/rB` speaks `P2` at the higher end (the wedge points from the
+    /// join's lower atom) while the identifier loses the parity
+    /// outright (the pointed-edge perception reads neither end; the
+    /// new bond runs CH2–CH2 besides). Oracle bytes: the aux main
+    /// block's `P2s5` entry, the unedited echo keeping `p2`.
+    #[test]
+    fn the_frame_shift_moves_the_wedge_onto_the_join_bond_parity_inert() {
+        let options = crate::Options {
+            polymers: PolymersMode::Modern,
+            ..crate::Options::default()
+        };
+        let engine = crate::Engine::with_options(METHYL_STEREO_CRU, options).expect("parses");
+        let inchi = engine.inchi_string().expect("identifier");
+        assert_eq!(
+            inchi, "InChI=1B/C5H10Zz2/c1-5(7)3-2-4-6/h5H,2-4H2,1H3/z101-1-5(7-5,6-4)",
+            "the moved wedge defines no center: no /t segment"
+        );
+        let aux = engine.aux_string().expect("aux");
+        assert!(
+            aux.contains("/rB:;s1;s3;s3;P2s5;s2;"),
+            "the moved mark rides the join bond: {aux}"
+        );
+        assert!(
+            aux.contains("/rB:s1;p2;s3;s3;s5;s6;"),
+            "the unedited echo keeps the drawn wedge: {aux}"
+        );
+    }
+
+    /// `-SAtZZ` does not recover the parity: the moved code is inert
+    /// by construction (both endpoints read negative in the
+    /// reference's moved state), so even a gate that admits
+    /// Zz-adjacent centers finds nothing — the oracle records the
+    /// same identifier with and without the flag.
+    #[test]
+    fn satzz_does_not_recover_the_moved_parity() {
+        let options = crate::Options {
+            polymers: PolymersMode::Modern,
+            ..crate::Options::default()
+        }
+        .with_stereo_at_zz();
+        let engine = crate::Engine::with_options(METHYL_STEREO_CRU, options).expect("parses");
+        let inchi = engine.inchi_string().expect("identifier");
+        assert_eq!(
+            inchi, "InChI=1B/C5H10Zz2/c1-5(7)3-2-4-6/h5H,2-4H2,1H3/z101-1-5(7-5,6-4)",
+            "SAtZZ admits Zz-adjacent centers but the moved code reads nowhere"
+        );
+    }
+
+    /// The drawn origin of the moved code sits at the join's lower
+    /// atom: `visible_stereo` masks the marker the rB writer never
+    /// sees, `is_moved_stereo` marks what the perception skips.
+    #[test]
+    fn the_moved_marker_masks_only_the_perception() {
+        let code = 1 | crate::graph::STEREO_MOVED_INERT;
+        assert_eq!(crate::graph::visible_stereo(code), 1);
+        assert!(crate::graph::is_moved_stereo(code));
+        assert_eq!(crate::graph::visible_stereo(6), 6);
+        assert!(!crate::graph::is_moved_stereo(6));
     }
 }

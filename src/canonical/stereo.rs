@@ -265,19 +265,27 @@ fn atom_parity(
 }
 /// Atoms the wedge codes point FROM (the code's first atom), with the
 /// bond index and the direction (`Some(1)` = dash, `Some(0)` = up,
-/// `None` = the wiggly code 4 — the UNKNOWN parity mark).
+/// `None` = the wiggly code 4 — the UNKNOWN parity mark). A
+/// frame-shift-moved code ([`crate::graph::STEREO_MOVED_INERT`]) never
+/// defines a center: the reference's moved state carries the captured
+/// stereo on BOTH endpoint slots with one sign, and the pointed-edge
+/// perception reads only non-negative slots — the parity is lost
+/// outright.
 fn wedged_centers(structure: &Structure) -> Vec<(usize, usize, Option<u32>)> {
     let mut out = Vec::new();
     for (&bond_index, &code) in &structure.stereo_bonds {
         let Some(&(from, _, _)) = structure.bonds.get(bond_index) else {
             continue;
         };
-        let down = match code {
+        let down = match crate::graph::visible_stereo(code) {
             6 => Some(1),
             1 => Some(0),
             4 => None,
             _ => continue,
         };
+        if crate::graph::is_moved_stereo(code) {
+            continue;
+        }
         out.push((from, bond_index, down));
     }
     out.sort();
