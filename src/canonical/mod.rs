@@ -35,7 +35,7 @@ pub use search::{
     base_symmetry, canonical_ranks, canonical_ranks_and_symmetry,
     canonical_ranks_and_symmetry_stereo, canonical_table,
 };
-pub use tautomer::group_membership;
+pub use tautomer::{group_membership, main_canon_groups};
 
 use crate::graph::Structure;
 

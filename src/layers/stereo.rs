@@ -35,7 +35,7 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
     let mask = canonical::tautomer::endpoint_mask(structure, &counts);
     let no_taut = canonical::tautomer::without_mobile_h(&counts, &mask);
     let symmetry = canonical::base_symmetry(&adjacency, &invariants);
-    let groups = canonical::group_membership(structure, &counts);
+    let groups = canonical::main_canon_groups(structure, &counts);
     let base_ranks = canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
     // The ligand-identity classes the candidate filter judges with
     // (the reference's nSymmRank): the H-aware constitutional
@@ -63,6 +63,7 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
         &base_ranks,
         tautomeric,
         options.stereo_at_zz,
+        options.do_not_add_h,
     );
     let (ranks, symmetry) = match &verdict {
         Some(verdict) => (verdict.ranks.clone(), verdict.symmetry.clone()),
@@ -200,7 +201,7 @@ impl LayerEmitter for BLayer {
         let counts = crate::layers::standardization::adjusted_hydrogens(structure);
         let (adjacency, invariants) = canonical::graph_of(structure);
         let mask = canonical::tautomer::endpoint_mask(structure, &counts);
-        let groups = canonical::group_membership(structure, &counts);
+        let groups = canonical::main_canon_groups(structure, &counts);
         let ranks = canonical::canonical_ranks(
             &adjacency,
             &invariants,

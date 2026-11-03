@@ -1288,7 +1288,9 @@ pub fn endpoint_mask(structure: &Structure, hydrogens: &[u32]) -> Vec<bool> {
 
 /// The mobile groups rank-free, as (hydrogen count, member atoms) —
 /// the terminal-compare rows inside the canonicalization search (the
-/// reference's t-group CT section).
+/// reference's t-group CT section). Unfiltered: the FixedH second pass
+/// reads this state (a pinned charge-only group reorders the /f
+/// numbering, breadth2-429).
 pub fn group_membership(structure: &Structure, hydrogens: &[u32]) -> Vec<(u32, Vec<usize>)> {
     let context = Context::new(structure, hydrogens);
     let state = fresh_state(structure.atoms.len());
@@ -1299,6 +1301,24 @@ pub fn group_membership(structure: &Structure, hydrogens: &[u32]) -> Vec<(u32, V
             let count = members.iter().map(|&m| hydrogens[m]).sum();
             (count, members)
         })
+        .collect()
+}
+
+/// The main-canonicalization group rows: [`group_membership`] with the
+/// groups holding NO mobile hydrogen dropped. The reference's
+/// CountTautomerGroups throws the charge-only registrations out
+/// before any main canonicalization reads the group list
+/// (IGNORE_TGROUP_WITHOUT_H: `num[0] == num[1]` — mobile units equal
+/// mobile minus, i.e. zero net H; the instrumented state for the
+/// DoNotAddH sulfate says `num_t_groups = 0` outright). Without the
+/// drop the zero-H rows perturb the terminal compare and the sulfate
+/// O₄/O₃ tie numbers the wrong way round (the within-class ordering
+/// the aux /N: speaks). The FixedH second pass keeps the raw list —
+/// its breadth2-429 deltas ride the charge-only registration.
+pub fn main_canon_groups(structure: &Structure, hydrogens: &[u32]) -> Vec<(u32, Vec<usize>)> {
+    group_membership(structure, hydrogens)
+        .into_iter()
+        .filter(|&(count, _)| count > 0)
         .collect()
 }
 
@@ -1410,6 +1430,16 @@ fn fresh_state(n: usize) -> Registration {
 /// and re-marking bonds, to a fixpoint. Returns the co-member
 /// adjacency and the settled registration state (the group walk
 /// seeds from it).
+///
+/// The bound: the reference's master loop carries no iteration
+/// counter at all — its guards are pure fixpoint conditions
+/// (`for (taut_found = 0; 0 < MarkTautomerGroups(...); taut_found++)`
+/// inside `do {...} while (taut_found && !bError)`, ichi_bns.c
+/// 5671–5727: termination on no-change or error, nothing else). The
+/// `0..8` here is that fixpoint plus a safety bound the corpus never
+/// touches: the whole recorded corpus converges by pass 6 (the
+/// pass histogram over the 5600-fixture suite: 944k entries at 0,
+/// 642k at 1, 248k at 2, 24k at 3, 4.4k at 4, 540 at 5, 153 at 6).
 fn build_links(context: &Context) -> (Vec<BTreeSet<usize>>, Registration) {
     let n = context.structure.atoms.len();
     let mut state = Registration {
@@ -2428,7 +2458,14 @@ struct AnchorSpec {
     /// The seed→centerpoint bond classes (the C's first bond-type
     /// test). The PT_13_00/PT_18_00 blocks also admit real singles;
     /// the BOND_ALT_13 class (single/triple) never occurs in our
-    /// structures — no ride mark produces it.
+    /// structures — no ride mark produces it. Oracle-verified with
+    /// probes (propyne, diacetylene, propargylamine, allene,
+    /// butenyne, cyanoform under both modes): the BNS flows resolve
+    /// to plain SINGLE/DOUBLE/TRIPLE orders everywhere (the ALT_13
+    /// mark needs an edge whose flows are {0, 2}, ichi_bns.c
+    /// 571–577) and the engine reproduces every probe identifier
+    /// byte-for-byte in both modes; no recorded corpus input reaches
+    /// the class either.
     seed_bonds: &'static [BondType],
     centerpoint_elements: &'static [&'static str],
     /// The centerpoint's heavy-atom valence when the flag pins it

@@ -27,7 +27,7 @@ impl LayerEmitter for ConnectionLayer {
         let (adjacency, invariants) = canonical::graph_of(structure);
         let counts = crate::layers::standardization::adjusted_hydrogens(structure);
         let mask = canonical::tautomer::endpoint_mask(structure, &counts);
-        let groups = canonical::group_membership(structure, &counts);
+        let groups = canonical::main_canon_groups(structure, &counts);
         let table = canonical::canonical_table(
             &adjacency,
             &invariants,

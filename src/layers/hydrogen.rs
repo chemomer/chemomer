@@ -32,7 +32,7 @@ pub fn canonical_ranks_for(structure: &Structure) -> Vec<u32> {
     let (adjacency, invariants) = crate::canonical::graph_of(structure);
     let counts = standardization::adjusted_hydrogens(structure);
     let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
-    let groups = crate::canonical::group_membership(structure, &counts);
+    let groups = crate::canonical::main_canon_groups(structure, &counts);
     crate::canonical::canonical_ranks(
         &adjacency,
         &invariants,
