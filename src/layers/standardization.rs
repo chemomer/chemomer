@@ -174,16 +174,19 @@ pub fn normalize_internal_salts(structure: &mut Structure) {
             // The reference never re-derives H after moving a charge:
             // the neutralized anion stays at its anionic reading
             // (zero implicit H), the cation loses its + to the pair,
-            // and the pair bond reads the neutral double (the
-            // >N⁺–O⁻ ⇒ >N=O promotion — the nitro/N-oxide standard
-            // skeleton the tautomer arithmetic reads).
+            // and the pair bond takes the promotion INCREMENT — the
+            // charged terminal-pair types 1/4/7/8/9 all raise the
+            // bond one order (`bond_type++`: the nitro/N-oxide
+            // N(IV)-O(-) single rises to the neutral double; the
+            // azide N(-)=N(+)(IV) double rises to the N#N(V) triple,
+            // the witnessed breadth2-976 read-back cbv 5/3).
             structure.atoms[anion].charge = 0;
             structure.atoms[anion].h_pinned = true;
             structure.atoms[site].charge = 0;
             for bond in structure.bonds.iter_mut() {
                 let (from, to) = (bond.0, bond.1);
                 if (from == anion && to == site) || (from == site && to == anion) {
-                    bond.2 = 2;
+                    bond.2 = (bond.2.min(3) + 1).min(3);
                 }
             }
             consumed[anion] = true;

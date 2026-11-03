@@ -101,7 +101,14 @@ pub fn aux_info(
     // super-group). +4 a hard (DE)PROTONATION moved a proton. The
     // salt and hard bits count only when the +1 did (the reference
     // adds them under `if (io.bTautomeric)`); charge-only c-point
-    // registrations are not t-groups and count nothing.
+    // registrations are not t-groups and count nothing. DATED DEBT
+    // (2026-11-04): the reference's bit reads bTautFlagsDone &
+    // TG_FLAG_ALL_SALT_DONE — the post-taut-cycle salt phase's
+    // completions — and on the salt-tautomeric breadth fixtures the
+    // engine's settled state diverges from the oracle's norm state
+    // (the proton rides double bonds the oracle's per-atom H
+    // bookkeeping leaves single), so a registration-flag port cannot
+    // agree on both families; the group-shape reading stands.
     let real_h = |group: &crate::canonical::tautomer::MobileGroup| group.count > group.charge;
     let tautomeric = groups.iter().any(&real_h);
     let salt_merged = groups.iter().any(|group| real_h(group) && group.charge > 0);

@@ -1517,115 +1517,117 @@ pub(crate) fn resolved_chem_valence(structure: &Structure, counts: &[u32]) -> Ve
     };
     // Type 18, zero-charge branch — gated on the structure-wide
     // neutral C-II census (the reference counts 2-bond valence-4
-    // carbons before any pair type may fire). Atoms in ascending
-    // order (the reference's scan); each promotion feeds the next
-    // gate's valences.
+    // carbons and opens the promotion block only when the census
+    // holds one — `(num_C_plus && num_C_minus) || num_C_II`, the
+    // charged twins riding the salt normalization). Atoms in
+    // ascending order (the reference's scan); each promotion feeds
+    // the next gate's valences. The census DECREMENTS per promotion
+    // (num_C_II--) but nothing re-checks it inside the scan: every
+    // matching N promotes — the witnessed fluoroamine cages
+    // (breadth3-142/-1053: census 1, both promotions fire).
     let census_ii = (0..n).filter(|&atom| carbon_ii(atom, &orders)).count();
-    let mut promotions = 0;
-    for atom in 0..n {
-        let record = &structure.atoms[atom];
-        if record.charge != 0 || counts[atom] != 0 || element(atom) != 7 {
-            continue;
-        }
-        if census_ii <= promotions {
-            break; // the census drained
-        }
-        let bonds = &adjacency[atom];
-        if bonds.len() != 2 || bond_valence(atom, &orders) != 3 {
-            continue;
-        }
-        let (a, b) = {
-            let first = structure.bonds[bonds[0]];
-            let second = structure.bonds[bonds[1]];
-            let other = |bond: (usize, usize, u32)| {
-                if bond.0 == atom {
-                    bond.1
+    if census_ii > 0 {
+        for atom in 0..n {
+            let record = &structure.atoms[atom];
+            if record.charge != 0 || counts[atom] != 0 || element(atom) != 7 {
+                continue;
+            }
+            let bonds = &adjacency[atom];
+            if bonds.len() != 2 || bond_valence(atom, &orders) != 3 {
+                continue;
+            }
+            let (a, b) = {
+                let first = structure.bonds[bonds[0]];
+                let second = structure.bonds[bonds[1]];
+                let other = |bond: (usize, usize, u32)| {
+                    if bond.0 == atom {
+                        bond.1
+                    } else {
+                        bond.0
+                    }
+                };
+                (other(first), other(second))
+            };
+            let va = bond_valence(a, &orders) + counts[a] as i32;
+            let vb = bond_valence(b, &orders) + counts[b] as i32;
+            if element(a) != 6 || element(b) != 6 {
+                continue;
+            }
+            if structure.atoms[a].charge != 0 || structure.atoms[b].charge != 0 {
+                continue;
+            }
+            if va + vb != 6 || (va - vb).abs() > 2 {
+                continue;
+            }
+            // The reference's side split: v == 4 (or v == 3 over a single
+            // bond) reads the Cm side; v == 2 (or v == 3 over a double)
+            // the Cp side. BOTH sides pull toward the triple: each side
+            // with v < 4 takes delta = 4 − v on its bond (the reference's
+            // promote loop runs over {Cm, Cp} — the C(IV)=N-C(II) shape
+            // moves nothing on the Cm side, the C(3,3)-N shape moves one
+            // unit on each).
+            let side = |index: usize, bond: usize| -> Option<bool> {
+                let v = if index == 0 { va } else { vb };
+                let order = orders[bond];
+                if v == 4 || (v == 3 && order == 1) {
+                    Some(false) // Cm
+                } else if v == 2 || (v == 3 && order == 2) {
+                    Some(true) // Cp
                 } else {
-                    bond.0
+                    None
                 }
             };
-            (other(first), other(second))
-        };
-        let va = bond_valence(a, &orders) + counts[a] as i32;
-        let vb = bond_valence(b, &orders) + counts[b] as i32;
-        if element(a) != 6 || element(b) != 6 {
-            continue;
-        }
-        if structure.atoms[a].charge != 0 || structure.atoms[b].charge != 0 {
-            continue;
-        }
-        if va + vb != 6 || (va - vb).abs() > 2 {
-            continue;
-        }
-        // The reference's side split: v == 4 (or v == 3 over a single
-        // bond) reads the Cm side; v == 2 (or v == 3 over a double)
-        // the Cp side. BOTH sides pull toward the triple: each side
-        // with v < 4 takes delta = 4 − v on its bond (the reference's
-        // promote loop runs over {Cm, Cp} — the C(IV)=N-C(II) shape
-        // moves nothing on the Cm side, the C(3,3)-N shape moves one
-        // unit on each).
-        let side = |index: usize, bond: usize| -> Option<bool> {
-            let v = if index == 0 { va } else { vb };
-            let order = orders[bond];
-            if v == 4 || (v == 3 && order == 1) {
-                Some(false) // Cm
-            } else if v == 2 || (v == 3 && order == 2) {
-                Some(true) // Cp
-            } else {
-                None
+            let orientation = match (side(0, bonds[0]), side(1, bonds[1])) {
+                (Some(true), Some(false)) => Some((a, b)),
+                (Some(false), Some(true)) => Some((b, a)),
+                _ => None,
+            };
+            let Some((cp, cm)) = orientation else {
+                continue;
+            };
+            let _cp_bond = *bonds
+                .iter()
+                .find(|&&bond| {
+                    let (from, to, _) = structure.bonds[bond];
+                    (from == atom && to == cp) || (from == cp && to == atom)
+                })
+                .expect("the N–C bond is in the adjacency");
+            if adjacency[cp].len() + counts[cp] as usize != 2 {
+                continue;
             }
-        };
-        let orientation = match (side(0, bonds[0]), side(1, bonds[1])) {
-            (Some(true), Some(false)) => Some((a, b)),
-            (Some(false), Some(true)) => Some((b, a)),
-            _ => None,
-        };
-        let Some((cp, cm)) = orientation else {
-            continue;
-        };
-        let _cp_bond = *bonds
-            .iter()
-            .find(|&&bond| {
-                let (from, to, _) = structure.bonds[bond];
-                (from == atom && to == cp) || (from == cp && to == atom)
-            })
-            .expect("the N–C bond is in the adjacency");
-        if adjacency[cp].len() + counts[cp] as usize != 2 {
-            continue;
-        }
-        // The C-II's far neighbor must not be a nitrogen (the
-        // reference's nitrile guard).
-        let far = adjacency[cp]
-            .iter()
-            .map(|&bond| {
-                let (from, to, _) = structure.bonds[bond];
-                if from == cp {
-                    to
-                } else {
-                    from
+            // The C-II's far neighbor must not be a nitrogen (the
+            // reference's nitrile guard).
+            let far = adjacency[cp]
+                .iter()
+                .map(|&bond| {
+                    let (from, to, _) = structure.bonds[bond];
+                    if from == cp {
+                        to
+                    } else {
+                        from
+                    }
+                })
+                .find(|&other| other != atom);
+            if matches!(far, Some(other) if element(other) == 7) {
+                continue;
+            }
+            // The reference's promote loop over {Cm, Cp}: each side with
+            // v < 4 takes delta = 4 − v on its N–C bond.
+            for side_atom in [cm, cp] {
+                let v_side = bond_valence(side_atom, &orders) + counts[side_atom] as i32;
+                let delta = (4 - v_side).max(0);
+                if delta > 0 {
+                    let side_bond = *bonds
+                        .iter()
+                        .find(|&&bond| {
+                            let (from, to, _) = structure.bonds[bond];
+                            (from == atom && to == side_atom) || (from == side_atom && to == atom)
+                        })
+                        .expect("the N–C bond is in the adjacency");
+                    orders[side_bond] += delta as u32;
                 }
-            })
-            .find(|&other| other != atom);
-        if matches!(far, Some(other) if element(other) == 7) {
-            continue;
-        }
-        // The reference's promote loop over {Cm, Cp}: each side with
-        // v < 4 takes delta = 4 − v on its N–C bond.
-        for side_atom in [cm, cp] {
-            let v_side = bond_valence(side_atom, &orders) + counts[side_atom] as i32;
-            let delta = (4 - v_side).max(0);
-            if delta > 0 {
-                let side_bond = *bonds
-                    .iter()
-                    .find(|&&bond| {
-                        let (from, to, _) = structure.bonds[bond];
-                        (from == atom && to == side_atom) || (from == side_atom && to == atom)
-                    })
-                    .expect("the N–C bond is in the adjacency");
-                orders[side_bond] += delta as u32;
             }
         }
-        promotions += 1;
     }
     // Aromatic matching over the (possibly promoted) orders.
     let mut degree = vec![0i32; n];
