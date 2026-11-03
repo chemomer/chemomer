@@ -142,9 +142,15 @@ pub fn aux_info(
     ) {
         // SNon withholds the stereo layers and the inverted-stereo
         // fields alike (ichiparm.c:248–253): the block never prints
-        // under that mode.
+        // under that mode. The stereo-TYPE modes (SRel/SRac/SUCF)
+        // suppress it too — their rows are already the lexicographic
+        // minimum, so there is no inverted pass to speak of
+        // (witnessed: the CRU recordings carry /it:im under the
+        // default and under SUU, never under SRel/SRac/SUCF).
         let marker = verdict.sign != 0
             && !options.no_stereo
+            && options.requested_stereo_type().is_none()
+            && !options.chiral_flag_stereo
             && crate::canonical::stereo::inverted_marker(&verdict);
         ranks_aux = verdict.ranks;
         symmetry = verdict.symmetry;
@@ -373,7 +379,7 @@ pub fn aux_info(
         out.push_str(&text.join(","));
     }
 
-    out.push_str(&reversibility_block(original));
+    out.push_str(&reversibility_block(original, options.do_not_add_h));
     Ok(out)
 }
 
@@ -443,8 +449,12 @@ fn kept_ion_pair_charges(original: &Structure) -> Option<std::collections::HashM
 }
 
 /// The `/rA` `/rB` `/rC` echo of the submitted structure, in the
-/// input's own atom order, explicit hydrogens included.
-pub(crate) fn reversibility_block(original: &Structure) -> String {
+/// input's own atom order, explicit hydrogens included. Under
+/// DoNotAddH the H-count codes are ignored at read (ichiparm.c
+/// "only drawn hydrogens exist") — the echoed atom reads zero H, so
+/// a valence deficiency prints the unusual-valence digit (a CH2
+/// chain echoes `C2`, the single-bonded carbon `C1`).
+pub(crate) fn reversibility_block(original: &Structure, do_not_add_h: bool) -> String {
     let n = original.atoms.len();
     // The atom-block prefix letter records the counts-line chiral
     // flag (the reference's WriteOrigAtoms: `c` chiral, `n`
@@ -460,7 +470,11 @@ pub(crate) fn reversibility_block(original: &Structure) -> String {
     for (index, atom) in original.atoms.iter().enumerate() {
         let el = crate::canonical::protons::el_number(&atom.element).unwrap_or(0);
         let cbv = echo_context.cbv2[index] / 2;
-        let num_h = crate::canonical::metals::get_num_h(el, atom.charge, cbv);
+        let num_h = if do_not_add_h {
+            0
+        } else {
+            crate::canonical::metals::get_num_h(el, atom.charge, cbv)
+        };
         let valence = crate::canonical::metals::needed_unusual_valence(
             el,
             atom.charge,

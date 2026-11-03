@@ -540,6 +540,18 @@ pub fn apply_frame_shift(
     interim_treated: &Treated,
     interim_ranks: &[u32],
 ) -> bool {
+    // The stereo-bond codes ride their BONDS, not their positions:
+    // the edits below remove and append bond entries, shifting every
+    // later index, so the wedge map re-keys by endpoints once the
+    // edits settle (a code whose bond the edit removed goes with it —
+    // the caps carry no wedges in anything witnessed).
+    let stereo_by_ends: std::collections::BTreeMap<(usize, usize), u8> = structure
+        .stereo_bonds
+        .iter()
+        .filter_map(|(&index, &code)| {
+            structure.bonds.get(index).map(|&(a, b, _)| ((a.min(b), a.max(b)), code))
+        })
+        .collect();
     // Submitted index -> 1-based interim canonical number, and the
     // reverse (ties keep atom order, the aux numbering's stable sort).
     let mut order: Vec<usize> = (0..interim.atoms.len()).collect();
@@ -604,6 +616,18 @@ pub fn apply_frame_shift(
             }
         }
         applied = true;
+    }
+    if applied && !stereo_by_ends.is_empty() {
+        structure.stereo_bonds = stereo_by_ends
+            .into_iter()
+            .filter_map(|(ends, code)| {
+                structure
+                    .bonds
+                    .iter()
+                    .position(|&(a, b, _)| (a.min(b), a.max(b)) == ends)
+                    .map(|index| (index, code))
+            })
+            .collect();
     }
     applied
 }

@@ -829,7 +829,10 @@ impl Engine {
             out.push_str("/CRV:");
             out.push_str(&merge_runs(fields).join(";"));
         }
-        out.push_str(&crate::aux::reversibility_block(&self.original));
+        out.push_str(&crate::aux::reversibility_block(
+            &self.original,
+            self.options.do_not_add_h,
+        ));
         Ok(out)
     }
 

@@ -1496,3 +1496,210 @@ fn the_polymer_layers_match_the_oracle() {
     );
     println!("polymer gate: pass {pass}, rejections {rejects}, total {total}");
 }
+
+/// The 1B × option interplay gate: the corpus's oneb-interplay
+/// tranche records the whole beta-flavor × non-standard-option
+/// matrix — the two 1B sources (the >1024-atom molfiles the writer
+/// marks unconditionally, and the polymer/star flip) under the whole
+/// option surface (SNon, FixedH, DoNotAddH, RecMet, the stereo
+/// modifiers, the KET/15T/PT_* tautomer flags, the SAtZZ gate, the
+/// NoFrameShift scheme, and the recorded pairs). Mode words carry the
+/// class prefix (`large`, `polymers`, `polymers105`, `npzz`); the
+/// class flags map to the engine's option builders, the option words
+/// to their builders.
+///
+/// Every cell asserts three invariants on the recorded strings: the
+/// identifier speaks the beta prefix (the writer marks `1B` before
+/// consulting the standard flag — no option line unmarks it), the
+/// recorded key derives from the recorded identifier (the flag letter
+/// B over a beta flavor), and an SNon cell truncates at the stereo
+/// boundary. Where an extension recording exists (the baseline cells)
+/// the XHash1/XHash2 lines and the MergeHash line must derive from
+/// the same digests. The engine re-derives every cell of the
+/// polymer-class fixtures byte-for-byte; the large fixtures — too
+/// heavy to sweep in a debug test run — pin the baseline and the
+/// fixedh+snon composition, the rest of their cells standing on the
+/// string-level invariants and the shared emitter code.
+#[test]
+fn the_oneb_interplay_matches_the_oracle() {
+    let dir = suite_dir();
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/oneb-interplay.json")) else {
+        println!("oneb-interplay gate: no tranche recorded; skipped");
+        return;
+    };
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(&text).expect("valid oneb-interplay fixtures");
+    assert!(
+        !cases.is_empty(),
+        "the oneb-interplay file carries no fixtures"
+    );
+
+    fn mode_options(mode: &str) -> chemomer::Options {
+        use chemomer::options::{FrameShift, PolymersMode};
+        let mut options = chemomer::Options::default();
+        for part in mode.split('+') {
+            match part {
+                // The class words. `large` maps to the default options
+                // — the reader cap the flag lifts does not exist in
+                // this engine, and the writer mark is atom-count
+                // driven.
+                "large" => {}
+                "polymers" => options.polymers = PolymersMode::Modern,
+                "polymers105" => options.polymers = PolymersMode::Legacy,
+                "npzz" => options.npzz = true,
+                "fs-none" => options.frame_shift = FrameShift::None,
+                "snon" => options = options.with_no_stereo(),
+                "fixedh" => options = options.with_fixed_h(),
+                "donotaddh" => options = options.with_do_not_add_h(),
+                "recmet" => options = options.with_rec_met(),
+                "srel" => options = options.with_relative_stereo(),
+                "srac" => options = options.with_racemic_stereo(),
+                "sucf" => options = options.with_chiral_flag_stereo(),
+                "suu" => options = options.with_include_unknown_stereo(),
+                "sluud" => options = options.with_distinct_unknown_undefined(),
+                "ket" => options = options.with_ket(),
+                "15t" => options = options.with_15t(),
+                "pt22" => options = options.with_pt_22_00(),
+                "pt16" => options = options.with_pt_16_00(),
+                "pt06" => options = options.with_pt_06_00(),
+                "pt39" => options = options.with_pt_39_00(),
+                "pt13" => options = options.with_pt_13_00(),
+                "pt18" => options = options.with_pt_18_00(),
+                "satzz" => options = options.with_stereo_at_zz(),
+                other => panic!("oneb-interplay mode word {other:?} unmapped"),
+            }
+        }
+        options
+    }
+
+    // The large fixtures' cells engine-derive on these modes only;
+    // the rest stand on the string-level invariants (a debug run over
+    // 26 × 1026-atom cells costs minutes each).
+    const LARGE_ENGINE_PINS: [&str; 2] = ["large", "large+fixedh+snon"];
+    const LARGE_IDS: [&str; 2] = ["oneb/polyethylene-c1025", "oneb/polyethylene-c1025-3methyl"];
+
+    let mut engine_cells = 0;
+    let mut string_cells = 0;
+    let mut failures: Vec<String> = Vec::new();
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let molfile = case["molfile"].as_str().expect("molfile");
+        let modes = case["modes"].as_object().expect("modes");
+        for (mode, recording) in modes {
+            let Some(recorded_inchi) = recording.get("inchi").and_then(|v| v.as_str()) else {
+                // A recorded rejection: the engine must refuse the
+                // structure with the oracle's message.
+                let expected = recording
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .expect("error or inchi recording");
+                match chemomer::Engine::with_options(molfile, mode_options(mode)) {
+                    Ok(_) => failures.push(format!(
+                        "{id} [{mode}]: assembled an identifier; the oracle rejects with {expected:?}"
+                    )),
+                    Err(error) if error.message() == expected => {}
+                    Err(error) => failures.push(format!(
+                        "{id} [{mode}]: error {:?} != oracle {expected:?}",
+                        error.message()
+                    )),
+                }
+                continue;
+            };
+            string_cells += 1;
+
+            // 1. The unconditional beta mark: no option line unmarks
+            //    the flavor (the writer flags beta before consulting
+            //    the standard flag).
+            if !recorded_inchi.starts_with("InChI=1B/") {
+                failures.push(format!("{id} [{mode}]: not beta: {recorded_inchi}"));
+            }
+            // 2. The key over the beta identifier, flag letter B.
+            if let Some(recorded_key) = recording.get("key").and_then(|v| v.as_str()) {
+                match chemomer::key::inchikey(recorded_inchi) {
+                    Ok(key) if key == recorded_key => {}
+                    Ok(key) => {
+                        failures.push(format!("{id} [{mode}]: key {key} != oracle {recorded_key}"))
+                    }
+                    Err(error) => failures.push(format!("{id} [{mode}]: {error}")),
+                }
+            }
+            // 3. SNon truncates at the stereo boundary.
+            if mode.split('+').any(|part| part == "snon") {
+                let stereo: Vec<&str> = recorded_inchi
+                    .split('/')
+                    .skip(1)
+                    .filter(|segment| {
+                        segment
+                            .chars()
+                            .next()
+                            .is_some_and(|first| matches!(first, 'b' | 't' | 'm' | 's'))
+                    })
+                    .collect();
+                if !stereo.is_empty() {
+                    failures.push(format!("{id} [{mode}]: snon kept {stereo:?}"));
+                }
+            }
+            // 4. The 256-bit extensions over the beta flavor.
+            if recording.get("xhash1").and_then(|v| v.as_str()).is_some() {
+                let recorded_x1 = recording["xhash1"].as_str().expect("xhash1");
+                let recorded_x2 = recording["xhash2"].as_str().expect("xhash2");
+                let recorded_merged = recording["merged"].as_str().expect("merged");
+                match chemomer::key::key_extensions(recorded_inchi) {
+                    Ok((key, x1, x2)) => {
+                        let merged = chemomer::key::merged_line(&key, Some(&x1), Some(&x2));
+                        if x1 != recorded_x1 || x2 != recorded_x2 || merged != recorded_merged {
+                            failures.push(format!(
+                                "{id} [{mode}]: extensions x1 {x1} != {recorded_x1} or \
+                                 x2 {x2} != {recorded_x2} or merged {merged:?} != {recorded_merged:?}"
+                            ));
+                        }
+                    }
+                    Err(error) => failures.push(format!("{id} [{mode}]: {error}")),
+                }
+            }
+            // 5. The engine re-derivation: every cell of the polymer
+            //    classes, the pinned modes of the large ones. The
+            //    recorded aux line rides along where present.
+            let is_large = LARGE_IDS.contains(&id);
+            if !is_large || LARGE_ENGINE_PINS.contains(&mode.as_str()) {
+                engine_cells += 1;
+                match chemomer::Engine::with_options(molfile, mode_options(mode)) {
+                    Ok(engine) => match engine.inchi_string() {
+                        Ok(assembled) if assembled == recorded_inchi => {
+                            if let Some(recorded_aux) =
+                                recording.get("aux").and_then(|v| v.as_str())
+                            {
+                                match engine.aux_string() {
+                                    Ok(aux) if aux == recorded_aux => {}
+                                    Ok(aux) => failures.push(format!(
+                                        "{id} [{mode}]: aux {aux:?} != oracle {recorded_aux:?}"
+                                    )),
+                                    Err(error) => failures
+                                        .push(format!("{id} [{mode}]: aux errored: {error}")),
+                                }
+                            }
+                        }
+                        Ok(assembled) => failures.push(format!(
+                            "{id} [{mode}]: assembled {assembled:?} != oracle {recorded_inchi:?}"
+                        )),
+                        Err(error) => failures.push(format!("{id} [{mode}]: {error}")),
+                    },
+                    Err(error) => failures.push(format!(
+                        "{id} [{mode}]: errored {:?}; oracle spoke {recorded_inchi:?}",
+                        error.message()
+                    )),
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} oneb-interplay mismatch(es):\n{}\n(engine cells: {engine_cells}, string cells: {string_cells})",
+        failures.len(),
+        failures.join("\n"),
+    );
+    println!(
+        "oneb-interplay gate: {engine_cells} engine cells, {string_cells} string cells over {} fixtures",
+        cases.len()
+    );
+}
