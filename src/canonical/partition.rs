@@ -135,6 +135,15 @@ impl Partition {
     /// Position span of the first non-singleton cell, if any.
     pub fn first_nonsingleton_cell(&self) -> Option<(usize, usize)> {
         let n = self.at_number.len();
+        self.first_nonsingleton_cell_within(n)
+    }
+
+    /// Position span of the first non-singleton cell among the first
+    /// `bound` positions — the reference's `PartitionGetFirstCell`
+    /// over `n` (atoms) while t-group nodes ride the tail: the search
+    /// individualizes atoms only, and tied t-group cells never branch.
+    pub fn first_nonsingleton_cell_within(&self, bound: usize) -> Option<(usize, usize)> {
+        let n = self.at_number.len().min(bound);
         let mut position = 0usize;
         while position < n {
             let r = self.rank[self.at_number[position]];

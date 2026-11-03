@@ -92,9 +92,20 @@ struct HfreeCanon {
 }
 
 fn hfree_canonical(adjacency: &[Vec<usize>], invariants: &[(u16, u16)]) -> HfreeCanon {
+    hfree_canonical_bounded(adjacency, invariants, adjacency.len())
+}
+
+/// [`hfree_canonical`] with the search's individualization bounded to
+/// the first `atom_bound` nodes — the t-group-tail variant never
+/// branches on the tail cells.
+fn hfree_canonical_bounded(
+    adjacency: &[Vec<usize>],
+    invariants: &[(u16, u16)],
+    atom_bound: usize,
+) -> HfreeCanon {
     let mut initial = Partition::initial(invariants);
     initial.refine(adjacency);
-    let first = search_stage_one(adjacency, &initial, "S1 enter pi0");
+    let first = search_stage_one(adjacency, &initial, "S1 enter pi0", atom_bound);
     let first_symmetry = orbit_min_symmetry(&first);
     let h_seed = class_partition(&first_symmetry);
     // `bChangeCurrRank` compares the rebuilt class ranks against the
@@ -102,7 +113,7 @@ fn hfree_canonical(adjacency: &[Vec<usize>], invariants: &[(u16, u16)]) -> Hfree
     // the comparison baseline stays the first equitable partition).
     let ranks_changed = h_seed.ranks() != initial.ranks();
     let final_search = if ranks_changed || !class_ranks_are_contiguous(&first_symmetry) {
-        search_stage_one(adjacency, &h_seed, "S1 rerun pi0")
+        search_stage_one(adjacency, &h_seed, "S1 rerun pi0", atom_bound)
     } else {
         first
     };
@@ -246,7 +257,7 @@ pub fn canonical_ranks_and_symmetry(
     }
 
     let (informed, informed_orbits) =
-        search_stage_two(adjacency, base, &aux_rank, hydrogens, groups);
+        search_stage_two(adjacency, base, &aux_rank, hydrogens, groups, n);
     let ranks: Vec<u32> = (0..n).map(|atom| informed.rank_of(atom)).collect();
     // The stage-two orbits: the walk's theta partition (ichican2.c
     // CanonGraph's UnorderedPartition) — union-find over the cycles of
@@ -617,6 +628,112 @@ pub fn canonical_table(
     ConnectionTable::build(&ranks, adjacency)
 }
 
+/// The t-group-aware canonicalization — the reference's TAUT pass
+/// (ichican2.c `GetBaseCanonRanking`, the `TAUT_YES` run): the atoms
+/// enter pre-ranked by the H-free base pass's equitable partition
+/// (`pAtomInvariant[i].val[0] = pRankStack[0][i]` under
+/// `bTautGroupsOnly`), the t-groups join as appended nodes with their
+/// own invariants (`val[0] = num_at_tg`, `NUM_CONNECTIONS = MAXVAL+1`,
+/// the endpoint count and the `num[]` pair at the TAUT_ISO slots), the
+/// whole set refines over the augmented graph, and the search
+/// individualizes ATOMS only (`PartitionGetFirstCell` over `n`) while
+/// the t-group tail rides. The connection table grows the t-group rows
+/// (`tgroup_rank, endpoint ranks ascending` — the reference's CT
+/// format comment), which is what pulls the group's endpoints against
+/// a non-endpoint twin the base numbering left tied (the DoNotAddH
+/// bicarbonate witness: the acid pair ranks ahead of the H-less O).
+///
+/// Returns the atom numbering and the atom equivalence classes of the
+/// winning pass — the pair the identifier's `/h` digits and the aux
+/// `/N:`/`/E:` speak for a tautomeric structure.
+pub fn taut_ranks_and_symmetry(
+    adjacency: &[Vec<usize>],
+    invariants: &[(u16, u16)],
+    hydrogens: &[u32],
+    groups: &[(u32, u32, Vec<usize>)],
+) -> (Vec<u32>, Vec<u32>) {
+    let n = adjacency.len();
+    let g = groups.len();
+    let total = n + g;
+
+    // The base pass's equitable partition supplies the atom seed ranks.
+    let mut base_initial = Partition::initial(invariants);
+    base_initial.refine(adjacency);
+
+    // The augmented graph: t-group node n+k links its members.
+    let mut augmented: Vec<Vec<usize>> = adjacency.to_vec();
+    augmented.resize(total, Vec::new());
+    let mut member_of = vec![None; n];
+    for (k, (_, _, members)) in groups.iter().enumerate() {
+        let tg = n + k;
+        for &m in members {
+            augmented[m].push(tg);
+            augmented[tg].push(m);
+            member_of[m] = Some(k);
+        }
+    }
+
+    // The seed invariants, the reference's two-deck layout packed.
+    // atoms: (base rank, 0); t-group nodes: (num_at_tg, MAXVAL+1) and
+    // (0, 0, endpoints, num_H, num_minus) behind them.
+    let max_hill = invariants.iter().map(|(hill, _)| *hill).max().unwrap_or(0);
+    let tg_first: u32 = (total.max(max_hill as usize + 1) as u32) << 8 | 21;
+    let mut seed: Vec<(u32, u32)> = (0..n)
+        .map(|i| {
+            let endpoint = member_of[i];
+            match endpoint {
+                Some(k) => {
+                    let (count, charge, members) = &groups[k];
+                    let fields = (*members as u32).min(4095) << 24
+                        | (*count as u32).min(4095) << 12
+                        | (*charge as u32).min(4095);
+                    (base_initial.rank_of(i) as u32, fields)
+                }
+                None => (base_initial.rank_of(i) as u32, 0),
+            }
+        })
+        .collect();
+    for (k, (_, _, members)) in groups.iter().enumerate() {
+        let (count, charge) = (groups[k].0, groups[k].1);
+        let fields = (*members as u32).min(4095) << 24
+            | (count as u32).min(4095) << 12
+            | (charge as u32).min(4095);
+        seed.push((tg_first, fields));
+    }
+    let _ = max_hill;
+
+    // The taut pass: bounded stage one over the augmented graph, then
+    // the hydrogen-aware stage when a class splits on the non-taut
+    // counts.
+    let hfree = hfree_canonical_bounded(&augmented, &seed, n);
+    let symmetry = orbit_min_symmetry(&hfree.final_search);
+    let ranks: Vec<u32>;
+    if hydrogens_uniform(&symmetry, hydrogens) {
+        ranks = (0..total)
+            .map(|node| hfree.final_search.partition.rank_of(node))
+            .collect();
+    } else {
+        let aux_invariants: Vec<(u32, u32)> = (0..total)
+            .map(|node| (symmetry[node], encoded_hydrogen(hydrogens.get(node).copied().unwrap_or(0))))
+            .collect();
+        let mut aux = Partition::initial_pair(&aux_invariants);
+        aux.refine(&augmented);
+        let aux_rank: Vec<u32> = (0..total).map(|node| aux.rank_of(node)).collect();
+        let base = &hfree.h_seed;
+        let (informed, _informed_orbits) =
+            search_stage_two(&augmented, base, &aux_rank, hydrogens, &[], n);
+        ranks = (0..total)
+            .map(|node| informed.rank_of(node))
+            .collect();
+    }
+
+    // The atom prefix is the identifier numbering; the symmetry reads
+    // the stage-one orbits restricted to atoms.
+    let atom_ranks: Vec<u32> = ranks[..n].to_vec();
+    let atom_symmetry: Vec<u32> = symmetry[..n].to_vec();
+    (atom_ranks, atom_symmetry)
+}
+
 /// Disjoint sets over atoms, merged by position-wise mappings of
 /// automorphic terminal labelings.
 pub(crate) struct Orbits {
@@ -663,7 +780,12 @@ struct StageOne {
     orbits: Orbits,
 }
 
-fn search_stage_one(adjacency: &[Vec<usize>], root: &Partition, trace_tag: &str) -> StageOne {
+fn search_stage_one(
+    adjacency: &[Vec<usize>],
+    root: &Partition,
+    trace_tag: &str,
+    atom_bound: usize,
+) -> StageOne {
     let n = adjacency.len();
     trace_partition(trace_tag, root);
     let mut state = StageOneState {
@@ -671,7 +793,7 @@ fn search_stage_one(adjacency: &[Vec<usize>], root: &Partition, trace_tag: &str)
         best: None,
         orbits: Orbits::new(n),
     };
-    descend_hfree(root, adjacency, &mut state);
+    descend_hfree(root, adjacency, &mut state, atom_bound);
     StageOne {
         partition: state.best.expect("a discrete partition is always reached"),
         orbits: state.orbits,
@@ -684,10 +806,42 @@ struct StageOneState {
     orbits: Orbits,
 }
 
-fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut StageOneState) {
-    match partition.first_nonsingleton_cell() {
+/// A fully discrete copy of a leaf partition: any remaining tied cells
+/// (the t-group tail the search never branches on) split by node
+/// order, so the connection table sees distinct ranks. All leaves
+/// resolve identically, so the comparisons keep their meaning.
+fn resolved_leaf(
+    partition: &Partition,
+    adjacency: &[Vec<usize>],
+    atom_bound: usize,
+) -> Partition {
+    if partition.first_nonsingleton_cell_within(atom_bound).is_none()
+        && partition.first_nonsingleton_cell().is_none()
+    {
+        return partition.clone();
+    }
+    let mut resolved = partition.clone();
+    while let Some((start, end)) = resolved.first_nonsingleton_cell() {
+        let mut candidates: Vec<usize> = resolved.at_number()[start..end].to_vec();
+        candidates.sort_unstable();
+        for v in candidates.into_iter().skip(1) {
+            resolved.individualize(adjacency, v);
+        }
+    }
+    let _ = atom_bound;
+    resolved
+}
+
+fn descend_hfree(
+    partition: &Partition,
+    adjacency: &[Vec<usize>],
+    state: &mut StageOneState,
+    atom_bound: usize,
+) {
+    match partition.first_nonsingleton_cell_within(atom_bound) {
         None => {
-            let table = ConnectionTable::build(partition.ranks(), adjacency);
+            let leaf = resolved_leaf(partition, adjacency, atom_bound);
+            let table = ConnectionTable::build(leaf.ranks(), adjacency);
             if let Some(first) = &state.first {
                 if table.entries() == ConnectionTable::build(first.ranks(), adjacency).entries() {
                     // Automorphic image of the first terminal: merge
@@ -695,7 +849,7 @@ fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut St
                     for position in 0..adjacency.len() {
                         state
                             .orbits
-                            .union(first.at_number()[position], partition.at_number()[position]);
+                            .union(first.at_number()[position], leaf.at_number()[position]);
                     }
                 }
                 if tracing() {
@@ -707,7 +861,7 @@ fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut St
                     );
                 }
             } else {
-                state.first = Some(partition.clone());
+                state.first = Some(leaf.clone());
                 if tracing() {
                     eprintln!("S1 terminal ct={:?} FIRST", table.entries());
                 }
@@ -720,7 +874,7 @@ fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut St
                 }
             };
             if better {
-                state.best = Some(partition.clone());
+                state.best = Some(leaf);
             }
         }
         Some((start, end)) => {
@@ -741,7 +895,7 @@ fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut St
                 if tracing() {
                     trace_partition(&format!("S1 indiv v={}", v + 1), &branch);
                 }
-                descend_hfree(&branch, adjacency, state);
+                descend_hfree(&branch, adjacency, state, atom_bound);
             }
         }
     }
@@ -753,6 +907,7 @@ fn search_stage_two(
     aux_rank: &[u32],
     hydrogens: &[u32],
     groups: &[(u32, Vec<usize>)],
+    atom_bound: usize,
 ) -> (Partition, Orbits) {
     let n = adjacency.len();
     let mut best: Option<Partition> = None;
@@ -767,6 +922,7 @@ fn search_stage_two(
         &mut first,
         &mut best,
         &mut orbits,
+        atom_bound,
     );
     (
         best.expect("a discrete partition is always reached"),
@@ -784,11 +940,13 @@ fn descend_hinformed(
     first: &mut Option<Partition>,
     best: &mut Option<Partition>,
     orbits: &mut Orbits,
+    atom_bound: usize,
 ) {
-    let cell = match partition.first_nonsingleton_cell() {
+    let cell = match partition.first_nonsingleton_cell_within(atom_bound) {
         Some(span) => span,
         None => {
-            let ranks = partition.ranks();
+            let leaf = resolved_leaf(partition, adjacency, atom_bound);
+            let ranks = leaf.ranks();
             let table = ConnectionTable::build(ranks, adjacency);
             // Table-equal terminals are automorphic images: fold the
             // position-wise mapping into the orbit partition.
@@ -796,7 +954,7 @@ fn descend_hinformed(
                 table.entries() == ConnectionTable::build(other.ranks(), adjacency).entries()
                     && (0..adjacency.len()).all(|position| {
                         hydrogens[other.at_number()[position]]
-                            == hydrogens[partition.at_number()[position]]
+                            == hydrogens[leaf.at_number()[position]]
                     })
             };
             // The winner compare's full equality — table, hydrogen
@@ -812,7 +970,7 @@ fn descend_hinformed(
                         .map(|position| encoded_hydrogen(hydrogens[p.at_number()[position]]))
                         .collect()
                 };
-                if h_rows(partition) != h_rows(other) {
+                if h_rows(&leaf) != h_rows(other) {
                     return false;
                 }
                 let rows = |p: &Partition| -> Vec<(u32, Vec<u32>)> {
@@ -827,17 +985,17 @@ fn descend_hinformed(
                         })
                         .collect()
                 };
-                rows(partition) == rows(other)
+                rows(&leaf) == rows(other)
             };
             if let Some(first_partition) = first {
                 if matches(first_partition) {
                     if tracing() {
-                        eprintln!("S2 merge-FIRST nu_atnum={:?}", partition.at_number());
+                        eprintln!("S2 merge-FIRST nu_atnum={:?}", leaf.at_number());
                     }
                     for position in 0..adjacency.len() {
                         orbits.union(
                             first_partition.at_number()[position],
-                            partition.at_number()[position],
+                            leaf.at_number()[position],
                         );
                     }
                 } else if let Some(best_partition) = best {
@@ -851,18 +1009,18 @@ fn descend_hinformed(
                     // (the (1,2,5,6)(3,4) cyclohexadiene witness).
                     if equals(best_partition) {
                         if tracing() {
-                            eprintln!("S2 merge-RHO nu_atnum={:?}", partition.at_number());
+                            eprintln!("S2 merge-RHO nu_atnum={:?}", leaf.at_number());
                         }
                         for position in 0..adjacency.len() {
                             orbits.union(
                                 best_partition.at_number()[position],
-                                partition.at_number()[position],
+                                leaf.at_number()[position],
                             );
                         }
                     }
                 }
             } else {
-                *first = Some(partition.clone());
+                *first = Some(leaf.clone());
             }
             let counts = |p: &Partition| -> Vec<u32> {
                 (0..adjacency.len())
@@ -891,7 +1049,7 @@ fn descend_hinformed(
                         std::cmp::Ordering::Greater => true,
                         std::cmp::Ordering::Less => false,
                         std::cmp::Ordering::Equal => {
-                            match counts(partition).cmp(&counts(best_partition)) {
+                            match counts(&leaf).cmp(&counts(best_partition)) {
                                 // The M3 corpus decode: at table-equal
                                 // terminals the SMALLER encoded
                                 // hydrogen vector wins. The encoding
@@ -900,14 +1058,14 @@ fn descend_hinformed(
                                 // would invert (see `encoded_hydrogen`).
                                 std::cmp::Ordering::Less => true,
                                 std::cmp::Ordering::Greater => false,
-                                std::cmp::Ordering::Equal => rows(partition) > rows(best_partition),
+                                std::cmp::Ordering::Equal => rows(&leaf) > rows(best_partition),
                             }
                         }
                     }
                 }
             };
             if better {
-                *best = Some(partition.clone());
+                *best = Some(leaf);
                 if tracing() {
                     eprintln!(
                         "S2 terminal BETTER nu_atnum={:?} ct={:?} hydrogens={:?}",
@@ -956,7 +1114,15 @@ fn descend_hinformed(
             trace_partition(&format!("S2 indiv v={}", v + 1), &branch);
         }
         descend_hinformed(
-            &branch, adjacency, aux_rank, hydrogens, groups, first, best, orbits,
+            &branch,
+            adjacency,
+            aux_rank,
+            hydrogens,
+            groups,
+            first,
+            best,
+            orbits,
+            atom_bound,
         );
     }
 }

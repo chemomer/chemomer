@@ -671,6 +671,22 @@ impl ProtonContext {
 /// GetAtomChargeType: (type, mask) for the atom under the current
 /// standardized H/charge state.
 pub(crate) fn atom_charge_type(context: &ProtonContext, atom: usize) -> (u16, u32) {
+    let (typ, mask, _) = atom_charge_type_counted(context, atom);
+    (typ, mask)
+}
+
+/// GetAtomChargeType with the reference's reachability flag: whether
+/// the atom reaches `count_mask_bits` (ichi_bns.c). Only atoms that do
+/// contribute their charge to the mark_at_type totals — every
+/// early-exit branch (metals, out-of-range charges, unusual valence on
+/// the atom or a neighbor, adjacent charged pairs, all-metal
+/// neighborhoods) skips the count. The instrumented DoNotAddH
+/// zwitterion makes the distinction load-bearing: its quaternary N(+)
+/// sits beside a zero-perception CH2 (an unusual valence under the
+/// drawn-only counts), so the cation never counts and the acidic total
+/// reads -1 — the (DE)PROTONATION then protonates the anion, exactly
+/// what the oracle's synthesized (H,n,m) rows record.
+pub(crate) fn atom_charge_type_counted(context: &ProtonContext, atom: usize) -> (u16, u32, bool) {
     let (el, charge, h) = (context.element[atom], context.charge[atom], context.h[atom]);
     let valence = context.valence(atom);
     let mut typ = att::NONE;
@@ -680,41 +696,43 @@ pub(crate) fn atom_charge_type(context: &ProtonContext, atom: usize) -> (u16, u3
     // never class — their charges never enter the proton-exchange —
     // and per-atom charges beyond ±1 are untypable.
     if super::metals::is_metal_el(el) {
-        return (typ, mask);
+        return (typ, mask, false);
     }
     if !(-1..=1).contains(&charge) {
-        return (typ, mask);
+        return (typ, mask, false);
     }
     if valence == 0 && charge == 1 && h == 0 && el == 1 {
-        return (att::PROTON, atbit::PROTON);
+        return (att::PROTON, atbit::PROTON, true);
     }
     if valence == 0 && charge == -1 && h == 0 && matches!(el, 9 | 17 | 35 | 53) {
-        return (att::HAL_ANION, atbit::HAL_ANION);
+        return (att::HAL_ANION, atbit::HAL_ANION, true);
     }
     if (valence == 0 && charge == 0 && h == 1 && matches!(el, 9 | 17 | 35 | 53))
         || (valence == 0 && charge == 0 && h == 2 && matches!(el, 8 | 16 | 34 | 52))
     {
-        return (att::HAL_ACID, atbit::HAL_ACID);
+        return (att::HAL_ACID, atbit::HAL_ACID, true);
     }
     if context.unusual_valence(atom) {
-        return (typ, mask);
+        return (typ, mask, false);
     }
 
     let mut num_z = 0usize;
     let mut num_o = 0usize;
+    let mut num_m = 0usize;
     let mut unsat_n_has_terminal_o = 0usize;
     for &neigh in &context.neighbors[atom] {
         if context.charge[neigh] != 0 && charge != 0 {
             // adjacent-ion rule: the atom is neither donor nor acceptor
-            return (att::NONE, 0);
+            return (att::NONE, 0, false);
         }
         if context.unusual_valence(neigh) {
-            return (typ, mask);
+            return (typ, mask, false);
         }
         if is_z_atom(context.element[neigh]) {
             num_z += 1;
         }
         num_o += (context.element[neigh] == 8) as usize;
+        num_m += (super::metals::is_metal_el(context.element[neigh])) as usize;
         if el == 7 && valence == 2 && charge == 0 {
             let nv = context.valence(neigh);
             if nv == 1
@@ -730,21 +748,24 @@ pub(crate) fn atom_charge_type(context: &ProtonContext, atom: usize) -> (u16, u3
         // O, S, Se, Te terminal chemistry
         if charge == 1 {
             if h > 0 {
-                return (att::O_PLUS, atbit::OH_PLUS);
+                return (att::O_PLUS, atbit::OH_PLUS, true);
             }
-            return (att::O_PLUS, atbit::O_PLUS);
+            return (att::O_PLUS, atbit::O_PLUS, true);
         }
         if valence > 1 {
-            return (typ, mask);
+            return (typ, mask, false); // #C1: not a terminal atom
         }
         if valence == 1 && num_z == 0 && num_o == 0 {
-            return (typ, mask); // #C3: charges only, no donor/acceptor
+            if num_m == valence {
+                return (typ, mask, false); // #C2
+            }
+            return (typ, mask, true); // #C3: charges only, no donor/acceptor
         }
         if valence == 0 {
             if charge == -1 && h == 1 {
-                return (att::OH_MINUS, atbit::O_MINUS);
+                return (att::OH_MINUS, atbit::O_MINUS, true);
             }
-            return (typ, mask);
+            return (typ, mask, true);
         }
         let neigh = context.neighbors[atom][0];
         let (nel, ncharge) = (context.element[neigh], context.charge[neigh]);
@@ -834,7 +855,7 @@ pub(crate) fn atom_charge_type(context: &ProtonContext, atom: usize) -> (u16, u3
             typ = att::OTHER_NEG_O;
             mask |= atbit::O_MINUS;
         }
-        return (typ, mask);
+        return (typ, mask, true);
     }
 
     if matches!(el, 7 | 15)
@@ -845,7 +866,10 @@ pub(crate) fn atom_charge_type(context: &ProtonContext, atom: usize) -> (u16, u3
         // non-Z are ignored here (the C's goto count_mask_bits with
         // no type)
         if valence > 0 && num_z == 0 {
-            return (att::NONE, 0);
+            if num_m == valence {
+                return (att::NONE, 0, false);
+            }
+            return (att::NONE, 0, true);
         }
         typ = if el == 7 { att::ATOM_N } else { att::ATOM_P };
         match charge {
@@ -878,7 +902,9 @@ pub(crate) fn atom_charge_type(context: &ProtonContext, atom: usize) -> (u16, u3
             _ => mask |= atbit::ERRORS,
         }
     }
-    (typ, mask)
+    // The gate fall-through (carbons, gates that failed, onium N(+))
+    // reaches count_mask_bits: the charge counts with no class bits.
+    (typ, mask, true)
 }
 
 /// IsZOX: terminal =O/S/Se/Te count on the (single) Z neighbor.
@@ -902,11 +928,16 @@ fn is_zox(context: &ProtonContext, atom: usize, ord: usize) -> i32 {
 
 /// Recompute the totals the driver reads. The C maintains them
 /// incrementally through the classifier's delta parameter; a fresh
-/// scan is equivalent and keeps the mutation sites dumb.
+/// scan is equivalent and keeps the mutation sites dumb. The charge
+/// totals count only atoms that reach `count_mask_bits` — the
+/// early-exit branches (metals, unusual valences, adjacent charged
+/// pairs) never contribute, which is what lets the DoNotAddH
+/// zwitterion's anion drive the (DE)PROTONATION while its uncounted
+/// cation stays in /q.
 fn totals(context: &ProtonContext) -> [i64; attot::ARRAY_LEN] {
     let mut totals = [0i64; attot::ARRAY_LEN];
     for atom in 0..context.element.len() {
-        let (_, mask) = atom_charge_type(context, atom);
+        let (_, mask, counted) = atom_charge_type_counted(context, atom);
         if mask != 0 && mask & atbit::ERRORS == 0 {
             for (slot, total) in totals.iter_mut().enumerate().take(32) {
                 if mask & (1 << slot) != 0 {
@@ -914,7 +945,7 @@ fn totals(context: &ProtonContext) -> [i64; attot::ARRAY_LEN] {
                 }
             }
         }
-        if context.charge[atom] != 0 {
+        if counted && context.charge[atom] != 0 {
             totals[attot::TOT_CHARGE] += context.charge[atom] as i64;
             totals[attot::NUM_CHARGES] += 1;
         }
@@ -940,6 +971,16 @@ pub(crate) fn has_acidic_minus(context: &ProtonContext, atom: usize) -> bool {
     }
     let (typ, mask) = atom_charge_type(context, atom);
     typ & AA_SIMPLE_TYP1 != 0 && mask & AA_SIMPLE_MSK1 != 0
+}
+
+/// The counted charge total (the reference's ATTOT_TOT_CHARGE):
+/// charges contribute only from atoms the classifier lets through to
+/// `count_mask_bits`. A cation beside an unusual-valence neighbor —
+/// the DoNotAddH zero-perception shape — never counts, so the
+/// group-proton quota it would otherwise drive stays closed.
+pub(crate) fn counted_charge_total(structure: &Structure) -> i64 {
+    let context = ProtonContext::new(structure);
+    totals(&context)[attot::TOT_CHARGE]
 }
 
 /// The standardization result: adjusted H counts and charges per atom
@@ -1696,5 +1737,72 @@ mod tests {
         assert!(acids[3], "the =O joins the acid star");
         assert!(!donors[3] && !acids[1], "the pair sits in disjoint stars");
         assert!(donors.iter().zip(&acids).all(|(&d, &a)| !(d && a)));
+    }
+}
+
+#[cfg(test)]
+mod dna_zwitterion {
+    use super::standardize;
+    use crate::graph::{AtomRecord, Structure};
+
+    fn atom(element: &str, charge: i32) -> AtomRecord {
+        AtomRecord {
+            element: element.to_string(),
+            h_count: 0,
+            h_pinned: true,
+            valence_code: 0,
+            isotope: 0,
+            charge,
+        }
+    }
+
+    #[test]
+    fn the_do_not_addh_zwitterion_gains_its_conjugate_hydrogen() {
+        // The breadth-1 skeleton under DoNotAddH: every H pinned at
+        // zero, the COO(-) anion beside a quaternary N(+). The
+        // classifier declines the cation (its CH2 neighbor sits at an
+        // unusual valence over the drawn-only counts), so the counted
+        // total reads -1 and the acidic addition protonates the anion
+        // — the oracle's synthesized (H,n,m)/q+1/p-1 rows.
+        let s = Structure {
+            atoms: vec![
+                atom("C", 0),
+                atom("C", 0),
+                atom("O", 0),
+                atom("O", 0),
+                atom("C", 0),
+                atom("C", 0),
+                atom("C", 0),
+                atom("O", 0),
+                atom("O", -1),
+                atom("C", 0),
+                atom("N", 1),
+                atom("C", 0),
+                atom("C", 0),
+                atom("C", 0),
+            ],
+            bonds: vec![
+                (0, 1, 1),
+                (1, 2, 2),
+                (3, 4, 1),
+                (4, 5, 1),
+                (5, 6, 1),
+                (6, 7, 2),
+                (9, 10, 1),
+                (10, 11, 1),
+                (1, 3, 1),
+                (6, 8, 1),
+                (4, 9, 1),
+                (10, 12, 1),
+                (10, 13, 1),
+            ],
+            ..Default::default()
+        };
+        let std = standardize(&s).expect("standardizes");
+        assert_eq!(std.added_protons, 1);
+        assert_eq!(std.removed_protons, 0);
+        assert_eq!(std.h[8], 1);
+        assert_eq!(std.charge[8], 0);
+        assert_eq!(std.charge[10], 1);
     }
 }

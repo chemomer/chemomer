@@ -999,9 +999,13 @@ fn fixed_h_main_inverted(working: &Structure, options: &Options) -> bool {
 fn remove_group_protons(structure: &mut Structure) -> i32 {
     let mut removals = 0;
     loop {
-        // The quota: one removal per unit of positive charge. The +2
-        // family lands when the charged super-group merge follows.
-        let total = structure.total_charge() + removals;
+        // The quota: one removal per unit of positive charge — the
+        // reference's COUNTED total (ATTOT_TOT_CHARGE), so a cation
+        // the charge-type classifier declined (a quaternary N(+)
+        // beside a DoNotAddH unusual-valence neighbor) never opens
+        // it. The +2 family lands when the charged super-group merge
+        // follows.
+        let total = crate::canonical::protons::counted_charge_total(structure) as i32 + removals;
         if total <= 0 {
             break;
         }
