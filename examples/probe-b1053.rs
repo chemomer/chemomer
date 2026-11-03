@@ -47,7 +47,7 @@ fn census() {
             )
             .unwrap();
             let s = engine.structure();
-            let counts = chemomer::layers::standardization::adjusted_hydrogens(s);
+            let _counts = chemomer::layers::standardization::adjusted_hydrogens(s);
             // bond valences per atom over the input orders
             let mut bv = vec![0i32; s.atoms.len()];
             for &(f, t, o) in &s.bonds {
