@@ -133,14 +133,24 @@ pub fn aux_info(
     // decides the `/it:` inverted-stereo block. Tautomeric structures
     // rank the NON-TAUT representation (mobile H stripped, no t-group
     // rows); the helper mirrors that input assembly.
-    if let Some(verdict) =
-        crate::canonical::stereo::informed_verdict(working, &counts, &ranks, tautomeric)
-    {
+    if let Some(verdict) = crate::canonical::stereo::informed_verdict(
+        working,
+        &counts,
+        &ranks,
+        tautomeric,
+        options.stereo_at_zz,
+    ) {
         // SNon withholds the stereo layers and the inverted-stereo
         // fields alike (ichiparm.c:248–253): the block never prints
-        // under that mode.
+        // under that mode. The stereo-TYPE modes (SRel/SRac/SUCF)
+        // suppress it too — their rows are already the lexicographic
+        // minimum, so there is no inverted pass to speak of
+        // (witnessed: the CRU recordings carry /it:im under the
+        // default and under SUU, never under SRel/SRac/SUCF).
         let marker = verdict.sign != 0
             && !options.no_stereo
+            && options.requested_stereo_type().is_none()
+            && !options.chiral_flag_stereo
             && crate::canonical::stereo::inverted_marker(&verdict);
         ranks_aux = verdict.ranks;
         symmetry = verdict.symmetry;

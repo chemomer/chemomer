@@ -110,6 +110,15 @@ impl Engine {
                     frame_shift: crate::options::FrameShift::None,
                     ..options.clone()
                 };
+                // The unedited echo re-runs the pipeline under the
+                // same options minus the edits — the DoNotAddH pin
+                // rides along (the oracle's /U/ appendix repeats the
+                // CRV deficiency digits the pin produces).
+                if unedited_options.do_not_add_h {
+                    for atom in &mut unedited.atoms {
+                        atom.h_pinned = true;
+                    }
+                }
                 let unedited_polymer = polymer_treat(&mut unedited, &original, &unedited_options)?;
                 let engine = Self::from_prepared(
                     unedited.clone(),
@@ -248,16 +257,7 @@ impl Engine {
         // snapshot above stays a pre-taut artifact — the enlarged
         // groups the flags admit are downstream knowledge both
         // readings share.
-        structure.taut_ext = crate::graph::TautExt {
-            keto_enol: options.keto_enol,
-            t15: options.t15,
-            pt_22_00: options.pt_22_00,
-            pt_16_00: options.pt_16_00,
-            pt_06_00: options.pt_06_00,
-            pt_39_00: options.pt_39_00,
-            pt_13_00: options.pt_13_00,
-            pt_18_00: options.pt_18_00,
-        };
+        structure.taut_ext = options.taut_ext();
         // The (DE)PROTONATION normalization: charged structures read
         // as their conjugate form before any layer runs; the pinned
         // H/charge state is final.
@@ -314,7 +314,7 @@ impl Engine {
         // the snapshot's formula and charge.
         let fixed_h = match &snapshot {
             Some(snapshot) => {
-                let centers = fixed_h_centers(&structure);
+                let centers = fixed_h_centers(&structure, &options);
                 let main_inverted = fixed_h_main_inverted(&structure, &options);
                 Some(crate::canonical::fixedh::analyze(
                     snapshot,
@@ -938,10 +938,10 @@ impl Engine {
 
 /// The wedge-defined stereo centers over the working structure — the
 /// Fixed-H stereo refinement's input (the main pass's center inputs).
-fn fixed_h_centers(working: &Structure) -> Vec<(usize, Vec<usize>, u32)> {
+fn fixed_h_centers(working: &Structure, options: &Options) -> Vec<(usize, Vec<usize>, u32)> {
     let counts = standardization::adjusted_hydrogens(working);
     let ranks = crate::layers::hydrogen::canonical_ranks_for(working);
-    crate::canonical::stereo::center_inputs(working, &counts, &ranks)
+    crate::canonical::stereo::center_inputs(working, &counts, &ranks, options.stereo_at_zz)
 }
 
 /// Whether the main aux verdict adopted its inverted pass (the aux
@@ -955,9 +955,15 @@ fn fixed_h_main_inverted(working: &Structure, options: &Options) -> bool {
     let tautomeric = crate::canonical::tautomer::mobile_groups(working, &counts, &ranks)
         .iter()
         .any(|group| group.count > group.charge);
-    crate::canonical::stereo::informed_verdict(working, &counts, &ranks, tautomeric)
-        .map(|verdict| verdict.sign != 0 && crate::canonical::stereo::inverted_marker(&verdict))
-        .unwrap_or(false)
+    crate::canonical::stereo::informed_verdict(
+        working,
+        &counts,
+        &ranks,
+        tautomeric,
+        options.stereo_at_zz,
+    )
+    .map(|verdict| verdict.sign != 0 && crate::canonical::stereo::inverted_marker(&verdict))
+    .unwrap_or(false)
 }
 
 /// The hard group-H removal (the reference's HardRemoveAcidicProtons,
@@ -1401,8 +1407,16 @@ fn polymer_treat(
             if treated.has_units() && treated.pzz.len() >= 2 && options.frame_shift_edits() {
                 // The interim (105+) pass: cyclize a working copy,
                 // collect its backbones, derive the senior-bond
-                // rotation, apply it to `base`.
+                // rotation, apply it to `base`. The interim runs under
+                // the SAME option set (the reference re-enters the
+                // whole pipeline for it, runichi.c:2311 — the taut
+                // flags included), so its canonical numbering speaks
+                // the tautomer registration the flags admit: a
+                // registration the submitted graph's cyclized form
+                // ranks differently is a senior bond the derivation
+                // never sees.
                 let mut interim = submitted.clone();
+                interim.taut_ext = options.taut_ext();
                 let mut interim_treated = treated.clone();
                 treatment::cyclize_units(&mut interim, &mut interim_treated);
                 treatment::fill_backbones(&interim, &poly, &mut interim_treated);

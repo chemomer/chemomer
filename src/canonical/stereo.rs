@@ -26,10 +26,16 @@ use crate::graph::Structure;
 /// The emission knobs the generation options map onto: whether a
 /// stereo group with no well-defined parity still prints (SUU) and
 /// whether unknown (wiggly) stereo carries its own label `u` (SLUUD).
+/// `allow_at_pseudo` is the `SAtZZ` gate's allow side (ichister.c
+/// 1380-1393): without it a center directly bonded to a `Zz`/`Zy`
+/// pseudoatom never qualifies — the polymer frame shift re-flanks the
+/// caps, so a CRU's defined center can land pseudo-adjacent AFTER the
+/// edit and drop out of the set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Emission {
     pub keep_undefined: bool,
     pub label_unknown: bool,
+    pub allow_at_pseudo: bool,
 }
 
 /// One center's derived state.
@@ -95,7 +101,7 @@ pub fn segments(
     if !defined_exists && !emission.keep_undefined {
         return Vec::new();
     }
-    let mut centers = candidates(structure, hydrogens, ranks);
+    let mut centers = candidates(structure, hydrogens, ranks, emission.allow_at_pseudo);
     for &(atom, bond_index, down) in &wedged {
         if let Some(center) = centers.iter_mut().find(|c| c.atom == atom) {
             let Some(down) = down else {
@@ -288,6 +294,7 @@ pub fn center_inputs(
     structure: &Structure,
     hydrogens: &[u32],
     ranks: &[u32],
+    allow_at_pseudo: bool,
 ) -> Vec<(usize, Vec<usize>, u32)> {
     let wedged = wedged_centers(structure);
     if wedged.is_empty() {
@@ -298,7 +305,7 @@ pub fn center_inputs(
         let Some(down) = down else {
             continue;
         };
-        let Some(center) = candidates(structure, hydrogens, ranks)
+        let Some(center) = candidates(structure, hydrogens, ranks, allow_at_pseudo)
             .into_iter()
             .find(|c| c.atom == atom)
         else {
@@ -368,8 +375,9 @@ pub(crate) fn informed_verdict(
     counts: &[u32],
     ranks: &[u32],
     strip_mobile_h: bool,
+    allow_at_pseudo: bool,
 ) -> Option<StereoVerdict> {
-    let centers = center_inputs(structure, counts, ranks);
+    let centers = center_inputs(structure, counts, ranks, allow_at_pseudo);
     if centers.is_empty() {
         return None;
     }
@@ -453,9 +461,21 @@ pub fn terminal_rows(centers: &[(usize, Vec<usize>, u32)], ranks: &[u32], flip: 
 
 /// Every candidate center: three heavy neighbors plus one implicit H,
 /// or four heavy neighbors, with all ligand ranks distinct.
-fn candidates(structure: &Structure, hydrogens: &[u32], ranks: &[u32]) -> Vec<Center> {
+fn candidates(
+    structure: &Structure,
+    hydrogens: &[u32],
+    ranks: &[u32],
+    allow_at_pseudo: bool,
+) -> Vec<Center> {
     let mut out = Vec::new();
     for (atom, &hydrogen_count) in hydrogens.iter().enumerate() {
+        // The SAtZZ gate (ichister.c:1380-1393): no stereo at centers
+        // directly bonded to a pseudoatom, unless the option admits
+        // them. The gate runs on the WORKING (frame-shift-edited)
+        // structure — the caps' new bonds decide.
+        if !allow_at_pseudo && structure.pseudo_adjacent(atom) {
+            continue;
+        }
         let neighbors: Vec<usize> = structure
             .bonds
             .iter()
@@ -649,6 +669,7 @@ mod tests {
                 Emission {
                     keep_undefined: true,
                     label_unknown: false,
+                    allow_at_pseudo: false,
                 }
             ),
             vec![('t', "t4?".to_string())]

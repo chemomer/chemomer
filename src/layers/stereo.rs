@@ -40,6 +40,7 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
     let emission = canonical::stereo::Emission {
         keep_undefined: options.include_unknown_stereo,
         label_unknown: options.distinct_unknown_undefined,
+        allow_at_pseudo: options.stereo_at_zz,
     };
     let segments = canonical::stereo::segments(structure, &counts, &ranks, &symmetry, emission);
     let stereo_type = options.requested_stereo_type();
@@ -53,8 +54,13 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
     let tautomeric = canonical::tautomer::mobile_groups(structure, &counts, &ranks)
         .iter()
         .any(|group| group.count > group.charge);
-    let Some(verdict) = canonical::stereo::informed_verdict(structure, &counts, &ranks, tautomeric)
-    else {
+    let Some(verdict) = canonical::stereo::informed_verdict(
+        structure,
+        &counts,
+        &ranks,
+        tautomeric,
+        options.stereo_at_zz,
+    ) else {
         return Vec::new();
     };
     if verdict.sign == 0 {
@@ -180,6 +186,7 @@ impl LayerEmitter for BLayer {
         let emission = canonical::stereo::Emission {
             keep_undefined: self.options.include_unknown_stereo,
             label_unknown: self.options.distinct_unknown_undefined,
+            allow_at_pseudo: self.options.stereo_at_zz,
         };
         Ok(
             canonical::bond_stereo::segments(structure, &counts, &ranks, emission)
