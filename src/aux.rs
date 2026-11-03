@@ -133,9 +133,13 @@ pub fn aux_info(
     // decides the `/it:` inverted-stereo block. Tautomeric structures
     // rank the NON-TAUT representation (mobile H stripped, no t-group
     // rows); the helper mirrors that input assembly.
-    if let Some(verdict) =
-        crate::canonical::stereo::informed_verdict(working, &counts, &ranks, tautomeric)
-    {
+    if let Some(verdict) = crate::canonical::stereo::informed_verdict(
+        working,
+        &counts,
+        &ranks,
+        tautomeric,
+        options.stereo_at_zz,
+    ) {
         // SNon withholds the stereo layers and the inverted-stereo
         // fields alike (ichiparm.c:248–253): the block never prints
         // under that mode.

@@ -153,6 +153,27 @@ pub struct Polymer {
 }
 
 impl Structure {
+    /// Whether the atom carries a DIRECT bond to a pseudoatom
+    /// (`Zz`/`Zy`). The reference's SAtZZ gate predicate
+    /// (ichister.c:1380-1393): without `-SAtZZ`, "No stereo allowed
+    /// at centers connected to pseudoelement atoms" — the frame shift
+    /// re-flanks the polymer caps and a stereocenter the senior bond
+    /// landed on reads this after the edit, which is why a CRU's
+    /// defined center drops its `/t` under the default options.
+    #[must_use]
+    pub fn pseudo_adjacent(&self, atom: usize) -> bool {
+        self.bonds.iter().any(|&(from, to, _)| {
+            let other = if from == atom {
+                to
+            } else if to == atom {
+                from
+            } else {
+                return false;
+            };
+            matches!(self.atoms[other].element.as_str(), "Zz" | "Zy")
+        })
+    }
+
     /// The disconnected fragments as independent structures, in
     /// first-appearance order. Each fragment's `fold_source` carries
     /// the fragment-internal index -> WHOLE-structure index map, so a

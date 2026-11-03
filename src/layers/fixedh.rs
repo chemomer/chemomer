@@ -221,6 +221,7 @@ impl FixedHLayer {
         let emission = crate::canonical::stereo::Emission {
             keep_undefined: self.options.include_unknown_stereo,
             label_unknown: self.options.distinct_unknown_undefined,
+            allow_at_pseudo: self.options.stereo_at_zz,
         };
         let mut segments = crate::canonical::bond_stereo::segments(
             structure,

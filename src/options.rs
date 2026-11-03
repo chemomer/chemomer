@@ -401,6 +401,26 @@ impl Options {
         self.frame_shift == FrameShift::Cycled
     }
 
+    /// The experimental tautomerism flags as the structure's
+    /// perception extension (the reference's taut flags ride
+    /// bTautFlags into every perception pass — the main pass AND the
+    /// interim 105+ cyclized pass the frame-shift derivation reads,
+    /// runichi.c:2311 re-running the whole pipeline under the same
+    /// INPUT_PARMS).
+    #[must_use]
+    pub fn taut_ext(&self) -> crate::graph::TautExt {
+        crate::graph::TautExt {
+            keto_enol: self.keto_enol,
+            t15: self.t15,
+            pt_22_00: self.pt_22_00,
+            pt_16_00: self.pt_16_00,
+            pt_06_00: self.pt_06_00,
+            pt_39_00: self.pt_39_00,
+            pt_13_00: self.pt_13_00,
+            pt_18_00: self.pt_18_00,
+        }
+    }
+
     /// Whether the assembled identifier is the standard one
     /// (`InChI=1S/`): `SRel`/`SRac`/`SUCF`/`SUU`/`SLUUD`, `FixedH`,
     /// `RecMet` and the experimental tautomerism flags each turn the
