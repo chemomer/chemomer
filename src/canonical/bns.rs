@@ -1558,9 +1558,12 @@ pub(crate) fn resolved_chem_valence(structure: &Structure, counts: &[u32]) -> Ve
             continue;
         }
         // The reference's side split: v == 4 (or v == 3 over a single
-        // bond) reads the Cm side — its bond keeps its order; v == 2
-        // (or v == 3 over a double) the C-II side pulled to the
-        // triple.
+        // bond) reads the Cm side; v == 2 (or v == 3 over a double)
+        // the Cp side. BOTH sides pull toward the triple: each side
+        // with v < 4 takes delta = 4 − v on its bond (the reference's
+        // promote loop runs over {Cm, Cp} — the C(IV)=N-C(II) shape
+        // moves nothing on the Cm side, the C(3,3)-N shape moves one
+        // unit on each).
         let side = |index: usize, bond: usize| -> Option<bool> {
             let v = if index == 0 { va } else { vb };
             let order = orders[bond];
@@ -1572,12 +1575,15 @@ pub(crate) fn resolved_chem_valence(structure: &Structure, counts: &[u32]) -> Ve
                 None
             }
         };
-        let (cp, _cm) = match (side(0, bonds[0]), side(1, bonds[1])) {
-            (Some(true), Some(false)) => (a, b),
-            (Some(false), Some(true)) => (b, a),
-            _ => continue,
+        let orientation = match (side(0, bonds[0]), side(1, bonds[1])) {
+            (Some(true), Some(false)) => Some((a, b)),
+            (Some(false), Some(true)) => Some((b, a)),
+            _ => None,
         };
-        let cp_bond = *bonds
+        let Some((cp, cm)) = orientation else {
+            continue;
+        };
+        let _cp_bond = *bonds
             .iter()
             .find(|&&bond| {
                 let (from, to, _) = structure.bonds[bond];
@@ -1603,11 +1609,21 @@ pub(crate) fn resolved_chem_valence(structure: &Structure, counts: &[u32]) -> Ve
         if matches!(far, Some(other) if element(other) == 7) {
             continue;
         }
-        // Promote: delta = 4 − v(cp) on the N–C bond.
-        let v_cp = bond_valence(cp, &orders) + counts[cp] as i32;
-        let delta = (4 - v_cp).max(0);
-        if delta > 0 {
-            orders[cp_bond] += delta as u32;
+        // The reference's promote loop over {Cm, Cp}: each side with
+        // v < 4 takes delta = 4 − v on its N–C bond.
+        for side_atom in [cm, cp] {
+            let v_side = bond_valence(side_atom, &orders) + counts[side_atom] as i32;
+            let delta = (4 - v_side).max(0);
+            if delta > 0 {
+                let side_bond = *bonds
+                    .iter()
+                    .find(|&&bond| {
+                        let (from, to, _) = structure.bonds[bond];
+                        (from == atom && to == side_atom) || (from == side_atom && to == atom)
+                    })
+                    .expect("the N–C bond is in the adjacency");
+                orders[side_bond] += delta as u32;
+            }
         }
         promotions += 1;
     }
