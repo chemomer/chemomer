@@ -76,7 +76,11 @@ fn main() {
     };
     let record = |case: &serde_json::Value| -> Option<String> {
         if dna {
-            case["donotaddh"].as_object().and_then(|s| s.get("aux")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            case["donotaddh"]
+                .as_object()
+                .and_then(|s| s.get("aux"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
         } else {
             case["aux"].as_str().map(|s| s.to_string())
         }
