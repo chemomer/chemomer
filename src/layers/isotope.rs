@@ -229,6 +229,7 @@ mod tests {
             element: element.to_string(),
             h_count,
             h_pinned: false,
+            valence_code: 0,
             charge: 0,
             isotope,
         }
