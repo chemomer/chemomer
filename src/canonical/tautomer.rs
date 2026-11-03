@@ -1963,7 +1963,13 @@ fn salt_round(context: &Context, state: &mut Registration) -> bool {
     // CHARGED_SALTS_ONLY: without a negative-charge donor (and unless
     // every candidate is a tautomeric endpoint) the round declines —
     // unless FLAG_FORCE_SALT_TAUT (a hard proton move happened), when
-    // any donor class suffices.
+    // any donor class suffices. (The reference's ACTIVE step-0 variant
+    // lacks this relaxation — MAX_LOCAL_TGNUM=0 MarkSaltChargeGroups
+    // relaxes solely under the ALLOW_NO_NEGTV_O option — but the
+    // corpus arbitrates: the breadth3-288/-563/-564 identifiers fold
+    // their (Hn) groups only when this step registers under the hard
+    // (DE)PROTONATION relaxation; the divergence is part of the dated
+    // salt-bit debt recorded in the aux ledger.)
     let neg_present = subtype_all & SALT_DONOR_NEG != 0;
     let all_other = candidates
         .iter()
