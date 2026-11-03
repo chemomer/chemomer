@@ -245,21 +245,18 @@ pub fn canonical_ranks_and_symmetry(
         eprintln!("{line}");
     }
 
-    let (informed, _pruned_orbits) = search_stage_two(adjacency, base, &aux_rank, hydrogens, groups);
+    let (informed, informed_orbits) =
+        search_stage_two(adjacency, base, &aux_rank, hydrogens, groups);
     let ranks: Vec<u32> = (0..n).map(|atom| informed.rank_of(atom)).collect();
-    // The stage-two orbits: the complete automorphism partition, from
-    // the unpruned enumeration (see `enumerate_full_orbits`). The
-    // pruned walk's own `informed_orbits` stay load-bearing for its
-    // candidate skipping — the pruning that keeps the rank search
-    // byte-exact on large molecules — but they only sample the
-    // automorphisms the pruned tree witnesses, and a reflection the
-    // skip hides (the 1,3-cyclohexadiene witness: the oracle records
-    // (1,2,5,6)(3,4) where sampling against the first terminal stops
-    // at (1,2)(3,4)(5,6)) never reaches the partition. The symmetry
-    // the aux equivalence classes speak is the orbit MINIMUM over the
-    // full partition, mirroring `orbit_min_symmetry`.
-    let orbits = enumerate_full_orbits(adjacency, invariants, hydrogens, groups, base, &aux_rank);
-    let informed_symmetry = orbit_minima(&ranks, &orbits);
+    // The stage-two orbits: the walk's theta partition (ichican2.c
+    // CanonGraph's UnorderedPartition) — union-find over the cycles of
+    // every transposition the walk witnesses between table+hydrogen
+    // equal terminals, against the first leaf (L7) and against the
+    // best leaf (L8), with the walk trying only candidates that are
+    // their own orbit minimum (L14's mcr skip). The symmetry the aux
+    // equivalence classes speak is the orbit MINIMUM over theta,
+    // mirroring `orbit_min_symmetry`.
+    let informed_symmetry = orbit_minima(&ranks, &informed_orbits);
     (ranks, informed_symmetry)
 }
 
@@ -276,109 +273,6 @@ fn orbit_minima(ranks: &[u32], orbits: &Orbits) -> Vec<u32> {
     (0..n)
         .map(|atom| min_by_root[orbits.representative(atom)])
         .collect()
-}
-
-/// The complete labeled-graph key of a terminal labeling: the
-/// connection table, then per position the encoded hydrogen count and
-/// the atom invariants (elements), then the t-group rows. Two
-/// labelings with equal keys are automorphic images — the position-wise
-/// map carries every label (connectivity via the table, hydrogens,
-/// elements, mobile groups) — and every automorphism of the labeled
-/// graph maps the search root to itself, so folding equal keys unions
-/// exactly the automorphism orbits.
-fn terminal_key(
-    partition: &Partition,
-    adjacency: &[Vec<usize>],
-    invariants: &[(u16, u16)],
-    hydrogens: &[u32],
-    groups: &[(u32, Vec<usize>)],
-) -> Vec<u32> {
-    let n = adjacency.len();
-    let table = ConnectionTable::build(partition.ranks(), adjacency);
-    let mut key = Vec::with_capacity(table.entries().len() + n * 3 + groups.len() * 2);
-    key.extend_from_slice(table.entries());
-    for position in 0..n {
-        let atom = partition.at_number()[position];
-        key.push(encoded_hydrogen(hydrogens[atom]));
-        key.push(u32::from(invariants[atom].0));
-        key.push(u32::from(invariants[atom].1));
-    }
-    let ranks = partition.ranks();
-    for (count, members) in groups {
-        let mut member_ranks: Vec<u32> = members.iter().map(|&m| ranks[m]).collect();
-        member_ranks.sort_unstable();
-        key.push(*count);
-        key.extend(member_ranks);
-    }
-    key
-}
-
-/// The full automorphism-orbit partition of the stage-two tree: an
-/// UNPRUNED enumeration of every terminal the search root reaches,
-/// each folded into the orbit partition by its complete labeled-graph
-/// key (`terminal_key`). The reference arrives at the same partition
-/// inside its pruned walk — every equal-terminal pair it meets yields
-/// a transposition whose orbits join into `theta` (ichican2.c
-/// `CanonGraph` L10), and the join composes generators the pruned
-/// branches never visit individually. Our union-by-key over the whole
-/// tree is the same closure computed directly.
-fn enumerate_full_orbits(
-    adjacency: &[Vec<usize>],
-    invariants: &[(u16, u16)],
-    hydrogens: &[u32],
-    groups: &[(u32, Vec<usize>)],
-    base: &Partition,
-    aux_rank: &[u32],
-) -> Orbits {
-    let n = adjacency.len();
-    let mut orbits = Orbits::new(n);
-    let mut seen: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
-    descend_orbits(
-        base, adjacency, invariants, hydrogens, groups, aux_rank, &mut orbits, &mut seen,
-    );
-    orbits
-}
-
-/// The unpruned enumeration walk (the stage-two candidate order, no
-/// orbit skipping): a terminal unions with the first terminal that
-/// carried its key, position-wise — union-find closes the relation
-/// transitively across the whole class.
-#[allow(clippy::too_many_arguments)]
-fn descend_orbits(
-    partition: &Partition,
-    adjacency: &[Vec<usize>],
-    invariants: &[(u16, u16)],
-    hydrogens: &[u32],
-    groups: &[(u32, Vec<usize>)],
-    aux_rank: &[u32],
-    orbits: &mut Orbits,
-    seen: &mut Vec<(Vec<u32>, Vec<usize>)>,
-) {
-    match partition.first_nonsingleton_cell() {
-        None => {
-            let key = terminal_key(partition, adjacency, invariants, hydrogens, groups);
-            match seen.iter().position(|(k, _)| *k == key) {
-                Some(index) => {
-                    let at_number = &seen[index].1;
-                    for position in 0..adjacency.len() {
-                        orbits.union(at_number[position], partition.at_number()[position]);
-                    }
-                }
-                None => seen.push((key, partition.at_number().to_vec())),
-            }
-        }
-        Some((start, end)) => {
-            let mut candidates: Vec<usize> = partition.at_number()[start..end].to_vec();
-            candidates.sort_by_key(|&atom| (aux_rank[atom], atom));
-            for v in candidates {
-                let mut branch = partition.clone();
-                branch.individualize(adjacency, v);
-                descend_orbits(
-                    &branch, adjacency, invariants, hydrogens, groups, aux_rank, orbits, seen,
-                );
-            }
-        }
-    }
 }
 
 /// The stereo-informed ranking verdict: ranks and symmetry of the
@@ -482,14 +376,11 @@ fn search_with_stereo(
     aux.refine(adjacency);
     let aux_rank: Vec<u32> = (0..n).map(|atom| aux.rank_of(atom)).collect();
     let base = &hfree.h_seed;
-    let (informed, _pruned_orbits) =
+    let (informed, informed_orbits) =
         search_stage_two_stereo(adjacency, base, &aux_rank, hydrogens, groups, centers, flip);
     let ranks: Vec<u32> = (0..n).map(|atom| informed.rank_of(atom)).collect();
-    // The complete automorphism partition from the unpruned
-    // enumeration, as in the stereo-free path: the pruned walk's own
-    // orbits stay load-bearing for its candidate skipping only.
-    let orbits = enumerate_full_orbits(adjacency, invariants, hydrogens, groups, base, &aux_rank);
-    let informed_symmetry = orbit_minima(&ranks, &orbits);
+    // The walk's theta partition, as in the stereo-free path.
+    let informed_symmetry = orbit_minima(&ranks, &informed_orbits);
     (ranks, informed_symmetry)
 }
 
@@ -735,6 +626,10 @@ impl Orbits {
         }
     }
 
+    /// The orbit's canonical representative — the SMALLEST member, the
+    /// reference's mcr (ichican2.c `nGetMcr2`, "minimal class
+    /// representative"). The union keeps the minimum rooted, so the
+    /// find is the mcr directly.
     pub(crate) fn representative(&self, atom: usize) -> usize {
         let mut root = atom;
         while self.parent[root] != root {
@@ -745,8 +640,16 @@ impl Orbits {
 
     pub(crate) fn union(&mut self, a: usize, b: usize) {
         let (ra, rb) = (self.representative(a), self.representative(b));
-        if ra != rb {
+        if ra == rb {
+            return;
+        }
+        // Root the union at the smaller member: the representative
+        // stays the class minimum, which is what the candidate skip
+        // tests (`try v only when v is its own theta mcr`).
+        if ra < rb {
             self.parent[rb] = ra;
+        } else {
+            self.parent[ra] = rb;
         }
     }
 }
@@ -892,13 +795,72 @@ fn descend_hinformed(
                             == hydrogens[partition.at_number()[position]]
                     })
             };
+            // The winner compare's full equality — table, hydrogen
+            // layer, t-group rows all level — the reference's layered
+            // compare reading zero (ichican2.c L8's `nu^gamma == rho`).
+            let equals = |other: &Partition| -> bool {
+                let other_table = ConnectionTable::build(other.ranks(), adjacency);
+                if table.entries() != other_table.entries() {
+                    return false;
+                }
+                let h_rows = |p: &Partition| -> Vec<u32> {
+                    (0..adjacency.len())
+                        .map(|position| encoded_hydrogen(hydrogens[p.at_number()[position]]))
+                        .collect()
+                };
+                if h_rows(partition) != h_rows(other) {
+                    return false;
+                }
+                let rows = |p: &Partition| -> Vec<(u32, Vec<u32>)> {
+                    let ranks = p.ranks();
+                    groups
+                        .iter()
+                        .map(|(count, members)| {
+                            let mut member_ranks: Vec<u32> =
+                                members.iter().map(|&m| ranks[m]).collect();
+                            member_ranks.sort_unstable();
+                            (*count, member_ranks)
+                        })
+                        .collect()
+                };
+                rows(partition) == rows(other)
+            };
             if let Some(first_partition) = first {
                 if matches(first_partition) {
+                    if tracing() {
+                        eprintln!(
+                            "S2 merge-FIRST nu_atnum={:?}",
+                            partition.at_number()
+                        );
+                    }
                     for position in 0..adjacency.len() {
                         orbits.union(
                             first_partition.at_number()[position],
                             partition.at_number()[position],
                         );
+                    }
+                } else if let Some(best_partition) = best {
+                    // The L8 branch: the leaf missed zeta but EQUALS
+                    // the best terminal — its transposition against
+                    // rho joins theta too (ichican2.c: nu^gamma ==
+                    // rho → PartitionGetTransposition(&pi[k-1], &rho)
+                    // → L10). Generators the first-terminal star
+                    // never witnesses compose here — the reflections
+                    // the first-equal unions alone stop short of
+                    // (the (1,2,5,6)(3,4) cyclohexadiene witness).
+                    if equals(best_partition) {
+                        if tracing() {
+                            eprintln!(
+                                "S2 merge-RHO nu_atnum={:?}",
+                                partition.at_number()
+                            );
+                        }
+                        for position in 0..adjacency.len() {
+                            orbits.union(
+                                best_partition.at_number()[position],
+                                partition.at_number()[position],
+                            );
+                        }
                     }
                 }
             } else {
@@ -950,14 +912,16 @@ fn descend_hinformed(
                 *best = Some(partition.clone());
                 if tracing() {
                     eprintln!(
-                        "S2 terminal BETTER ct={:?} hydrogens={:?}",
+                        "S2 terminal BETTER nu_atnum={:?} ct={:?} hydrogens={:?}",
+                        partition.at_number(),
                         table.entries(),
                         counts(partition)
                     );
                 }
             } else if tracing() {
                 eprintln!(
-                    "S2 terminal keep ct={:?} hydrogens={:?}",
+                    "S2 terminal keep nu_atnum={:?} ct={:?} hydrogens={:?}",
+                    partition.at_number(),
                     table.entries(),
                     counts(partition)
                 );
