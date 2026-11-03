@@ -110,6 +110,15 @@ impl Engine {
                     frame_shift: crate::options::FrameShift::None,
                     ..options.clone()
                 };
+                // The unedited echo re-runs the pipeline under the
+                // same options minus the edits — the DoNotAddH pin
+                // rides along (the oracle's /U/ appendix repeats the
+                // CRV deficiency digits the pin produces).
+                if unedited_options.do_not_add_h {
+                    for atom in &mut unedited.atoms {
+                        atom.h_pinned = true;
+                    }
+                }
                 let unedited_polymer = polymer_treat(&mut unedited, &original, &unedited_options)?;
                 let engine = Self::from_prepared(
                     unedited.clone(),
