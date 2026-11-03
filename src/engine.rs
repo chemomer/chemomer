@@ -941,7 +941,23 @@ impl Engine {
 fn fixed_h_centers(working: &Structure, options: &Options) -> Vec<(usize, Vec<usize>, u32)> {
     let counts = standardization::adjusted_hydrogens(working);
     let ranks = crate::layers::hydrogen::canonical_ranks_for(working);
-    crate::canonical::stereo::center_inputs(working, &counts, &ranks, options.stereo_at_zz)
+    let (adjacency, invariants) = crate::canonical::graph_of(working);
+    let mask = crate::canonical::tautomer::endpoint_mask(working, &counts);
+    let groups = crate::canonical::group_membership(working, &counts);
+    let ligand_symmetry = crate::canonical::canonical_ranks_and_symmetry(
+        &adjacency,
+        &invariants,
+        &crate::canonical::tautomer::without_mobile_h(&counts, &mask),
+        &groups,
+    )
+    .1;
+    crate::canonical::stereo::center_inputs(
+        working,
+        &counts,
+        &ranks,
+        &ligand_symmetry,
+        options.stereo_at_zz,
+    )
 }
 
 /// Whether the main aux verdict adopted its inverted pass (the aux

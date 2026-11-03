@@ -39,7 +39,7 @@ pub use error::{Error, Result};
 pub use graph::{AtomRecord, Structure};
 pub use options::Options;
 pub use rinchi::{
-    parse_rxn, reaction_from_rinchi, reaction_from_rinchi_with_auxinfo, RinchiComponent,
+    parse_rdf, parse_rxn, reaction_from_rinchi, reaction_from_rinchi_with_auxinfo, RinchiComponent,
     RinchiReaction,
 };
 
@@ -65,4 +65,11 @@ pub fn structure_from_inchi(inchi: &str) -> Result<Structure> {
 /// reaction-identity layer's input edge.
 pub fn parse_rxnfile(input: &str) -> Result<RinchiReaction> {
     rinchi::parse_rxn(input)
+}
+
+/// Parses an MDL RDfile (reaction datafile) into a [`RinchiReaction`]
+/// — the RXN block verbatim, then the `$DATUM $MFMT` agent blocks
+/// (see [`rinchi::parse_rdf`]).
+pub fn parse_rdfile(input: &str) -> Result<RinchiReaction> {
+    rinchi::parse_rdf(input)
 }

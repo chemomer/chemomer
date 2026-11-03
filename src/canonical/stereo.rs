@@ -94,6 +94,7 @@ pub fn segments(
     hydrogens: &[u32],
     ranks: &[u32],
     symmetry: &[u32],
+    ligand_symmetry: &[u32],
     emission: Emission,
 ) -> Vec<(char, String)> {
     let wedged = wedged_centers(structure);
@@ -101,7 +102,13 @@ pub fn segments(
     if !defined_exists && !emission.keep_undefined {
         return Vec::new();
     }
-    let mut centers = candidates(structure, hydrogens, ranks, emission.allow_at_pseudo);
+    let mut centers = candidates(
+        structure,
+        hydrogens,
+        ranks,
+        ligand_symmetry,
+        emission.allow_at_pseudo,
+    );
     for &(atom, bond_index, down) in &wedged {
         if let Some(center) = centers.iter_mut().find(|c| c.atom == atom) {
             let Some(down) = down else {
@@ -302,6 +309,7 @@ pub fn center_inputs(
     structure: &Structure,
     hydrogens: &[u32],
     ranks: &[u32],
+    ligand_symmetry: &[u32],
     allow_at_pseudo: bool,
 ) -> Vec<(usize, Vec<usize>, u32)> {
     let wedged = wedged_centers(structure);
@@ -313,10 +321,15 @@ pub fn center_inputs(
         let Some(down) = down else {
             continue;
         };
-        let Some(center) = candidates(structure, hydrogens, ranks, allow_at_pseudo)
-            .into_iter()
-            .find(|c| c.atom == atom)
-        else {
+        let Some(center) = candidates(
+            structure,
+            hydrogens,
+            ranks,
+            ligand_symmetry,
+            allow_at_pseudo,
+        )
+        .into_iter()
+        .find(|c| c.atom == atom) else {
             continue;
         };
         let ligands = center.heavy_by_neighbor_order();
@@ -385,11 +398,27 @@ pub(crate) fn informed_verdict(
     strip_mobile_h: bool,
     allow_at_pseudo: bool,
 ) -> Option<StereoVerdict> {
-    let centers = center_inputs(structure, counts, ranks, allow_at_pseudo);
+    let (adjacency, invariants) = crate::canonical::graph_of(structure);
+    // The ligand-identity classes the candidate filter judges with
+    // (the reference's nSymmRank): the H-aware constitutional
+    // equivalence of the same input assembly the verdict speaks.
+    let ligand_symmetry = if strip_mobile_h {
+        let mask = crate::canonical::tautomer::endpoint_mask(structure, counts);
+        crate::canonical::canonical_ranks_and_symmetry(
+            &adjacency,
+            &invariants,
+            &crate::canonical::tautomer::without_mobile_h(counts, &mask),
+            &[],
+        )
+        .1
+    } else {
+        let groups = crate::canonical::group_membership(structure, counts);
+        crate::canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, counts, &groups).1
+    };
+    let centers = center_inputs(structure, counts, ranks, &ligand_symmetry, allow_at_pseudo);
     if centers.is_empty() {
         return None;
     }
-    let (adjacency, invariants) = crate::canonical::graph_of(structure);
     let (hydrogens, groups): (Vec<u32>, Vec<(u32, Vec<usize>)>) = if strip_mobile_h {
         let mask = crate::canonical::tautomer::endpoint_mask(structure, counts);
         (
@@ -473,6 +502,7 @@ fn candidates(
     structure: &Structure,
     hydrogens: &[u32],
     ranks: &[u32],
+    ligand_symmetry: &[u32],
     allow_at_pseudo: bool,
 ) -> Vec<Center> {
     let mut out = Vec::new();
@@ -504,7 +534,15 @@ fn candidates(
         if !tetrahedral {
             continue;
         }
-        let mut ligands: Vec<u32> = neighbors.iter().map(|&a| ranks[a]).collect();
+        // The four ligands must be DISTINCT — the reference judges
+        // identity by the constitutional equivalence classes (the
+        // nSymmRank the canonicalization's orbits speak), so two
+        // same-orbit ligands void the center (the Si of the Example 04
+        // recording carries two equivalent phenyls; the tert-butyl
+        // carbon three equivalent methyls — neither is a candidate,
+        // not even the undefined `?` kind). Canonical ranks do not
+        // speak identity — symmetric ligands carry different ones.
+        let mut ligands: Vec<u32> = neighbors.iter().map(|&a| ligand_symmetry[a]).collect();
         ligands.sort_unstable();
         ligands.dedup();
         if ligands.len() != neighbors.len() {
@@ -570,11 +608,19 @@ mod tests {
         let (adjacency, invariants) = crate::canonical::graph_of(structure);
         let symmetry = crate::canonical::base_symmetry(&adjacency, &invariants);
         let ranks = crate::canonical::canonical_ranks(&adjacency, &invariants, &hydrogens, &[]);
+        let ligand_symmetry = crate::canonical::canonical_ranks_and_symmetry(
+            &adjacency,
+            &invariants,
+            &hydrogens,
+            &[],
+        )
+        .1;
         let got = segments(
             structure,
             &hydrogens,
             &ranks,
             &symmetry,
+            &ligand_symmetry,
             Emission::default(),
         );
         let want: Vec<(char, String)> = expected
@@ -662,6 +708,7 @@ mod tests {
             &[3, 1, 2, 2, 3],
             &[5, 4, 2, 3, 1],
             &[1, 2, 3, 4, 5],
+            &[1, 2, 3, 4, 5],
             Emission::default()
         )
         .is_empty());
@@ -673,6 +720,7 @@ mod tests {
                 &butanol(0, layout, 1),
                 &[3, 1, 2, 2, 3],
                 &[5, 4, 2, 3, 1],
+                &[1, 2, 3, 4, 5],
                 &[1, 2, 3, 4, 5],
                 Emission {
                     keep_undefined: true,

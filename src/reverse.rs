@@ -1402,6 +1402,9 @@ fn perceived_stereo(structure: &Structure) -> Vec<(char, String)> {
     let no_taut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
     let symmetry = crate::canonical::base_symmetry(&adjacency, &invariants);
     let groups = crate::canonical::group_membership(structure, &counts);
+    let ligand_symmetry =
+        crate::canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, &no_taut, &groups)
+            .1;
     let ranks = crate::canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
     let mut out = crate::canonical::bond_stereo::segments(
         structure,
@@ -1414,6 +1417,7 @@ fn perceived_stereo(structure: &Structure) -> Vec<(char, String)> {
         &counts,
         &ranks,
         &symmetry,
+        &ligand_symmetry,
         crate::canonical::stereo::Emission::default(),
     ));
     out
