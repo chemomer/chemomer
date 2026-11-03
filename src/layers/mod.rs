@@ -78,7 +78,7 @@ pub fn default_layers(
     let mut layers: Vec<Box<dyn LayerEmitter>> = vec![
         Box::new(formula::FormulaLayer),
         Box::new(connection::ConnectionLayer),
-        Box::new(hydrogen::HydrogenLayer),
+        Box::new(hydrogen::HydrogenLayer::new(options.do_not_add_h)),
         Box::new(charge::ChargeLayer),
         Box::new(proton::ProtonLayer::with_shift(proton_shift)),
         Box::new(stereo::BLayer::with_options(options.clone())),

@@ -1322,6 +1322,24 @@ pub fn main_canon_groups(structure: &Structure, hydrogens: &[u32]) -> Vec<(u32, 
         .collect()
 }
 
+/// [`main_canon_groups`] carrying each group's mobile charge — the
+/// t-group nodes' `num[0]`/`num[1]` pair the TAUT canonicalization's
+/// invariant deck reads. Registration order preserved.
+pub fn main_canon_groups_charged(
+    structure: &Structure,
+    hydrogens: &[u32],
+) -> Vec<(u32, u32, Vec<usize>)> {
+    let charge_units = charge_units_of(structure);
+    group_membership(structure, hydrogens)
+        .into_iter()
+        .filter(|&(count, _)| count > 0)
+        .map(|(count, members)| {
+            let charge: u32 = members.iter().map(|&m| charge_units(m)).sum();
+            (count, charge, members)
+        })
+        .collect()
+}
+
 /// Stage-2 hydrogen counts: the given counts with mobile H removed —
 /// the reference's `numHNoTautH`, which both the `/c` and `/h`
 /// canonicalizations rank by.

@@ -168,10 +168,25 @@ pub fn aux_info(
             inverted_block = "/it:im".to_string();
         }
     } else if tautomeric {
+        // The tautomeric aux numbering speaks the TAUT pass: the
+        // t-group nodes join the canonicalization over the base pass's
+        // equitable seed, so the numbering and the equivalence classes
+        // see the group membership (an acid pair ranks ahead of a
+        // non-endpoint twin, and the pair alone is the class).
         let mask = crate::canonical::tautomer::endpoint_mask(working, &counts);
         let notaut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
-        let (ranks, classes) =
-            crate::canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, &notaut, &[]);
+        let groups_charged =
+            crate::canonical::tautomer::main_canon_groups_charged(working, &counts);
+        let (ranks, classes) = if groups_charged.is_empty() || !options.do_not_add_h {
+            crate::canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, &notaut, &[])
+        } else {
+            crate::canonical::taut_ranks_and_symmetry(
+                &adjacency,
+                &invariants,
+                &notaut,
+                &groups_charged,
+            )
+        };
         ranks_aux = ranks;
         symmetry = classes;
     } else {

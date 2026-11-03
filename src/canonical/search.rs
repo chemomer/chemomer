@@ -94,22 +94,72 @@ struct HfreeCanon {
 fn hfree_canonical(adjacency: &[Vec<usize>], invariants: &[(u16, u16)]) -> HfreeCanon {
     let mut initial = Partition::initial(invariants);
     initial.refine(adjacency);
-    let first = search_stage_one(adjacency, &initial, "S1 enter pi0");
+    // The plain walk keeps the reference's no-skip candidate order:
+    // its first-leaf tie-breaks are what the corpus was won with.
+    hfree_canonical_bounded(
+        adjacency,
+        initial,
+        adjacency.len(),
+        true,
+        adjacency,
+        &[],
+        false,
+    )
+}
+
+/// The fix-and-rerun flow over a ready-made seed partition, with the
+/// search's individualization bounded to the first `atom_bound` nodes
+/// (the t-group-tail variant never branches on the tail cells). The
+/// walk refines over `refine_adjacency` and compares terminals over
+/// `adjacency` — the taut pass refines the ATOM-ONLY view (the
+/// reference's digraph refinement drops the neighbors ranked above
+/// the atoms) while its terminal tables carry the t-group rows. The
+/// rerun is the reference's FixCanonEquivalenceInfo second pass; the
+/// TAUT canonicalization runs a single walk (one CanonGraph call), so
+/// the taut entry point passes `rerun: false`.
+#[allow(clippy::too_many_arguments)]
+fn hfree_canonical_bounded(
+    adjacency: &[Vec<usize>],
+    initial: Partition,
+    atom_bound: usize,
+    rerun: bool,
+    refine_adjacency: &[Vec<usize>],
+    aux_rank: &[u32],
+    theta_skip: bool,
+) -> HfreeCanon {
+    let first = search_stage_one(
+        adjacency,
+        &initial,
+        "S1 enter pi0",
+        atom_bound,
+        refine_adjacency,
+        aux_rank,
+        theta_skip,
+    );
     let first_symmetry = orbit_min_symmetry(&first);
     let h_seed = class_partition(&first_symmetry);
     // `bChangeCurrRank` compares the rebuilt class ranks against the
     // ORIGINAL seed's ranks (the reference never re-runs the fix, so
     // the comparison baseline stays the first equitable partition).
     let ranks_changed = h_seed.ranks() != initial.ranks();
-    let final_search = if ranks_changed || !class_ranks_are_contiguous(&first_symmetry) {
-        search_stage_one(adjacency, &h_seed, "S1 rerun pi0")
+    let rerun_triggered = rerun && (ranks_changed || !class_ranks_are_contiguous(&first_symmetry));
+    let final_search = if rerun_triggered {
+        search_stage_one(
+            adjacency,
+            &h_seed,
+            "S1 rerun pi0",
+            atom_bound,
+            refine_adjacency,
+            aux_rank,
+            theta_skip,
+        )
     } else {
         first
     };
-    let root = if ranks_changed || !class_ranks_are_contiguous(&first_symmetry) {
+    let root = if rerun_triggered {
         h_seed.clone()
     } else {
-        initial.clone()
+        initial
     };
     HfreeCanon {
         final_search,
@@ -246,7 +296,7 @@ pub fn canonical_ranks_and_symmetry(
     }
 
     let (informed, informed_orbits) =
-        search_stage_two(adjacency, base, &aux_rank, hydrogens, groups);
+        search_stage_two(adjacency, base, &aux_rank, hydrogens, groups, n, adjacency);
     let ranks: Vec<u32> = (0..n).map(|atom| informed.rank_of(atom)).collect();
     // The stage-two orbits: the walk's theta partition (ichican2.c
     // CanonGraph's UnorderedPartition) — union-find over the cycles of
@@ -416,7 +466,7 @@ fn descend_hfree_stereo(
                 None => true,
                 Some(best_partition) => {
                     let best_table = ConnectionTable::build(best_partition.ranks(), adjacency);
-                    match table.compare(&best_table) {
+                    match table.compare_layered(&best_table) {
                         std::cmp::Ordering::Greater => true,
                         std::cmp::Ordering::Less => false,
                         std::cmp::Ordering::Equal => {
@@ -542,7 +592,7 @@ fn descend_stereo(
                 None => true,
                 Some(best_partition) => {
                     let best_table = ConnectionTable::build(best_partition.ranks(), adjacency);
-                    match table.compare(&best_table) {
+                    match table.compare_layered(&best_table) {
                         std::cmp::Ordering::Greater => true,
                         std::cmp::Ordering::Less => false,
                         std::cmp::Ordering::Equal => {
@@ -617,6 +667,177 @@ pub fn canonical_table(
     ConnectionTable::build(&ranks, adjacency)
 }
 
+/// The t-group-aware canonicalization — the reference's TAUT pass
+/// (ichican2.c `GetBaseCanonRanking`, the `TAUT_YES` run): the atoms
+/// enter pre-ranked by the H-free base pass's equitable partition
+/// (`pAtomInvariant[i].val[0] = pRankStack[0][i]` under
+/// `bTautGroupsOnly`), the t-groups join as appended nodes with their
+/// own invariants (`val[0] = num_at_tg`, `NUM_CONNECTIONS = MAXVAL+1`,
+/// the endpoint count and the `num[]` pair at the TAUT_ISO slots), the
+/// whole set refines over the augmented graph, and the search
+/// individualizes ATOMS only (`PartitionGetFirstCell` over `n`) while
+/// the t-group tail rides. The connection table grows the t-group rows
+/// (`tgroup_rank, endpoint ranks ascending` — the reference's CT
+/// format comment), which is what pulls the group's endpoints against
+/// a non-endpoint twin the base numbering left tied (the DoNotAddH
+/// bicarbonate witness: the acid pair ranks ahead of the H-less O).
+///
+/// Returns the atom numbering and the atom equivalence classes of the
+/// winning pass — the pair the identifier's `/h` digits and the aux
+/// `/N:`/`/E:` speak for a tautomeric structure.
+pub fn taut_ranks_and_symmetry(
+    adjacency: &[Vec<usize>],
+    invariants: &[(u16, u16)],
+    hydrogens: &[u32],
+    groups: &[(u32, u32, Vec<usize>)],
+) -> (Vec<u32>, Vec<u32>) {
+    let n = adjacency.len();
+    let g = groups.len();
+    let total = n + g;
+
+    // The base pass's equitable partition supplies the atom seed ranks.
+    let mut base_initial = Partition::initial(invariants);
+    base_initial.refine(adjacency);
+
+    // The augmented graph: t-group node n+k links its members.
+    let mut augmented: Vec<Vec<usize>> = adjacency.to_vec();
+    augmented.resize(total, Vec::new());
+    for (k, (_, _, members)) in groups.iter().enumerate() {
+        let tg = n + k;
+        for &m in members {
+            augmented[m].push(tg);
+            augmented[tg].push(m);
+        }
+    }
+
+    // The seed invariants, the reference's bTautGroupsOnly deck: the
+    // atoms carry ONLY their base-pass rank (every other field zero —
+    // the t-group data stays off the atoms, so the base-tied cell
+    // stays tied into the walk), the t-group nodes carry
+    // (num_at_tg, MAXVAL+1) and the (endpoints, num_H, num_minus)
+    // fields behind them.
+    let tg_first: u32 = (total as u32) << 8 | 21;
+    let mut seed: Vec<(u32, u32)> = (0..n).map(|i| (base_initial.rank_of(i), 0)).collect();
+    for (count, charge, members) in groups.iter() {
+        let fields =
+            (members.len() as u32).min(4095) << 24 | (*count).min(4095) << 12 | (*charge).min(4095);
+        seed.push((tg_first, fields));
+    }
+
+    // The refinement view: the digraph refinement (DifferentiateRanks4)
+    // drops every neighbor ranked above the atoms — the atoms' vectors
+    // lose their t-group edges, the t-group nodes keep theirs. The
+    // t-group ranks never leave the tail, so the rank-based exclusion
+    // is a static filter.
+    let refine_view: Vec<Vec<usize>> = (0..total)
+        .map(|node| {
+            if node < n {
+                augmented[node]
+                    .iter()
+                    .copied()
+                    .filter(|&neigh| neigh < n)
+                    .collect()
+            } else {
+                augmented[node].clone()
+            }
+        })
+        .collect();
+
+    // The taut pass: the walk runs over the UNREFINED seed — the atoms
+    // enter tied by their base ranks (the reference's
+    // `bTautGroupsOnly` deck zeroes every atom field beyond the
+    // base-pass rank), so the branch tree opens on the base-tied cell
+    // and the branch that orders a group endpoint ahead of a
+    // non-endpoint twin is among the candidates the layered compare
+    // judges. The walk refines over the atom-only view (the reference's
+    // digraph refinement drops neighbors ranked above the atoms) and
+    // one walk, no rerun (the reference's taut canonicalization is a
+    // single CanonGraph).
+    let taut_initial = Partition::initial_pair(&seed);
+    // The walk's candidate order rides the reference's auxiliary rank
+    // ((partition rank, encoded H) — the hydrogen-bearing endpoints
+    // branch first, the instrumented k-order shows).
+    let taut_aux: Vec<u32> = (0..total)
+        .map(|node| {
+            // Clamped: the seed ranks and the t-group sentinel fit the
+            // 16-bit high half for any corpus-sized structure, and the
+            // t-group nodes never branch anyway.
+            (seed[node].0.min(0xFFFF) << 16)
+                | encoded_hydrogen(hydrogens.get(node).copied().unwrap_or(0)).min(0xFFFF)
+        })
+        .collect();
+    let hfree = hfree_canonical_bounded(
+        &augmented,
+        taut_initial,
+        n,
+        false,
+        &refine_view,
+        &taut_aux,
+        true,
+    );
+    let symmetry = orbit_min_symmetry(&hfree.final_search);
+    let symmetry = if hydrogens_uniform(&symmetry, hydrogens) {
+        symmetry
+    } else {
+        let aux_invariants: Vec<(u32, u32)> = (0..total)
+            .map(|node| {
+                (
+                    symmetry[node],
+                    encoded_hydrogen(hydrogens.get(node).copied().unwrap_or(0)),
+                )
+            })
+            .collect();
+        let mut aux = Partition::initial_pair(&aux_invariants);
+        aux.refine(&refine_view);
+        let aux_rank: Vec<u32> = (0..total).map(|node| aux.rank_of(node)).collect();
+        let base = &hfree.h_seed;
+        let (informed, informed_orbits) =
+            search_stage_two(&augmented, base, &aux_rank, hydrogens, &[], n, &refine_view);
+        let informed_ranks: Vec<u32> = (0..total).map(|node| informed.rank_of(node)).collect();
+        orbit_minima(&informed_ranks, &informed_orbits)
+    };
+
+    // The stereo pass's tie-class walk: the numbering the identifier's
+    // /h digits and the aux /N:/E: actually speak (ichimak2.c reads
+    // nCanonOrdStereo whenever the stereo layers ran — the default —
+    // and builds pCanonRank from it). The pass re-seeds from the
+    // taut winner's classes (FixCanonEquivalenceInfo's hand-off to
+    // map_stereo_bonds4) and re-numbers WITHIN the classes: the cell's
+    // candidates walk by atom number, so a class whose members the
+    // taut winner ordered against atom order flips here (the
+    // center-free tie class the DoNotAddH aux debts live on).
+    let reseeded = class_partition(&symmetry);
+    let stereo = hfree_canonical_bounded(&augmented, reseeded, n, false, &refine_view, &[], true);
+    let stereo_symmetry = orbit_min_symmetry(&stereo.final_search);
+    let stereo_ranks: Vec<u32>;
+    let stereo_atom_symmetry: Vec<u32>;
+    if hydrogens_uniform(&stereo_symmetry, hydrogens) {
+        stereo_ranks = (0..total)
+            .map(|node| stereo.final_search.partition.rank_of(node))
+            .collect();
+        stereo_atom_symmetry = stereo_symmetry[..n].to_vec();
+    } else {
+        let aux_invariants: Vec<(u32, u32)> = (0..total)
+            .map(|node| {
+                (
+                    stereo_symmetry[node],
+                    encoded_hydrogen(hydrogens.get(node).copied().unwrap_or(0)),
+                )
+            })
+            .collect();
+        let mut aux = Partition::initial_pair(&aux_invariants);
+        aux.refine(&refine_view);
+        let aux_rank: Vec<u32> = (0..total).map(|node| aux.rank_of(node)).collect();
+        let base = &stereo.h_seed;
+        let (informed, informed_orbits) =
+            search_stage_two(&augmented, base, &aux_rank, hydrogens, &[], n, &refine_view);
+        stereo_ranks = (0..total).map(|node| informed.rank_of(node)).collect();
+        stereo_atom_symmetry = orbit_minima(&stereo_ranks, &informed_orbits)[..n].to_vec();
+    }
+
+    (stereo_ranks[..n].to_vec(), stereo_atom_symmetry)
+}
+
 /// Disjoint sets over atoms, merged by position-wise mappings of
 /// automorphic terminal labelings.
 pub(crate) struct Orbits {
@@ -663,15 +884,26 @@ struct StageOne {
     orbits: Orbits,
 }
 
-fn search_stage_one(adjacency: &[Vec<usize>], root: &Partition, trace_tag: &str) -> StageOne {
+#[allow(clippy::too_many_arguments)]
+fn search_stage_one(
+    adjacency: &[Vec<usize>],
+    root: &Partition,
+    trace_tag: &str,
+    atom_bound: usize,
+    refine_adjacency: &[Vec<usize>],
+    aux_rank: &[u32],
+    theta_skip: bool,
+) -> StageOne {
     let n = adjacency.len();
     trace_partition(trace_tag, root);
     let mut state = StageOneState {
         first: None,
         best: None,
         orbits: Orbits::new(n),
+        aux_rank: aux_rank.to_vec(),
+        theta_skip,
     };
-    descend_hfree(root, adjacency, &mut state);
+    descend_hfree(root, adjacency, refine_adjacency, &mut state, atom_bound);
     StageOne {
         partition: state.best.expect("a discrete partition is always reached"),
         orbits: state.orbits,
@@ -682,12 +914,53 @@ struct StageOneState {
     first: Option<Partition>,
     best: Option<Partition>,
     orbits: Orbits,
+    /// The auxiliary candidate ranking (the reference's nAuxRank): the
+    /// cell's candidates walk by `(aux, atom)` when present, by atom
+    /// otherwise.
+    aux_rank: Vec<u32>,
+    /// The L14 theta skip: candidates an already-witnessed orbit
+    /// covers drop out of the branch tree. The t-group walks need it
+    /// (their base-tied seeds explode otherwise); the plain walk
+    /// keeps the reference's no-skip order.
+    theta_skip: bool,
 }
 
-fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut StageOneState) {
-    match partition.first_nonsingleton_cell() {
+/// A fully discrete copy of a leaf partition: any remaining tied cells
+/// (the t-group tail the search never branches on) split by node
+/// order, so the connection table sees distinct ranks. All leaves
+/// resolve identically, so the comparisons keep their meaning.
+fn resolved_leaf(partition: &Partition, adjacency: &[Vec<usize>], atom_bound: usize) -> Partition {
+    if partition
+        .first_nonsingleton_cell_within(atom_bound)
+        .is_none()
+        && partition.first_nonsingleton_cell().is_none()
+    {
+        return partition.clone();
+    }
+    let mut resolved = partition.clone();
+    while let Some((start, end)) = resolved.first_nonsingleton_cell() {
+        let mut candidates: Vec<usize> = resolved.at_number()[start..end].to_vec();
+        candidates.sort_unstable();
+        for v in candidates.into_iter().skip(1) {
+            resolved.individualize(adjacency, v);
+        }
+    }
+    let _ = atom_bound;
+    resolved
+}
+
+#[allow(clippy::too_many_arguments)]
+fn descend_hfree(
+    partition: &Partition,
+    adjacency: &[Vec<usize>],
+    refine_adjacency: &[Vec<usize>],
+    state: &mut StageOneState,
+    atom_bound: usize,
+) {
+    match partition.first_nonsingleton_cell_within(atom_bound) {
         None => {
-            let table = ConnectionTable::build(partition.ranks(), adjacency);
+            let leaf = resolved_leaf(partition, refine_adjacency, atom_bound);
+            let table = ConnectionTable::build(leaf.ranks(), adjacency);
             if let Some(first) = &state.first {
                 if table.entries() == ConnectionTable::build(first.ranks(), adjacency).entries() {
                     // Automorphic image of the first terminal: merge
@@ -695,7 +968,7 @@ fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut St
                     for position in 0..adjacency.len() {
                         state
                             .orbits
-                            .union(first.at_number()[position], partition.at_number()[position]);
+                            .union(first.at_number()[position], leaf.at_number()[position]);
                     }
                 }
                 if tracing() {
@@ -707,7 +980,7 @@ fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut St
                     );
                 }
             } else {
-                state.first = Some(partition.clone());
+                state.first = Some(leaf.clone());
                 if tracing() {
                     eprintln!("S1 terminal ct={:?} FIRST", table.entries());
                 }
@@ -715,12 +988,13 @@ fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut St
             let better = match &state.best {
                 None => true,
                 Some(best_partition) => {
-                    table.compare(&ConnectionTable::build(best_partition.ranks(), adjacency))
+                    table
+                        .compare_layered(&ConnectionTable::build(best_partition.ranks(), adjacency))
                         == std::cmp::Ordering::Greater
                 }
             };
             if better {
-                state.best = Some(partition.clone());
+                state.best = Some(leaf);
             }
         }
         Some((start, end)) => {
@@ -732,16 +1006,30 @@ fn descend_hfree(partition: &Partition, adjacency: &[Vec<usize>], state: &mut St
             // increasing ATOM NUMBER, not by the partition's
             // within-cell order. The order decides which of several
             // table-equal maxima is the winner, and with it the rank
-            // values of the symmetry classes.
+            // values of the symmetry classes. From the second
+            // candidate on the theta skip applies (ichican2.c L14): a
+            // vertex the witnessed automorphisms already cover roots
+            // a subtree of automorphic images — same tables, no new
+            // verdicts — and is skipped.
             let mut candidates: Vec<usize> = partition.at_number()[start..end].to_vec();
-            candidates.sort_unstable();
-            for v in candidates {
+            if state.aux_rank.is_empty() {
+                candidates.sort_unstable();
+            } else {
+                candidates.sort_by_key(|&v| (state.aux_rank[v], v));
+            }
+            for (index, &v) in candidates.iter().enumerate() {
+                if state.theta_skip && index > 0 && state.orbits.representative(v) != v {
+                    if tracing() {
+                        eprintln!("S1 skip v={} (orbit)", v + 1);
+                    }
+                    continue;
+                }
                 let mut branch = partition.clone();
-                branch.individualize(adjacency, v);
+                branch.individualize(refine_adjacency, v);
                 if tracing() {
                     trace_partition(&format!("S1 indiv v={}", v + 1), &branch);
                 }
-                descend_hfree(&branch, adjacency, state);
+                descend_hfree(&branch, adjacency, refine_adjacency, state, atom_bound);
             }
         }
     }
@@ -753,6 +1041,8 @@ fn search_stage_two(
     aux_rank: &[u32],
     hydrogens: &[u32],
     groups: &[(u32, Vec<usize>)],
+    atom_bound: usize,
+    refine_adjacency: &[Vec<usize>],
 ) -> (Partition, Orbits) {
     let n = adjacency.len();
     let mut best: Option<Partition> = None;
@@ -761,12 +1051,14 @@ fn search_stage_two(
     descend_hinformed(
         aux,
         adjacency,
+        refine_adjacency,
         aux_rank,
         hydrogens,
         groups,
         &mut first,
         &mut best,
         &mut orbits,
+        atom_bound,
     );
     (
         best.expect("a discrete partition is always reached"),
@@ -778,25 +1070,30 @@ fn search_stage_two(
 fn descend_hinformed(
     partition: &Partition,
     adjacency: &[Vec<usize>],
+    refine_adjacency: &[Vec<usize>],
     aux_rank: &[u32],
     hydrogens: &[u32],
     groups: &[(u32, Vec<usize>)],
     first: &mut Option<Partition>,
     best: &mut Option<Partition>,
     orbits: &mut Orbits,
+    atom_bound: usize,
 ) {
-    let cell = match partition.first_nonsingleton_cell() {
+    let cell = match partition.first_nonsingleton_cell_within(atom_bound) {
         Some(span) => span,
         None => {
-            let ranks = partition.ranks();
+            let leaf = resolved_leaf(partition, refine_adjacency, atom_bound);
+            let ranks = leaf.ranks();
             let table = ConnectionTable::build(ranks, adjacency);
             // Table-equal terminals are automorphic images: fold the
-            // position-wise mapping into the orbit partition.
+            // position-wise mapping into the orbit partition. The
+            // hydrogen rows cover the atoms only — the t-group tail's
+            // entries are candidate-constant.
             let matches = |other: &Partition| {
                 table.entries() == ConnectionTable::build(other.ranks(), adjacency).entries()
-                    && (0..adjacency.len()).all(|position| {
+                    && (0..atom_bound).all(|position| {
                         hydrogens[other.at_number()[position]]
-                            == hydrogens[partition.at_number()[position]]
+                            == hydrogens[leaf.at_number()[position]]
                     })
             };
             // The winner compare's full equality — table, hydrogen
@@ -808,11 +1105,11 @@ fn descend_hinformed(
                     return false;
                 }
                 let h_rows = |p: &Partition| -> Vec<u32> {
-                    (0..adjacency.len())
+                    (0..atom_bound)
                         .map(|position| encoded_hydrogen(hydrogens[p.at_number()[position]]))
                         .collect()
                 };
-                if h_rows(partition) != h_rows(other) {
+                if h_rows(&leaf) != h_rows(other) {
                     return false;
                 }
                 let rows = |p: &Partition| -> Vec<(u32, Vec<u32>)> {
@@ -827,17 +1124,17 @@ fn descend_hinformed(
                         })
                         .collect()
                 };
-                rows(partition) == rows(other)
+                rows(&leaf) == rows(other)
             };
             if let Some(first_partition) = first {
                 if matches(first_partition) {
                     if tracing() {
-                        eprintln!("S2 merge-FIRST nu_atnum={:?}", partition.at_number());
+                        eprintln!("S2 merge-FIRST nu_atnum={:?}", leaf.at_number());
                     }
                     for position in 0..adjacency.len() {
                         orbits.union(
                             first_partition.at_number()[position],
-                            partition.at_number()[position],
+                            leaf.at_number()[position],
                         );
                     }
                 } else if let Some(best_partition) = best {
@@ -851,21 +1148,21 @@ fn descend_hinformed(
                     // (the (1,2,5,6)(3,4) cyclohexadiene witness).
                     if equals(best_partition) {
                         if tracing() {
-                            eprintln!("S2 merge-RHO nu_atnum={:?}", partition.at_number());
+                            eprintln!("S2 merge-RHO nu_atnum={:?}", leaf.at_number());
                         }
                         for position in 0..adjacency.len() {
                             orbits.union(
                                 best_partition.at_number()[position],
-                                partition.at_number()[position],
+                                leaf.at_number()[position],
                             );
                         }
                     }
                 }
             } else {
-                *first = Some(partition.clone());
+                *first = Some(leaf.clone());
             }
             let counts = |p: &Partition| -> Vec<u32> {
-                (0..adjacency.len())
+                (0..atom_bound)
                     .map(|atom| encoded_hydrogen(hydrogens[p.at_number()[atom]]))
                     .collect()
             };
@@ -887,11 +1184,11 @@ fn descend_hinformed(
                 None => true,
                 Some(best_partition) => {
                     let best_table = ConnectionTable::build(best_partition.ranks(), adjacency);
-                    match table.compare(&best_table) {
+                    match table.compare_layered(&best_table) {
                         std::cmp::Ordering::Greater => true,
                         std::cmp::Ordering::Less => false,
                         std::cmp::Ordering::Equal => {
-                            match counts(partition).cmp(&counts(best_partition)) {
+                            match counts(&leaf).cmp(&counts(best_partition)) {
                                 // The M3 corpus decode: at table-equal
                                 // terminals the SMALLER encoded
                                 // hydrogen vector wins. The encoding
@@ -900,14 +1197,14 @@ fn descend_hinformed(
                                 // would invert (see `encoded_hydrogen`).
                                 std::cmp::Ordering::Less => true,
                                 std::cmp::Ordering::Greater => false,
-                                std::cmp::Ordering::Equal => rows(partition) > rows(best_partition),
+                                std::cmp::Ordering::Equal => rows(&leaf) > rows(best_partition),
                             }
                         }
                     }
                 }
             };
             if better {
-                *best = Some(partition.clone());
+                *best = Some(leaf);
                 if tracing() {
                     eprintln!(
                         "S2 terminal BETTER nu_atnum={:?} ct={:?} hydrogens={:?}",
@@ -951,12 +1248,21 @@ fn descend_hinformed(
             continue;
         }
         let mut branch = partition.clone();
-        branch.individualize(adjacency, v);
+        branch.individualize(refine_adjacency, v);
         if tracing() {
             trace_partition(&format!("S2 indiv v={}", v + 1), &branch);
         }
         descend_hinformed(
-            &branch, adjacency, aux_rank, hydrogens, groups, first, best, orbits,
+            &branch,
+            adjacency,
+            refine_adjacency,
+            aux_rank,
+            hydrogens,
+            groups,
+            first,
+            best,
+            orbits,
+            atom_bound,
         );
     }
 }
