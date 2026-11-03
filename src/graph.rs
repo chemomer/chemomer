@@ -499,7 +499,10 @@ impl Structure {
     }
 
     /// Implicit/explicit hydrogen count per atom: MDL H-count codes
-    /// win, then the molfile valence code, otherwise the valence gap
+    /// win, the read-time pin keeps its frozen count (the
+    /// once-per-read valence-code derivation already ran in
+    /// [`crate::canonical::metals::get_num_h`]), then the molfile
+    /// valence code for UNPINNED atoms, otherwise the valence gap
     /// (the oracle does the same for code-0 atoms — a bare `O` line
     /// derives H2O). The valence code mirrors get_num_H's release
     /// branches (util.c:894-899) exactly: codes 1-14 pin the count at
@@ -513,10 +516,10 @@ impl Structure {
     /// here, and its odd-aromatic replacement-by-singles is the same
     /// integer the half-unit round lands on (3 aromatic would count
     /// 4 there, 4.5 rounding to the same integer here — unreachable
-    /// in practice, the oracle rejects such atoms outright). After
-    /// the code, the salt-annihilation pin keeps its place: the pin
-    /// is a mid-pipeline mechanic the reference has no counterpart
-    /// for, and the code is input-declared, so the code reads first.
+    /// in practice, the oracle rejects such atoms outright). The
+    /// salt-annihilation pin shares the read-time pin's seat: a pin
+    /// freezes the as-read state — the input-declared code has
+    /// already had its say there.
     pub fn hydrogens(&self) -> Vec<u32> {
         let sums = self.bond_order_sums();
         self.atoms
@@ -525,14 +528,19 @@ impl Structure {
             .map(|(atom, sum)| {
                 if atom.h_count > 0 {
                     atom.h_count
+                } else if atom.h_pinned {
+                    // The pin is FINAL as read — the read-time
+                    // derivation (metals::get_num_h) already applied
+                    // the valence code once; re-reading the code here
+                    // would resurrect hydrogens the metal-hydride
+                    // extraction just moved away.
+                    0
                 } else if atom.valence_code != 0 {
                     if atom.valence_code == 15 && *sum == 0.0 {
                         0
                     } else {
                         (atom.valence_code as f64 - *sum).round().max(0.0) as u32
                     }
-                } else if atom.h_pinned {
-                    0
                 } else if atom.charge < 0 {
                     match charged_valences(&atom.element, atom.charge) {
                         Some(set) => (valence_needed(&set, *sum) - sum).round().max(0.0) as u32,

@@ -14,7 +14,7 @@
 //! selected by those bits.
 
 use super::protons::el_valences;
-use crate::graph::Structure;
+use crate::graph::{AtomRecord, Structure};
 
 /// The reference's `METAL` bit (incomdef.h:115).
 pub(crate) const METAL: u32 = 1;
@@ -632,17 +632,81 @@ pub fn disconnect_metals(structure: &mut Structure) -> bool {
     if !marked.iter().any(|&m| m) {
         return false;
     }
+    // The implicit-hydrogen extraction (strutil.c 2960-3007): every
+    // marked metal's materialized hydrogen leaves as its own FREE
+    // component — the reference moves num_H and the isotopic counts
+    // onto fresh explicit H ATOMS appended past the original atoms
+    // (move_explicit_Hcation places the coordinates and the H bonds
+    // to the metal), then the ligand loop below breaks those new
+    // metal-H bonds like any non-metal ligand's. H is no heteroatom,
+    // so nothing renormalizes: a bare Li reads Li.H, an explicit
+    // Na-H bond reads Na.H, a bare Mg its Mg.2H — the skip-adding-H
+    // metals (Fe, Zn, Pt) derive no H and pass through as bare
+    // atoms. This is the arm the reference re-derives from
+    // bMayDisconnectMetals' bDisconnectCoord = num_impl_H + 1; the
+    // counts agree by construction (the salt pass between the two
+    // walks moves no metal hydrogen).
+    let mut extracted = false;
+    for (i, &is_marked) in marked.iter().enumerate() {
+        if !is_marked {
+            continue;
+        }
+        // The fold's provenance grows with the structure: an
+        // extracted H belongs to its metal's submitted position (the
+        // reference numbers the new H atoms past the originals).
+        let metal_source = if structure.fold_source.is_empty() {
+            None
+        } else {
+            Some(structure.fold_source[i])
+        };
+        let push_h = |structure: &mut Structure, isotope: u16| {
+            structure.atoms.push(AtomRecord {
+                element: "H".to_string(),
+                h_count: 0,
+                valence_code: 0,
+                charge: 0,
+                h_pinned: true,
+                isotope,
+            });
+            if !structure.positions.is_empty() {
+                structure.positions.push((0.0, 0.0));
+            }
+            if let Some(source) = metal_source {
+                structure.fold_source.push(source);
+            }
+        };
+        while structure.atoms[i].h_count > 0 {
+            structure.atoms[i].h_count -= 1;
+            push_h(structure, 0);
+            extracted = true;
+        }
+        // The isotopic slots (k = 1 D, k = 2 T): the folded counts
+        // leave the carrier map onto real isotope-tagged H atoms.
+        if let Some((deuterium, tritium)) = structure.isotopic_h.remove(&i) {
+            for (count, isotope) in [(deuterium, 2u16), (tritium, 3)] {
+                for _ in 0..count {
+                    push_h(structure, isotope);
+                }
+            }
+            extracted |= deuterium + tritium > 0;
+        }
+    }
     // Non-metal ligands first (strutil.c 3035-3050), then M-M (3060-
     // 3075): each ligand disconnects ONCE, taking ALL its bonds to
-    // marked metals with it.
-    let mut changed = false;
+    // marked metals with it. The outer walk covers the ORIGINAL
+    // atoms only (num_atoms in the reference) — the extracted H
+    // atoms sit past it and never mark.
+    let mut changed = extracted;
     for pass in [false, true] {
-        for i in 0..structure.atoms.len() {
-            if !marked[i] {
+        for (i, &is_marked) in marked.iter().enumerate() {
+            if !is_marked {
                 continue;
             }
             for ligand in neighbors_of(structure, i) {
-                if marked[ligand] == pass && disconnect_one_ligand(structure, &marked, i, ligand) {
+                if ligand < marked.len()
+                    && marked[ligand] == pass
+                    && disconnect_one_ligand(structure, &marked, i, ligand)
+                {
                     changed = true;
                 }
             }
@@ -709,7 +773,17 @@ fn disconnect_one_ligand(
     // above) plus the read-time hydrogen count, matched against the
     // registered valences at charges -1, 0, +1 in that order, the
     // FIRST match naming the new charge. A valence of 0 renormalizes
-    // a HALOGEN to -1 (any other element stays).
+    // a HALOGEN to -1 (any other element stays). The recomputed
+    // remaining-bond sum stands in for the reference's adjusted
+    // stored chem_bonds_valence (mol2atom.c:3155 subtracts only the
+    // aromatic-blend delta floor(T/2) - floor((T-D)/2)); the two
+    // readings part ways only when AROMATIC metal bonds disconnect,
+    // and the oracle cannot observe that: a metal with one aromatic
+    // bond is rejected outright (probe: "Cannot process aromatic
+    // bonds", Error -9986 / 132) and the all-bridged spellings die
+    // the same death, so the renormalization never sees a
+    // metal-aromatic survivor (probes F8/F11, recorded here as
+    // findings).
     let mut aromatic = 0u32;
     let mut cbv: i32 = 0;
     for &(from, to, order) in &structure.bonds {
