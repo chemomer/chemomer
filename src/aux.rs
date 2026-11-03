@@ -546,7 +546,14 @@ pub(crate) fn reversibility_block(original: &Structure, options: &Options) -> St
             if other >= j {
                 continue;
             }
-            let stereo = original.stereo_bonds.get(&index).copied().unwrap_or(0);
+            // The moved marker never reaches the echo: the reference's
+            // `/rB` reader speaks the raw per-endpoint value, which the
+            // moved bond's drawn-first atom encodes (the p/P case).
+            let stereo = original
+                .stereo_bonds
+                .get(&index)
+                .map(|&code| crate::graph::visible_stereo(code))
+                .unwrap_or(0);
             // The wedge perspective reads the bond line's FIRST atom
             // (the reference stores +stereo there, -stereo at the
             // other end): `p`/`n` when this end is first, `P`/`N`

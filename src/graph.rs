@@ -53,7 +53,10 @@ pub struct Structure {
     /// only where a flag's pass exists.
     pub taut_ext: TautExt,
     /// Bond-block stereo codes by bond index (1 = wedge, 6 = dash),
-    /// sparse — the tetrahedral layer's input.
+    /// sparse — the tetrahedral layer's input. A code may carry the
+    /// [`STEREO_MOVED_INERT`] bit: the polymer frame shift moved the
+    /// code onto a rewritten bond and the moved state is
+    /// parity-inert (see the constant).
     pub stereo_bonds: std::collections::BTreeMap<usize, u8>,
     /// Atom-block (x, y) coordinates — the 2D layout the wedge parity
     /// is read against; empty when the reader carries none.
@@ -280,6 +283,36 @@ impl Structure {
         }
         fragments
     }
+}
+
+/// Marker bit over a [`Structure::stereo_bonds`] code: the polymer
+/// frame shift moved the code onto a rewritten bond, and the moved
+/// state carries no parity. The reference's edit pair is why
+/// (runichi.c `OrigAtData_RemoveBond`/`OrigAtData_AddBond`): the
+/// remove captures the old bond's per-endpoint stereo value at the
+/// edit quadruple's SECOND atom (the second half-bond removal
+/// overwrites the first capture), and the add re-applies that one
+/// captured value verbatim to BOTH endpoints of the new bond — so a
+/// capture read at the negative side (the old bond's drawn-first
+/// atom was not the second edit atom) leaves both endpoints
+/// negative. The pointed-edge stereo perception
+/// (ichister.c `get_z_coord`, `bPointedEdgeStereo > 0`) reads only
+/// non-negative slots, so no endpoint of the moved bond defines a
+/// center — the wedge parity is lost outright, `-SAtZZ` included.
+/// The `/rB` echo still speaks the moved bond (the writer masks the
+/// bit before the p/P case).
+pub const STEREO_MOVED_INERT: u8 = 0x80;
+
+/// The code a stereo map entry carries without the moved marker.
+#[must_use]
+pub fn visible_stereo(code: u8) -> u8 {
+    code & !STEREO_MOVED_INERT
+}
+
+/// Whether the entry is a frame-shift-moved (parity-inert) code.
+#[must_use]
+pub fn is_moved_stereo(code: u8) -> bool {
+    code & STEREO_MOVED_INERT != 0
 }
 
 /// Allowed valences of the organic subset; the implicit hydrogen

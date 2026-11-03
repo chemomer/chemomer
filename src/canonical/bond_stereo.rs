@@ -37,7 +37,15 @@ pub fn segments(
         if kind != 2 {
             continue;
         }
-        if matches!(structure.stereo_bonds.get(&index).copied(), Some(3 | 4)) {
+        let code = structure.stereo_bonds.get(&index).copied();
+        if crate::graph::is_moved_stereo(code.unwrap_or(0)) {
+            // A frame-shift-moved double bond reads no stereo at all:
+            // the reference's both-slots-one-sign state falls through
+            // the pointed-edge z read (its type hits the switch's
+            // default, ZTYPE_NONE) — the bond is plain here.
+            continue;
+        }
+        if matches!(code, Some(3 | 4)) {
             // The crossed/either code: UNKNOWN parity, never geometry.
             unknown.push((
                 ranks[from].max(ranks[to]),
