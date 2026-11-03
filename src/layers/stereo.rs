@@ -63,6 +63,7 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
         &base_ranks,
         tautomeric,
         options.stereo_at_zz,
+        options.do_not_add_h,
     );
     let (ranks, symmetry) = match &verdict {
         Some(verdict) => (verdict.ranks.clone(), verdict.symmetry.clone()),

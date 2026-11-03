@@ -957,6 +957,9 @@ fn fixed_h_centers(working: &Structure, options: &Options) -> Vec<(usize, Vec<us
         &ranks,
         &ligand_symmetry,
         options.stereo_at_zz,
+        // The FixedH refinement's centers stay wedge-defined — the
+        // double-bond descriptors serve the aux numbering only.
+        false,
     )
 }
 
@@ -977,6 +980,7 @@ fn fixed_h_main_inverted(working: &Structure, options: &Options) -> bool {
         &ranks,
         tautomeric,
         options.stereo_at_zz,
+        options.do_not_add_h,
     )
     .map(|verdict| verdict.sign != 0 && crate::canonical::stereo::inverted_marker(&verdict))
     .unwrap_or(false)

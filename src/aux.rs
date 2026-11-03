@@ -139,6 +139,9 @@ pub fn aux_info(
         &ranks,
         tautomeric,
         options.stereo_at_zz,
+        // The double-bond descriptors ride the DoNotAddH path only —
+        // corpus arbitration (see informed_verdict).
+        options.do_not_add_h,
     ) {
         // SNon withholds the stereo layers and the inverted-stereo
         // fields alike (ichiparm.c:248–253): the block never prints

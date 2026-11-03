@@ -305,17 +305,32 @@ fn wedged_centers(structure: &Structure) -> Vec<(usize, usize, Option<u32>)> {
 /// terminal-independent; only the ligand permutation composes with
 /// the canonical ranks. Wiggly-marked centers carry no geometry bit
 /// and stay out (the rows speak defined parity only).
+///
+/// The DOUBLE-BOND descriptors ride the same list (the reference's
+/// LinearCTStereoDble section feeds the same stereo canonicalization
+/// pass — bCanonStereo fires on `LinearCTStereoDble ||
+/// LinearCTStereoCarb`, and the aux numbering reads that pass's
+/// order): every stereogerm-eligible C=X bond, defined geometry or
+/// not — an all-zero-coordinate hex-2-ene still marks its bond
+/// (AB_PARITY_UNDF) and the pass's row minimization then breaks the
+/// within-class numbering ties the base pass leaves alone (the
+/// instrumented BASE-ORD/STEREO-ORD pair: 1 6 2 5 3 4 vs 6 1 5 2 4 3,
+/// the aux /N: following STEREO-ORD). A crossed/either bond code
+/// marks UNKNOWN parity (AB_PARITY_UNKN) without the ligand test.
+///
+/// Encoding in the `(atom, ligands, bit)` tuple: tetrahedral centers
+/// keep their 3–4 heavy ligands and bit 0/1; a bond center carries
+/// exactly ONE ligand (the opposite endpoint) and bit 2 = undefined
+/// parity, 3 = unknown, 4/5 = defined with side bit 0/1.
 pub fn center_inputs(
     structure: &Structure,
     hydrogens: &[u32],
     ranks: &[u32],
     ligand_symmetry: &[u32],
     allow_at_pseudo: bool,
+    double_bond_descriptors: bool,
 ) -> Vec<(usize, Vec<usize>, u32)> {
     let wedged = wedged_centers(structure);
-    if wedged.is_empty() {
-        return Vec::new();
-    }
     let mut out = Vec::new();
     for &(atom, bond_index, down) in &wedged {
         let Some(down) = down else {
@@ -338,8 +353,295 @@ pub fn center_inputs(
         };
         out.push((atom, ligands, bit));
     }
+    if double_bond_descriptors {
+        // The parity atoms the prune's paths may reach: the wedge
+        // centers already in the list.
+        let parity_atoms: Vec<usize> = out.iter().map(|(atom, _, _)| *atom).collect();
+        let bond_marks = double_bond_centers(structure, hydrogens, ligand_symmetry, &parity_atoms);
+        out.extend(bond_marks);
+    }
     out.sort_by_key(|&(atom, _, _)| ranks[atom]);
     out
+}
+
+/// The double-bond descriptor centers: eligible C=X bonds as
+/// `(from, [to], bit)` tuples. Crossed/either codes carry UNKNOWN
+/// parity (3); every other qualifying mark stands UNDEFINED (2) —
+/// the DoNotAddH stereo pass computes no bond parity from the drawn
+/// geometry at all (the e-2-butene instrumented CT reads (4,3,4):
+/// parity AB_PARITY_UNDF over live trans coordinates).
+///
+/// The marks then run through the UnmarkNonStereo prune (the
+/// reference's FillOutStereoParities opener): a constitutional
+/// equivalence class whose EVERY member carries two or more mutually
+/// equivalent neighbours with no parity path through any of them
+/// cannot speak stereo — all its marks drop. It is what separates the
+/// hex-2-ene chain (atoms 4 and 5 sit in classes (3,4)/(2,5); each
+/// atom's neighbours 3,5 / 4,6 are class-distinct, the marks stand)
+/// from the thiophene-chain breadth-994 (atoms 13 and 5 share a
+/// class and both gaze at equivalent neighbour pairs — the mark
+/// dies).
+fn double_bond_centers(
+    structure: &Structure,
+    counts: &[u32],
+    ligand_symmetry: &[u32],
+    parity_atoms: &[usize],
+) -> Vec<(usize, Vec<usize>, u32)> {
+    let mut out = Vec::new();
+    // The alternation marks: bonds the reference's mark_alt machinery
+    // carries as ALTERN/TAUTOM/ALT_13 never become stereo-bond
+    // candidates. On this corpus the state reads through two shapes:
+    // the aromatic Kekulé cycles (the thiophene ring of
+    // breadth-994: every cycle bond bt=TAUTOM) and the open
+    // conjugated systems (its 3-11=12-13=14-15=16 triene: every
+    // member bond bt=ALT_13) — the isolated chain C=C of hex-2-ene
+    // stays SINGLE/DOUBLE and marks.
+    let aromatic = crate::canonical::aromatic::aromatic_bonds(structure);
+    let conjugated = {
+        let mut set = std::collections::BTreeSet::new();
+        for (index, &(from, to, kind)) in structure.bonds.iter().enumerate() {
+            if kind != 2 {
+                continue;
+            }
+            // A double bond is conjugated when one of its ends'
+            // OTHER neighbours carries another double bond — the
+            // alternating system extends past the bond.
+            let end_conjugated = |atom: usize, other: usize| -> bool {
+                let neighbors: Vec<usize> = structure
+                    .bonds
+                    .iter()
+                    .filter_map(|&(f, t, _)| {
+                        if f == atom && t != other {
+                            Some(t)
+                        } else if t == atom && f != other {
+                            Some(f)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                neighbors.iter().any(|&neighbor| {
+                    structure.bonds.iter().any(|&(f, t, o)| {
+                        o == 2 && ((f == neighbor && t != atom) || (t == neighbor && f != atom))
+                    })
+                })
+            };
+            if end_conjugated(from, to) || end_conjugated(to, from) {
+                set.insert(index);
+            }
+        }
+        set
+    };
+    for (index, &(from, to, kind)) in structure.bonds.iter().enumerate() {
+        if kind != 2 || aromatic.contains(&index) || conjugated.contains(&index) {
+            continue;
+        }
+        let code = structure.stereo_bonds.get(&index).copied();
+        if crate::graph::is_moved_stereo(code.unwrap_or(0)) {
+            // A frame-shift-moved double bond reads no stereo at all
+            // (ZTYPE_NONE — the /b reader's fall-through).
+            continue;
+        }
+        if matches!(code, Some(3 | 4)) {
+            out.push((from, vec![to], 3));
+            continue;
+        }
+        let Some(()) = bond_descriptor_gate(structure, counts, from, to) else {
+            continue;
+        };
+        out.push((from, vec![to], 2));
+    }
+    unmark_non_stereo(&mut out, structure, ligand_symmetry, parity_atoms);
+    out
+}
+
+/// The UnmarkNonStereo prune over the bond marks: a class of
+/// constitutionally equivalent atoms all of whose members carry two
+/// or more mutually equivalent neighbours with no parity path loses
+/// every mark touching the class. Iterates until stable (a dropped
+/// mark can open no new paths — parity atoms never appear — but the
+/// reference loops all the same).
+fn unmark_non_stereo(
+    marks: &mut Vec<(usize, Vec<usize>, u32)>,
+    structure: &Structure,
+    symmetry: &[u32],
+    parity_atoms: &[usize],
+) {
+    let n = structure.atoms.len();
+    let neighbors = |atom: usize| -> Vec<usize> {
+        structure
+            .bonds
+            .iter()
+            .filter_map(|&(from, to, _)| {
+                if from == atom {
+                    Some(to)
+                } else if to == atom {
+                    Some(from)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    // find_atoms_with_parity: a parity atom reachable from `start`
+    // without stepping back through `from`.
+    let reaches_parity = |from: usize, start: usize| -> bool {
+        let mut visited = vec![false; n];
+        visited[from] = true;
+        let mut stack = vec![start];
+        while let Some(atom) = stack.pop() {
+            if parity_atoms.contains(&atom) {
+                return true;
+            }
+            if visited[atom] {
+                continue;
+            }
+            visited[atom] = true;
+            for next in neighbors(atom) {
+                if !visited[next] {
+                    stack.push(next);
+                }
+            }
+        }
+        false
+    };
+    // The equivalence classes over the symmetry.
+    let mut classes: std::collections::BTreeMap<u32, Vec<usize>> = Default::default();
+    for (atom, &class) in symmetry.iter().enumerate() {
+        classes.entry(class).or_default().push(atom);
+    }
+    let mut alive: Vec<bool> = vec![true; n];
+    loop {
+        let mut changed = false;
+        for members in classes.values() {
+            if members.len() < 2 {
+                continue;
+            }
+            let all_no_parity = members.iter().all(|&jc| {
+                if !alive[jc] {
+                    return true;
+                }
+                let mut by_class: std::collections::BTreeMap<u32, usize> = Default::default();
+                for next in neighbors(jc) {
+                    *by_class.entry(symmetry[next]).or_default() += 1;
+                }
+                // 2+ mutually equivalent neighbours, none reaching a
+                // parity atom.
+                let groups: Vec<Vec<usize>> = neighbors(jc)
+                    .into_iter()
+                    .fold(
+                        std::collections::BTreeMap::<u32, Vec<usize>>::new(),
+                        |mut acc, next| {
+                            acc.entry(symmetry[next]).or_default().push(next);
+                            acc
+                        },
+                    )
+                    .into_values()
+                    .filter(|group| group.len() >= 2)
+                    .collect();
+                if groups.is_empty() {
+                    return false; // no equivalent-neighbour pair: survives
+                }
+                !groups
+                    .iter()
+                    .any(|group| group.iter().any(|&start| reaches_parity(jc, start)))
+            });
+            if all_no_parity {
+                for &member in members {
+                    if alive[member] {
+                        alive[member] = false;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    marks.retain(|(from, ligands, _)| {
+        let to = ligands[0];
+        alive[*from] && alive[to]
+    });
+}
+
+/// The mark gates (the corpus-arbitrated core of the reference's
+/// set_stereo_bonds_parity): both ends carry degree + H in the
+/// stereo-bond window — under the DoNotAddH counts the working shape
+/// is the planar CH= carbon (one heavy neighbor besides the partner;
+/// an =CH2 end, degree zero, falls out; a caged C= with two heavy
+/// neighbors never marks) — and no charged endpoint (the iminium
+/// C=N⁺ and its cage neighbours read unmarked;
+/// bCanAtomHaveAStereoBond's charge refusal), and no small ring.
+fn bond_descriptor_gate(structure: &Structure, counts: &[u32], a: usize, b: usize) -> Option<()> {
+    if in_small_ring_stereo(structure, a, b) {
+        return None;
+    }
+    let ends_planar = |atom: usize, other: usize| -> bool {
+        // Heavy neighbours besides the bond partner: the planar CH=
+        // carbon carries exactly one (plus its implicit hydrogen, the
+        // pinned DoNotAddH counts read zero). An =CH2 end (zero),
+        // a caged C= with two (the b2-1960/b2-1325 cage bonds), all
+        // fall out.
+        let degree = structure
+            .bonds
+            .iter()
+            .filter(|&&(from, to, _)| {
+                (from == atom && to != other) || (to == atom && from != other)
+            })
+            .count();
+        degree + counts[atom] as usize == 1
+    };
+    let charged = |atom: usize| structure.atoms[atom].charge != 0;
+    if !ends_planar(a, b) || !ends_planar(b, a) || charged(a) || charged(b) {
+        return None;
+    }
+    Some(())
+}
+
+/// The shortest cycle through the bond; `true` when it is smaller
+/// than 8 (the bond_stereo module's `in_small_ring`, kept local so
+/// the descriptor perception never depends on the /b emitter).
+fn in_small_ring_stereo(structure: &Structure, a: usize, b: usize) -> bool {
+    use std::collections::VecDeque;
+    let adjacency = |atom: usize| -> Vec<usize> {
+        structure
+            .bonds
+            .iter()
+            .filter_map(|&(from, to, _)| {
+                if from == atom {
+                    Some(to)
+                } else if to == atom {
+                    Some(from)
+                } else {
+                    None
+                }
+            })
+            .filter(|&next| next != b)
+            .collect()
+    };
+    let mut distance = vec![usize::MAX; structure.atoms.len()];
+    let mut queue = VecDeque::new();
+    distance[a] = 0;
+    queue.push_back(a);
+    while let Some(atom) = queue.pop_front() {
+        for next in adjacency(atom) {
+            if distance[next] == usize::MAX {
+                distance[next] = distance[atom] + 1;
+                queue.push_back(next);
+            }
+        }
+    }
+    structure
+        .bonds
+        .iter()
+        .filter(|&&(from, to, _)| from == b || to == b)
+        .map(|&(from, to, _)| if from == b { to } else { from })
+        .filter(|&neighbor| neighbor != a)
+        .map(|neighbor| distance[neighbor].saturating_add(2))
+        .min()
+        .map(|cycle| cycle < 8)
+        .unwrap_or(false)
 }
 
 /// The (center rank, parity) pairs of [`terminal_rows`] — the compare
@@ -353,9 +655,30 @@ pub fn terminal_pairs(
         .iter()
         .filter(|(atom, _, _)| ranks[*atom] > 0)
         .collect();
-    ordered.sort_by_key(|&&(atom, _, _)| ranks[atom]);
-    let mut out = Vec::new();
-    for &(atom, ref ligands, bit) in ordered {
+    let _ = &mut ordered;
+    // Two sections like the CT: the double bonds (keyed by the
+    // HIGHER rank) first, then the tetrahedral centers.
+    let mut bonds: Vec<(u32, u32)> = Vec::new();
+    let mut atoms: Vec<(u32, u32)> = Vec::new();
+    for &(atom, ref ligands, bit) in centers {
+        if ranks[atom] == 0 {
+            continue;
+        }
+        if ligands.len() == 1 {
+            let other = ligands[0];
+            let parity = match bit {
+                2 => 4,
+                3 => 3,
+                4 | 5 => {
+                    let side = bit - 4;
+                    let perm = u32::from(ranks[atom] > ranks[other]);
+                    2 - ((side ^ perm ^ AUX_PARITY_CONSTANT) ^ u32::from(flip))
+                }
+                other_bit => unreachable!("bond center bit {other_bit}"),
+            };
+            bonds.push((ranks[atom].max(ranks[other]), parity));
+            continue;
+        }
         let mut sequence: Vec<(usize, u32)> = ligands
             .iter()
             .enumerate()
@@ -364,8 +687,12 @@ pub fn terminal_pairs(
         sequence.sort_by_key(|&(_, rank)| rank);
         let perm = permutation_parity(sequence.into_iter().map(|(position, _)| position).collect());
         let parity = 2 - ((bit ^ perm ^ AUX_PARITY_CONSTANT) ^ u32::from(flip));
-        out.push((ranks[atom], parity));
+        atoms.push((ranks[atom], parity));
     }
+    bonds.sort_unstable();
+    atoms.sort_unstable();
+    let mut out = bonds;
+    out.extend(atoms);
     out
 }
 
@@ -391,12 +718,18 @@ pub(crate) struct StereoVerdict {
 /// canonical ranks [`crate::layers::hydrogen::canonical_ranks_for`]
 /// supplies). `strip_mobile_h` mirrors the aux's tautomeric branch:
 /// the ranking reads the mobile-H-stripped counts and no group rows.
+/// `double_bond_descriptors` admits the double-bond marks — corpus
+/// arbitration gates them to the DoNotAddH path, the only recordings
+/// that witness the renumbering (under the standard pipeline the
+/// H-aware base numbering already speaks every recorded aux, and our
+/// row model over-maps where the reference's mapping walk holds).
 pub(crate) fn informed_verdict(
     structure: &Structure,
     counts: &[u32],
     ranks: &[u32],
     strip_mobile_h: bool,
     allow_at_pseudo: bool,
+    double_bond_descriptors: bool,
 ) -> Option<StereoVerdict> {
     let (adjacency, invariants) = crate::canonical::graph_of(structure);
     // The ligand-identity classes the candidate filter judges with
@@ -415,7 +748,14 @@ pub(crate) fn informed_verdict(
         let groups = crate::canonical::main_canon_groups(structure, counts);
         crate::canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, counts, &groups).1
     };
-    let centers = center_inputs(structure, counts, ranks, &ligand_symmetry, allow_at_pseudo);
+    let centers = center_inputs(
+        structure,
+        counts,
+        ranks,
+        &ligand_symmetry,
+        allow_at_pseudo,
+        double_bond_descriptors,
+    );
     if centers.is_empty() {
         return None;
     }
@@ -465,20 +805,47 @@ pub(crate) fn inverted_marker(verdict: &StereoVerdict) -> bool {
             })
 }
 
-/// One terminal's stereo rows over `ranks`: per center (ascending
-/// canonical number) the center's rank, the parity number (1 = odd,
-/// 2 = even — the geometry bit composed with the ligand permutation
-/// and the convention constant, flipped once for the inverted pass),
-/// then the ligand ranks ascending. The rows extend the terminal
-/// compare the way the reference's LinearCTStereoCarb section does.
+/// One terminal's stereo rows over `ranks`, in canonical order — the
+/// single rank-ordered sequence the reference's stereo CT walks.
+/// Tetrahedral centers (3–4 ligands) emit the center's rank, the
+/// parity number (1 = odd, 2 = even — the geometry bit composed with
+/// the ligand permutation and the convention constant, flipped once
+/// for the inverted pass), then the ligand ranks ascending. Double
+/// bonds (exactly one ligand: the opposite endpoint) emit
+/// `[lower_rank, higher_rank, parity]` — the AT_STEREO_DBLE entry the
+/// CT fills in canonical order — with parity 3 (AB_PARITY_UNKN,
+/// crossed/either) or 4 (AB_PARITY_UNDF, the mark without geometry)
+/// standing constant across both passes, and a defined side composing
+/// like the tetrahedral bit.
 pub fn terminal_rows(centers: &[(usize, Vec<usize>, u32)], ranks: &[u32], flip: bool) -> Vec<u32> {
-    let mut out = Vec::new();
-    let mut ordered: Vec<&(usize, Vec<usize>, u32)> = centers
-        .iter()
-        .filter(|(atom, _, _)| ranks[*atom] > 0)
-        .collect();
-    ordered.sort_by_key(|&&(atom, _, _)| ranks[atom]);
-    for &(atom, ref ligands, bit) in ordered {
+    // Two CT sections, compared separately (CompareLinCtStereoDble
+    // before CompareLinCtStereoCarb): the double bonds as
+    // (at_num1, at_num2, parity) with at_num1 the HIGHER rank — the
+    // corpus CT dumps: (5,3,4) for hex-2-ene, (2,1,4) for
+    // cyclodecene, sorted by the entry — then the tetrahedral centers
+    // as (at_num, parity, ligand ranks).
+    let mut bonds: Vec<(u32, u32, u32)> = Vec::new();
+    let mut atoms: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+    for &(atom, ref ligands, bit) in centers {
+        if ranks[atom] == 0 {
+            continue;
+        }
+        if ligands.len() == 1 {
+            let other = ligands[0];
+            let (hi, lo) = (ranks[atom].max(ranks[other]), ranks[atom].min(ranks[other]));
+            let parity = match bit {
+                2 => 4, // AB_PARITY_UNDF: the mark, no geometry
+                3 => 3, // AB_PARITY_UNKN: crossed/either
+                4 | 5 => {
+                    let side = bit - 4;
+                    let perm = u32::from(ranks[atom] > ranks[other]);
+                    2 - ((side ^ perm ^ AUX_PARITY_CONSTANT) ^ u32::from(flip))
+                }
+                other_bit => unreachable!("bond center bit {other_bit}"),
+            };
+            bonds.push((hi, lo, parity));
+            continue;
+        }
         let mut sequence: Vec<(usize, u32)> = ligands
             .iter()
             .enumerate()
@@ -487,10 +854,21 @@ pub fn terminal_rows(centers: &[(usize, Vec<usize>, u32)], ranks: &[u32], flip: 
         sequence.sort_by_key(|&(_, rank)| rank);
         let perm = permutation_parity(sequence.into_iter().map(|(position, _)| position).collect());
         let parity = 2 - ((bit ^ perm ^ AUX_PARITY_CONSTANT) ^ u32::from(flip));
-        out.push(ranks[atom]);
-        out.push(parity);
         let mut ligand_ranks: Vec<u32> = ligands.iter().map(|&l| ranks[l]).collect();
         ligand_ranks.sort_unstable();
+        atoms.push((ranks[atom], parity, ligand_ranks));
+    }
+    bonds.sort_unstable();
+    atoms.sort_unstable();
+    let mut out = Vec::new();
+    for (hi, lo, parity) in bonds {
+        out.push(hi);
+        out.push(lo);
+        out.push(parity);
+    }
+    for (rank, parity, ligand_ranks) in atoms {
+        out.push(rank);
+        out.push(parity);
         out.extend(ligand_ranks);
     }
     out
