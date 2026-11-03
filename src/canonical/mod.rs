@@ -33,7 +33,7 @@ pub use emit::connection_segment;
 pub use partition::Partition;
 pub use search::{
     base_symmetry, canonical_ranks, canonical_ranks_and_symmetry,
-    canonical_ranks_and_symmetry_stereo, canonical_table,
+    canonical_ranks_and_symmetry_stereo, canonical_table, taut_ranks_and_symmetry,
 };
 pub use tautomer::{group_membership, main_canon_groups};
 

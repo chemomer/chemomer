@@ -9,7 +9,19 @@ use crate::graph::Structure;
 use crate::layers::standardization;
 use crate::layers::{order, LayerEmitter};
 
-pub struct HydrogenLayer;
+pub struct HydrogenLayer {
+    /// The DoNotAddH pin: the t-group-aware TAUT numbering rides this
+    /// mode's recordings (the corpus arbitrates - the standard
+    /// corpus's tautomer extensions still speak the plain ranking
+    /// until the stereo-walk port lands).
+    dna: bool,
+}
+
+impl HydrogenLayer {
+    pub fn new(dna: bool) -> Self {
+        Self { dna }
+    }
+}
 
 /// The negative charge riding /h groups that hold real mobile
 /// hydrogen, summed — the /q layer subtracts it from the fixed
@@ -41,6 +53,24 @@ pub fn canonical_ranks_for(structure: &Structure) -> Vec<u32> {
     )
 }
 
+/// The numbering the t-group-bearing structures speak: the
+/// t-group-aware TAUT canonicalization (the reference seeds it from
+/// the base pass's equitable partition and appends the t-group nodes,
+/// so the group's endpoints rank against a non-endpoint twin the base
+/// numbering left tied). Structures without registered groups keep the
+/// plain ranking.
+pub fn taut_aware_ranks(structure: &Structure, dna: bool) -> Vec<u32> {
+    let counts = standardization::adjusted_hydrogens(structure);
+    let groups = crate::canonical::tautomer::main_canon_groups_charged(structure, &counts);
+    if groups.is_empty() || !dna {
+        return canonical_ranks_for(structure);
+    }
+    let (adjacency, invariants) = crate::canonical::graph_of(structure);
+    let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
+    let notaut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
+    crate::canonical::taut_ranks_and_symmetry(&adjacency, &invariants, &notaut, &groups).0
+}
+
 impl LayerEmitter for HydrogenLayer {
     fn name(&self) -> &'static str {
         "hydrogen"
@@ -57,7 +87,7 @@ impl LayerEmitter for HydrogenLayer {
     fn emit(&self, structure: &Structure) -> Result<Option<String>> {
         standardization::ensure_typable_charges(structure)?;
         let counts = standardization::adjusted_hydrogens(structure);
-        let ranks = canonical_ranks_for(structure);
+        let ranks = taut_aware_ranks(structure, self.dna);
         let groups = crate::canonical::tautomer::mobile_groups(structure, &counts, &ranks);
         let endpoints = crate::canonical::tautomer::endpoint_atoms(&ranks, &groups);
         let mut by_rank = vec![0u32; counts.len()];
@@ -208,7 +238,7 @@ mod tests {
             vec![(0, 1, 1), (1, 2, 2), (1, 3, 1)],
         );
         assert_eq!(
-            HydrogenLayer.emit(&s).unwrap().as_deref(),
+            HydrogenLayer::new(false).emit(&s).unwrap().as_deref(),
             Some("h1H3,(H,3,4)")
         );
     }
@@ -231,7 +261,7 @@ mod tests {
             vec![(0, 1, 1), (1, 2, 2), (3, 4, 2), (1, 3, 1)],
         );
         assert_eq!(
-            HydrogenLayer.emit(&s).unwrap().as_deref(),
+            HydrogenLayer::new(false).emit(&s).unwrap().as_deref(),
             Some("h4H,1-2H2,3H3")
         );
     }
@@ -239,7 +269,10 @@ mod tests {
     #[test]
     fn ammonium_loses_one_hydrogen() {
         let s = structure(vec![atom("N", 4, 1)], vec![]);
-        assert_eq!(HydrogenLayer.emit(&s).unwrap().as_deref(), Some("h1H3"));
+        assert_eq!(
+            HydrogenLayer::new(false).emit(&s).unwrap().as_deref(),
+            Some("h1H3")
+        );
     }
 
     #[test]

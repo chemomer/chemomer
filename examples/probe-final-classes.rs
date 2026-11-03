@@ -20,7 +20,11 @@ fn main() {
         }
     }
     let (ledger_path, want_aux, want_id) = if class == "aux" {
-        (format!("{dir}/corpus/donotaddh-aux-triage.json"), true, false)
+        (
+            format!("{dir}/corpus/donotaddh-aux-triage.json"),
+            true,
+            false,
+        )
     } else if class == "id" {
         (format!("{dir}/corpus/donotaddh-triage.json"), true, true)
     } else {
@@ -34,8 +38,7 @@ fn main() {
         }
         let c = &fixtures[id];
         let molfile = c["molfile"].as_str().unwrap();
-        let engine =
-            Engine::with_options(molfile, Options::default().with_do_not_add_h()).unwrap();
+        let engine = Engine::with_options(molfile, Options::default().with_do_not_add_h()).unwrap();
         if want_id {
             let recorded = c["donotaddh"]["inchi"].as_str().unwrap_or("");
             let ours = engine.inchi_string().unwrap();
