@@ -549,7 +549,10 @@ pub fn apply_frame_shift(
         .stereo_bonds
         .iter()
         .filter_map(|(&index, &code)| {
-            structure.bonds.get(index).map(|&(a, b, _)| ((a.min(b), a.max(b)), code))
+            structure
+                .bonds
+                .get(index)
+                .map(|&(a, b, _)| ((a.min(b), a.max(b)), code))
         })
         .collect();
     // Submitted index -> 1-based interim canonical number, and the
