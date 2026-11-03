@@ -648,7 +648,7 @@ pub fn apply_frame_shift(
                 } else {
                     code | crate::graph::STEREO_MOVED_INERT
                 };
-                moved_stereo.insert((first, second), moved);
+                moved_stereo.insert((first.min(second), first.max(second)), moved);
             }
         }
         let state_now = &mut treated.units[index];
