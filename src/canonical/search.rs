@@ -247,19 +247,32 @@ pub fn canonical_ranks_and_symmetry(
 
     let (informed, informed_orbits) =
         search_stage_two(adjacency, base, &aux_rank, hydrogens, groups);
-    let ranks = (0..n).map(|atom| informed.rank_of(atom)).collect();
-    // The stage-two orbits: table+hydrogen-equal terminals merged.
-    // The symmetry the aux equivalence classes speak is the orbit
-    // MINIMUM over them, mirroring `orbit_min_symmetry`.
-    let mut min_by_root = vec![u32::MAX; n];
-    for atom in 0..n {
-        let root = informed_orbits.representative(atom);
-        min_by_root[root] = min_by_root[root].min(informed.rank_of(atom));
-    }
-    let informed_symmetry = (0..n)
-        .map(|atom| min_by_root[informed_orbits.representative(atom)])
-        .collect();
+    let ranks: Vec<u32> = (0..n).map(|atom| informed.rank_of(atom)).collect();
+    // The stage-two orbits: the walk's theta partition (ichican2.c
+    // CanonGraph's UnorderedPartition) — union-find over the cycles of
+    // every transposition the walk witnesses between table+hydrogen
+    // equal terminals, against the first leaf (L7) and against the
+    // best leaf (L8), with the walk trying only candidates that are
+    // their own orbit minimum (L14's mcr skip). The symmetry the aux
+    // equivalence classes speak is the orbit MINIMUM over theta,
+    // mirroring `orbit_min_symmetry`.
+    let informed_symmetry = orbit_minima(&ranks, &informed_orbits);
     (ranks, informed_symmetry)
+}
+
+/// Orbit-minimal canonical rank per atom over an explicit orbit
+/// partition: for every orbit, the smallest winning rank among its
+/// members, shared by the whole orbit.
+fn orbit_minima(ranks: &[u32], orbits: &Orbits) -> Vec<u32> {
+    let n = ranks.len();
+    let mut min_by_root = vec![u32::MAX; n];
+    for (atom, &rank) in ranks.iter().enumerate() {
+        let root = orbits.representative(atom);
+        min_by_root[root] = min_by_root[root].min(rank);
+    }
+    (0..n)
+        .map(|atom| min_by_root[orbits.representative(atom)])
+        .collect()
 }
 
 /// The stereo-informed ranking verdict: ranks and symmetry of the
@@ -365,15 +378,9 @@ fn search_with_stereo(
     let base = &hfree.h_seed;
     let (informed, informed_orbits) =
         search_stage_two_stereo(adjacency, base, &aux_rank, hydrogens, groups, centers, flip);
-    let ranks = (0..n).map(|atom| informed.rank_of(atom)).collect();
-    let mut min_by_root = vec![u32::MAX; n];
-    for atom in 0..n {
-        let root = informed_orbits.representative(atom);
-        min_by_root[root] = min_by_root[root].min(informed.rank_of(atom));
-    }
-    let informed_symmetry = (0..n)
-        .map(|atom| min_by_root[informed_orbits.representative(atom)])
-        .collect();
+    let ranks: Vec<u32> = (0..n).map(|atom| informed.rank_of(atom)).collect();
+    // The walk's theta partition, as in the stereo-free path.
+    let informed_symmetry = orbit_minima(&ranks, &informed_orbits);
     (ranks, informed_symmetry)
 }
 
@@ -570,8 +577,12 @@ fn descend_stereo(
     };
     let mut candidates: Vec<usize> = partition.at_number()[cell.0..cell.1].to_vec();
     candidates.sort_by_key(|&atom| (aux_rank[atom], atom));
-    for &v in &candidates {
-        if orbits.representative(v) != v {
+    // The L14 theta skip covers only backtracking-iterated candidates;
+    // a freshly entered cell's first vertex is the L2 descent's
+    // unconditional `CellGetMinNode(..., 0, ...)` (see the stereo-free
+    // walk).
+    for (index, &v) in candidates.iter().enumerate() {
+        if index > 0 && orbits.representative(v) != v {
             continue;
         }
         let mut branch = partition.clone();
@@ -619,6 +630,10 @@ impl Orbits {
         }
     }
 
+    /// The orbit's canonical representative — the SMALLEST member, the
+    /// reference's mcr (ichican2.c `nGetMcr2`, "minimal class
+    /// representative"). The union keeps the minimum rooted, so the
+    /// find is the mcr directly.
     pub(crate) fn representative(&self, atom: usize) -> usize {
         let mut root = atom;
         while self.parent[root] != root {
@@ -629,8 +644,16 @@ impl Orbits {
 
     pub(crate) fn union(&mut self, a: usize, b: usize) {
         let (ra, rb) = (self.representative(a), self.representative(b));
-        if ra != rb {
+        if ra == rb {
+            return;
+        }
+        // Root the union at the smaller member: the representative
+        // stays the class minimum, which is what the candidate skip
+        // tests (`try v only when v is its own theta mcr`).
+        if ra < rb {
             self.parent[rb] = ra;
+        } else {
+            self.parent[ra] = rb;
         }
     }
 }
@@ -776,13 +799,66 @@ fn descend_hinformed(
                             == hydrogens[partition.at_number()[position]]
                     })
             };
+            // The winner compare's full equality — table, hydrogen
+            // layer, t-group rows all level — the reference's layered
+            // compare reading zero (ichican2.c L8's `nu^gamma == rho`).
+            let equals = |other: &Partition| -> bool {
+                let other_table = ConnectionTable::build(other.ranks(), adjacency);
+                if table.entries() != other_table.entries() {
+                    return false;
+                }
+                let h_rows = |p: &Partition| -> Vec<u32> {
+                    (0..adjacency.len())
+                        .map(|position| encoded_hydrogen(hydrogens[p.at_number()[position]]))
+                        .collect()
+                };
+                if h_rows(partition) != h_rows(other) {
+                    return false;
+                }
+                let rows = |p: &Partition| -> Vec<(u32, Vec<u32>)> {
+                    let ranks = p.ranks();
+                    groups
+                        .iter()
+                        .map(|(count, members)| {
+                            let mut member_ranks: Vec<u32> =
+                                members.iter().map(|&m| ranks[m]).collect();
+                            member_ranks.sort_unstable();
+                            (*count, member_ranks)
+                        })
+                        .collect()
+                };
+                rows(partition) == rows(other)
+            };
             if let Some(first_partition) = first {
                 if matches(first_partition) {
+                    if tracing() {
+                        eprintln!("S2 merge-FIRST nu_atnum={:?}", partition.at_number());
+                    }
                     for position in 0..adjacency.len() {
                         orbits.union(
                             first_partition.at_number()[position],
                             partition.at_number()[position],
                         );
+                    }
+                } else if let Some(best_partition) = best {
+                    // The L8 branch: the leaf missed zeta but EQUALS
+                    // the best terminal — its transposition against
+                    // rho joins theta too (ichican2.c: nu^gamma ==
+                    // rho → PartitionGetTransposition(&pi[k-1], &rho)
+                    // → L10). Generators the first-terminal star
+                    // never witnesses compose here — the reflections
+                    // the first-equal unions alone stop short of
+                    // (the (1,2,5,6)(3,4) cyclohexadiene witness).
+                    if equals(best_partition) {
+                        if tracing() {
+                            eprintln!("S2 merge-RHO nu_atnum={:?}", partition.at_number());
+                        }
+                        for position in 0..adjacency.len() {
+                            orbits.union(
+                                best_partition.at_number()[position],
+                                partition.at_number()[position],
+                            );
+                        }
                     }
                 }
             } else {
@@ -834,14 +910,16 @@ fn descend_hinformed(
                 *best = Some(partition.clone());
                 if tracing() {
                     eprintln!(
-                        "S2 terminal BETTER ct={:?} hydrogens={:?}",
+                        "S2 terminal BETTER nu_atnum={:?} ct={:?} hydrogens={:?}",
+                        partition.at_number(),
                         table.entries(),
                         counts(partition)
                     );
                 }
             } else if tracing() {
                 eprintln!(
-                    "S2 terminal keep ct={:?} hydrogens={:?}",
+                    "S2 terminal keep nu_atnum={:?} ct={:?} hydrogens={:?}",
+                    partition.at_number(),
                     table.entries(),
                     counts(partition)
                 );
@@ -853,12 +931,20 @@ fn descend_hinformed(
         eprintln!("S2 cell=[{},{}] arms", cell.0, cell.1);
     }
     // Candidates within the cell ordered by auxiliary rank, then atom
-    // number — the reference's aux-informed CellGetMinNode — skipping
-    // candidates an automorphism already relates to a tried one.
+    // number — the reference's aux-informed CellGetMinNode. The theta
+    // skip (ichican2.c L14) applies ONLY to the candidates backtracking
+    // iterates after the branch's first one: a freshly entered cell's
+    // first vertex is `CellGetMinNode(..., 0, ...)` inside the L2
+    // descent, chosen before any theta test — the branch it opens is
+    // explored even when theta already relates it to a tried one, and
+    // the equal-terminal pair it witnesses is a generator the skip
+    // would otherwise hide (the breadth-439 witness: the (5,6) branch
+    // opened after theta held {5,6} still yields the second gamma that
+    // completes the orbit partition).
     let mut candidates: Vec<usize> = partition.at_number()[cell.0..cell.1].to_vec();
     candidates.sort_by_key(|&atom| (aux_rank[atom], atom));
-    for &v in &candidates {
-        if orbits.representative(v) != v {
+    for (index, &v) in candidates.iter().enumerate() {
+        if index > 0 && orbits.representative(v) != v {
             if tracing() {
                 eprintln!("S2 skip v={} (orbit)", v + 1);
             }
