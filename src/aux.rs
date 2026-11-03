@@ -103,6 +103,19 @@ pub fn aux_info(
     // adds them under `if (io.bTautomeric)`); charge-only c-point
     // registrations are not t-groups and count nothing.
     let real_h = |group: &crate::canonical::tautomer::MobileGroup| group.count > group.charge;
+    if std::env::var_os("INCHI_TRACE_SALT").is_some() {
+        eprintln!(
+            "SALTDBG groups={} proton_shift={} hard={}",
+            groups
+                .iter()
+                .map(|g| format!("(n{} c{} h{})", g.count, g.charge, g.ranks.len()))
+                .collect::<Vec<_>>()
+                .join(" "),
+            proton_shift,
+            working.protons_hard_moved
+        );
+    }
+
     let tautomeric = groups.iter().any(&real_h);
     let salt_merged = groups.iter().any(|group| real_h(group) && group.charge > 0);
     let has_p = proton_shift != 0 || standardization::proton_layer(working).is_some();
