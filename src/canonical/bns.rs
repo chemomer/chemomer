@@ -7,6 +7,8 @@
 //! Stone balanced flow, with blossoms) can move one dot of H from the
 //! single-bond side to the double-bond side.
 
+use crate::graph::Structure;
+
 pub(crate) const NO_VERTEX: i32 = -2;
 const BLOSSOM_BASE: i32 = -1;
 const TREE_IN_2: u8 = 1;
@@ -1446,6 +1448,560 @@ pub(crate) fn any_alt_path(net: &Network, roles: &Roles, first: usize, second: u
     }
     let mut backward = net.clone();
     exists(&mut backward, roles, second, first)
+}
+
+// ─── The resolved integer bond valence ──────────────────────────────
+
+/// The resolved matching over the aromatic subgraph: the partner
+/// table (an aromatic bond's two endpoints name each other when the
+/// search doubled the bond) and the per-atom real-π sum.
+fn aromatic_resolution(
+    structure: &Structure,
+    hydrogens: &[u32],
+) -> (Vec<Option<usize>>, Vec<i32>) {
+    let n = structure.atoms.len();
+    let mut neighbors: Vec<Vec<(usize, bool)>> = vec![Vec::new(); n];
+    let mut pi = vec![0i32; n];
+    for &(from, to, order) in &structure.bonds {
+        let aromatic = order > 3;
+        neighbors[from].push((to, aromatic));
+        neighbors[to].push((from, aromatic));
+        if !aromatic {
+            let unit = order as i32 - 1;
+            pi[from] += unit;
+            pi[to] += unit;
+        }
+    }
+    let eligible: Vec<bool> = (0..n)
+        .map(|atom| {
+            let has_aromatic = neighbors[atom].iter().any(|&(_, aromatic)| aromatic);
+            if !has_aromatic {
+                return false;
+            }
+            let record = &structure.atoms[atom];
+            let Some(el) = crate::canonical::protons::el_number(&record.element) else {
+                return false;
+            };
+            let preferred =
+                i32::from(crate::canonical::protons::el_valences(el, record.charge)[0]);
+            preferred - hydrogens[atom] as i32 - neighbors[atom].len() as i32 - pi[atom] >= 1
+        })
+        .collect();
+    let mut partner: Vec<Option<usize>> = vec![None; n];
+    for atom in 0..n {
+        if eligible[atom] {
+            let mut seen = vec![false; n];
+            kuhn_augment(atom, &neighbors, &eligible, &mut partner, &mut seen);
+        }
+    }
+    (partner, pi)
+}
+
+/// The reference's read-back of the BNS flow solution
+/// (SetAtomRadAndChemValFromVertexCapFlow): after normalization every
+/// atom's `chem_bonds_valence` settles at `valence + st_edge.flow` —
+/// an integer. Real single/double/triple orders stand; the aromatic
+/// bonds the input left alternating carry the flow the balanced
+/// search assigned, one π unit on a matched bond raising both its
+/// endpoints. The matching's eligible set is the atoms whose
+/// preferred registered valence still lacks one unit after their σ
+/// bonds and real multiples — a furan-type O and a pyrrole-type N
+/// resolve π-free (their lone pair fills the valence), the carbons
+/// resolve one π each (the witnessed furan, caffeine and naphthalene
+/// resolutions). `hydrogens` are the structure's per-atom H counts.
+pub(crate) fn resolved_chem_valence(structure: &Structure, hydrogens: &[u32]) -> Vec<i32> {
+    let n = structure.atoms.len();
+    let mut neighbors: Vec<Vec<(usize, bool)>> = vec![Vec::new(); n];
+    for &(from, to, order) in &structure.bonds {
+        let aromatic = order > 3;
+        neighbors[from].push((to, aromatic));
+        neighbors[to].push((from, aromatic));
+    }
+    let (partner, pi) = aromatic_resolution(structure, hydrogens);
+    // Each bond reads its resolved order: σ (one per bond) plus the
+    // real π units, plus one π per matched aromatic bond.
+    let mut valence = vec![0i32; n];
+    for (atom, links) in neighbors.iter().enumerate() {
+        let matched = links
+            .iter()
+            .filter(|&&(neigh, aromatic)| aromatic && partner[atom] == Some(neigh))
+            .count() as i32;
+        valence[atom] = links.len() as i32 + pi[atom] + matched;
+    }
+    valence
+}
+
+/// One Kuhn augmentation round from `atom` over the aromatic subgraph.
+fn kuhn_augment(
+    atom: usize,
+    neighbors: &[Vec<(usize, bool)>],
+    eligible: &[bool],
+    partner: &mut [Option<usize>],
+    seen: &mut [bool],
+) -> bool {
+    for &(neigh, aromatic) in &neighbors[atom] {
+        if !aromatic || !eligible[neigh] || seen[neigh] {
+            continue;
+        }
+        seen[neigh] = true;
+        let free = match partner[neigh] {
+            None => true,
+            Some(prev) => kuhn_augment(prev, neighbors, eligible, partner, seen),
+        };
+        if free {
+            partner[neigh] = Some(atom);
+            partner[atom] = Some(neigh);
+            return true;
+        }
+    }
+    false
+}
+
+// ─── The salt-tautomerism decode (TG_FLAG_ALL_SALT_DONE) ────────────
+
+/// The salt candidate subtypes (incomdef.h): 1 = carries H, 2 = carries
+/// a (−), 4 = may accept H or (−); 8/16 = the >C–SH / >C–S(−) pair.
+const SALT_DONOR_H: u32 = 1;
+const SALT_DONOR_NEG: u32 = 2;
+const SALT_ACCEPTOR: u32 = 4;
+const SALT_P_DONOR: u32 = 8;
+const SALT_P_ACCEPTOR: u32 = 16;
+
+/// One salt candidate: the atom, the classifier that hit (0 the
+/// terminal =C–O(H)/(−) oxygen, 1 the =Z–MH/–Z=M endpoint, 2 the
+/// >C–SH sulfur), its subtype bits, and the t-group it belongs to
+/// (the reference's `at[i].endpoint`).
+struct SaltCandidate {
+    atom: usize,
+    kind: i32,
+    subtype: u32,
+    endpoint: Option<usize>,
+}
+
+/// The registered group's subtype census (the reference's
+/// `t_group.num[0]` mobile units — H plus negative charges — and
+/// `num[1]` negative charges): H beyond the negatives donates H, any
+/// negative donates (−), a registered group always accepts.
+fn group_subtypes(
+    structure: &Structure,
+    hydrogens: &[u32],
+    group_of: &[Option<usize>],
+    group: usize,
+) -> (u32, u32, u32) {
+    let mut mobile = 0u32;
+    let mut negative = 0u32;
+    for (atom, &endpoint) in group_of.iter().enumerate() {
+        if endpoint == Some(group) {
+            let neg = u32::from(structure.atoms[atom].charge == -1);
+            mobile += hydrogens[atom] + neg;
+            negative += neg;
+        }
+    }
+    let mut bits = 0;
+    if mobile > negative {
+        bits |= SALT_DONOR_H;
+    }
+    if negative > 0 {
+        bits |= SALT_DONOR_NEG;
+    }
+    bits |= SALT_ACCEPTOR;
+    (bits, mobile, negative)
+}
+
+/// The base endpoint predicate (the reference's `nGetEndpointInfo`
+/// neutral branch): the element's endpoint valence above the σ degree,
+/// the mobile units (H plus an anionic charge) completing it, and the
+/// role read from the π units on the bonds — all σ is the donor side,
+/// one π the acceptor side.
+fn endpoint_role(
+    structure: &Structure,
+    atom: usize,
+    hydrogens: &[u32],
+    cbv: &[i32],
+    degree: i32,
+) -> Option<u32> {
+    let record = &structure.atoms[atom];
+    if record.charge > 0 {
+        return None; // the charge-point branch needs the c-group state
+    }
+    let el = crate::canonical::protons::el_number(&record.element)?;
+    let ev: i32 = match el {
+        8 | 16 | 34 | 52 => 2,
+        7 => 3,
+        _ => return None,
+    };
+    if ev <= degree {
+        return None;
+    }
+    let mobile = hydrogens[atom] as i32 + i32::from(record.charge == -1);
+    if mobile + cbv[atom] != ev {
+        return None;
+    }
+    match cbv[atom] - degree {
+        0 => Some(SALT_DONOR_H),  // cDonor — reused as the role marker
+        1 => Some(SALT_ACCEPTOR), // cAcceptor
+        _ => None,
+    }
+}
+
+/// Whether the bond reads possibly-double (the acceptor side's
+/// centerpoint bond) or possibly-single (the donor side's): the
+/// reference's bond_type switch over DOUBLE/ALTERN versus
+/// SINGLE/ALTERN (a triple reads neither).
+fn bond_reads(structure: &Structure, a: usize, b: usize, double: bool) -> bool {
+    structure
+        .bonds
+        .iter()
+        .find(|&&(from, to, _)| (from == a && to == b) || (from == b && to == a))
+        .map(|(_, _, order)| match order {
+            2 => double,
+            1 => !double,
+            _ => true, // aromatic (alternating) reads both
+        })
+        .unwrap_or(false)
+}
+
+/// The classify chain behind `MarkSaltChargeGroups` /
+/// `MergeSaltTautGroups` candidates (ichitaut.c GetSaltChargeType /
+/// GetOtherSaltChargeType / GetOtherSaltType). `cbv` is the resolved
+/// integer bond valence; in-group subtypes read the registered
+/// groups' (mobile, negative) census.
+fn salt_candidates(
+    structure: &Structure,
+    hydrogens: &[u32],
+    group_of: &[Option<usize>],
+    c_point_of: &[Option<usize>],
+    cbv: &[i32],
+) -> Vec<SaltCandidate> {
+    let n = structure.atoms.len();
+    let mut neighbors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(from, to, _) in &structure.bonds {
+        neighbors[from].push(to);
+        neighbors[to].push(from);
+    }
+    let mut candidates = Vec::new();
+    for atom in 0..n {
+        let record = &structure.atoms[atom];
+        let endpoint = group_of[atom];
+        let degree = neighbors[atom].len() as i32;
+        let mut hit: Option<(i32, u32)> = None;
+
+        // GetSaltChargeType: terminal O/S/Se/Te on an able carbon.
+        if degree == 1
+            && record.charge >= -1
+            && (record.charge <= 0 || c_point_of[atom].is_some())
+        {
+            if let Some(el) = crate::canonical::protons::el_number(&record.element) {
+                if matches!(el, 8 | 16 | 34 | 52) {
+                    let preferred = i32::from(
+                        crate::canonical::protons::el_valences(el, record.charge)[0],
+                    );
+                    let carbon = neighbors[atom][0];
+                    let c_record = &structure.atoms[carbon];
+                    let c_ok = crate::canonical::protons::el_number(&c_record.element) == Some(6)
+                        && c_record.charge == 0
+                        && cbv[carbon] + hydrogens[carbon] as i32 == 4
+                        && cbv[carbon] != neighbors[carbon].len() as i32;
+                    if cbv[atom] + hydrogens[atom] as i32 == preferred && c_ok {
+                        let subtype = match endpoint {
+                            Some(group) => group_subtypes(structure, hydrogens, group_of, group).0,
+                            None => {
+                                let mut bits = 0;
+                                if record.charge == -1 {
+                                    bits |= SALT_DONOR_NEG;
+                                }
+                                if record.charge <= 0 && hydrogens[atom] > 0 {
+                                    bits |= SALT_DONOR_H;
+                                }
+                                if record.charge == 0 && cbv[atom] == 2 {
+                                    bits |= SALT_ACCEPTOR;
+                                }
+                                bits
+                            }
+                        };
+                        hit = Some((0, subtype));
+                    }
+                }
+            }
+        }
+
+        // GetOtherSaltChargeType (bAccept_O = 1): an endpoint beside a
+        // centerpoint able to carry the shifted π.
+        if hit.is_none() {
+            if let Some(role) = endpoint_role(structure, atom, hydrogens, cbv, degree) {
+                let el =
+                    crate::canonical::protons::el_number(&record.element).unwrap_or(0);
+                let centerpoint = neighbors[atom].iter().any(|&neigh| {
+                    let n_el = crate::canonical::protons::el_number(
+                        &structure.atoms[neigh].element,
+                    );
+                    let center_el = matches!(
+                        n_el,
+                        Some(6 | 7 | 15 | 16 | 53 | 33 | 51 | 34 | 52 | 17 | 35)
+                    );
+                    let movable = cbv[neigh] > neighbors[neigh].len() as i32
+                        || (cbv[neigh] == neighbors[neigh].len() as i32
+                            && (group_of[neigh].is_some() || c_point_of[neigh].is_some()));
+                    center_el
+                        && movable
+                        && bond_reads(structure, atom, neigh, role == SALT_ACCEPTOR)
+                });
+                if center_el_ok(el) && centerpoint {
+                    let subtype = match endpoint {
+                        Some(group) => group_subtypes(structure, hydrogens, group_of, group).0,
+                        None => {
+                            let mut bits = 0;
+                            if role == SALT_ACCEPTOR {
+                                bits |= SALT_ACCEPTOR;
+                            } else {
+                                if record.charge == -1 {
+                                    bits |= SALT_DONOR_NEG;
+                                }
+                                if hydrogens[atom] > 0 {
+                                    bits |= SALT_DONOR_H;
+                                }
+                            }
+                            bits
+                        }
+                    };
+                    hit = Some((1, subtype));
+                }
+            }
+        }
+
+        // GetOtherSaltType: a >C–SH / >C–S(−) sulfur on an all-single
+        // neutral carbon.
+        if hit.is_none() && degree == 1 && cbv[atom] == 1 {
+            let has_h = hydrogens[atom] == 1;
+            let has_minus = record.charge == -1;
+            if has_h != has_minus {
+                if let Some(el) = crate::canonical::protons::el_number(&record.element) {
+                    if matches!(el, 16 | 34 | 52) {
+                        let carbon = neighbors[atom][0];
+                        let c_record = &structure.atoms[carbon];
+                        let c_ok =
+                            crate::canonical::protons::el_number(&c_record.element) == Some(6)
+                                && c_record.charge == 0
+                                && cbv[carbon] == neighbors[carbon].len() as i32;
+                        if c_ok {
+                            let subtype = if has_h {
+                                SALT_P_DONOR
+                            } else {
+                                SALT_P_ACCEPTOR
+                            };
+                            hit = Some((2, subtype));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((kind, subtype)) = hit {
+            candidates.push(SaltCandidate {
+                atom,
+                kind,
+                subtype,
+                endpoint,
+            });
+        }
+    }
+    candidates
+}
+
+/// The GetOtherSaltChargeType element gate: any endpoint element (the
+/// bAccept_O = 1 call keeps the O/S family eligible).
+fn center_el_ok(el: i32) -> bool {
+    matches!(el, 7 | 8 | 16 | 34 | 52)
+}
+
+/// The reference's TG_FLAG_ALL_SALT_DONE decode: the salt scan
+/// (`MarkSaltChargeGroups`, ichitaut.c 3753) registering a donor→
+/// acceptor pair the BNS connects — a charged or exchangeable atom
+/// outside the current groups — plus the salt merge
+/// (`MergeSaltTautGroups`, ichitaut.c 3953) fusing the groups behind
+/// the acidic candidates. `group_of` is the registered mobile-group
+/// membership, `hard_moved` the structure's FLAG_FORCE_SALT_TAUT.
+pub(crate) fn salt_all_done(
+    structure: &Structure,
+    hydrogens: &[u32],
+    group_of: &[Option<usize>],
+    c_point_of: &[Option<usize>],
+    hard_moved: bool,
+) -> bool {
+    let n = structure.atoms.len();
+    let cbv = resolved_chem_valence(structure, hydrogens);
+    let (matched_aromatic, _pi) = aromatic_resolution(structure, hydrogens);
+    let mut neighbors: Vec<Vec<(usize, bool, u32)>> = vec![Vec::new(); n];
+    for &(from, to, order) in &structure.bonds {
+        let aromatic = order > 3;
+        neighbors[from].push((to, aromatic, order));
+        neighbors[to].push((from, aromatic, order));
+    }
+    let candidates = salt_candidates(structure, hydrogens, group_of, c_point_of, &cbv);
+    if candidates.is_empty() {
+        return false;
+    }
+
+    // The BNS the pair tests run on: the flows are the resolved
+    // orders (aromatic bonds read their matching), the capacities the
+    // resolved valence slack.
+    let bond_adjacency: Vec<Vec<(usize, i32, bool)>> = (0..n)
+        .map(|atom| {
+            neighbors[atom]
+                .iter()
+                .map(|&(neigh, aromatic, order)| {
+                    let flow = if aromatic {
+                        i32::from(matched_aromatic[atom] == Some(neigh))
+                    } else {
+                        order as i32 - 1
+                    };
+                    (neigh, flow, false)
+                })
+                .collect()
+        })
+        .collect();
+    let max_flow: Vec<i32> = (0..n)
+        .map(|atom| (cbv[atom] - neighbors[atom].len() as i32).max(0))
+        .collect();
+    let single_like: Vec<Vec<bool>> = (0..n)
+        .map(|atom| {
+            neighbors[atom]
+                .iter()
+                .map(|&(neigh, aromatic, order)| {
+                    aromatic || order == 1 || matched_aromatic[atom] != Some(neigh)
+                })
+                .collect()
+        })
+        .collect();
+    let donor: Vec<bool> = (0..n)
+        .map(|atom| {
+            group_of[atom].is_some()
+                && (hydrogens[atom] > 0 || structure.atoms[atom].charge == -1)
+        })
+        .collect();
+    let net = Network::build(&Build {
+        bond_adjacency: &bond_adjacency,
+        max_flow: &max_flow,
+        group_of,
+        donor: &donor,
+        single_like: &single_like,
+        c_point_of,
+        c_charged: &vec![false; n],
+    });
+    // The mode-4-salt role precheck: a registered atom plays either
+    // side; an unregistered one needs the endpoint predicate's role.
+    let role = |atom: usize| {
+        endpoint_role(
+            structure,
+            atom,
+            hydrogens,
+            &cbv,
+            neighbors[atom].len() as i32,
+        )
+    };
+    let donor_ok: Vec<bool> = (0..n)
+        .map(|atom| group_of[atom].is_some() || role(atom) == Some(SALT_DONOR_H))
+        .collect();
+    let acceptor_ok: Vec<bool> = (0..n)
+        .map(|atom| group_of[atom].is_some() || role(atom) == Some(SALT_ACCEPTOR))
+        .collect();
+    let roles = Roles {
+        donor_ok,
+        acceptor_ok,
+    };
+
+    // ── step 0: the pair scan (MarkSaltChargeGroups) ──
+    let subtype_all: u32 = candidates.iter().map(|c| c.subtype).fold(0, |a, b| a | b);
+    let other_count = candidates.iter().filter(|c| c.kind == 1).count();
+    let cond1 = subtype_all & SALT_ACCEPTOR != 0;
+    let cond2 = if hard_moved {
+        subtype_all & (SALT_DONOR_NEG | SALT_DONOR_H) == 0
+    } else {
+        subtype_all & SALT_DONOR_NEG == 0 || other_count == candidates.len()
+    };
+    if candidates.len() > 1 && cond1 && !cond2 {
+        for i1 in 0..candidates.len() {
+            for i2 in (i1 + 1)..candidates.len() {
+                let (a, b) = (&candidates[i1], &candidates[i2]);
+                if a.endpoint.is_some() && a.endpoint == b.endpoint {
+                    continue; // one pair per group
+                }
+                // Both orderings: the donor (single side) carries the
+                // mobile unit, the acceptor (double side) receives it.
+                for &(donor_c, acceptor_c) in &[ (a, b), (b, a) ] {
+                    if donor_c.subtype & (SALT_DONOR_NEG | SALT_DONOR_H) == 0
+                        || acceptor_c.subtype & SALT_ACCEPTOR == 0
+                    {
+                        continue;
+                    }
+                    if any_alt_path(&net, &roles, acceptor_c.atom, donor_c.atom) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── the merge (MergeSaltTautGroups): the same classify chain plus
+    // the acidic-hydrogen / acidic-minus markers, then the non-taut
+    // filters.
+    let context = crate::canonical::protons::ProtonContext::new(structure);
+    let by_atom: std::collections::HashMap<usize, u32> = candidates
+        .iter()
+        .map(|c| (c.atom, c.subtype))
+        .collect();
+    let mut merge: Vec<(usize, Option<usize>, u32)> = Vec::new();
+    for atom in 0..n {
+        let record = &structure.atoms[atom];
+        let subtype = match by_atom.get(&atom) {
+            Some(&bits) => bits,
+            None => {
+                if crate::canonical::protons::has_acidic_hydrogen(&context, atom) {
+                    SALT_P_DONOR
+                } else if crate::canonical::protons::has_acidic_minus(&context, atom) {
+                    SALT_P_ACCEPTOR
+                } else {
+                    continue;
+                }
+            }
+        };
+        if record.element == "N" {
+            continue; // bDoNotMergeNonTautAtom (non-tautomeric N)
+        }
+        if subtype & (SALT_DONOR_NEG | SALT_DONOR_H | SALT_P_ACCEPTOR | SALT_P_DONOR) == 0 {
+            continue;
+        }
+        if subtype & SALT_ACCEPTOR != 0 && group_of[atom].is_none() {
+            continue; // non-taut acceptors like -C=O stay out
+        }
+        merge.push((atom, group_of[atom], subtype));
+    }
+    if merge.len() <= 1 {
+        return false;
+    }
+    let merge_all: u32 = merge.iter().map(|c| c.2).fold(0, |a, b| a | b);
+    let neg2 = merge_all & (SALT_DONOR_NEG | SALT_P_ACCEPTOR) != 0;
+    let h2 = merge_all & (SALT_DONOR_H | SALT_P_DONOR) != 0;
+    // The endpoint sets: each distinct group counts once, every
+    // ungrouped candidate counts on its own (the reference's
+    // nMinNumEndpoints transitions).
+    let grouped: std::collections::BTreeSet<usize> = merge
+        .iter()
+        .filter_map(|&(_, endpoint, _)| endpoint)
+        .collect();
+    let ungrouped = merge.iter().filter(|&&(_, endpoint, _)| endpoint.is_none()).count();
+    let distinct = grouped.len() + ungrouped;
+    let has_groups = group_of.iter().flatten().next().is_some();
+    if hard_moved {
+        // The forced gate: refuse only when a donor class is missing
+        // AND no t-groups exist anywhere.
+        if (!neg2 || !h2) && !has_groups {
+            return false;
+        }
+    } else if !neg2 || !h2 {
+        return false;
+    }
+    distinct > 1
 }
 
 #[cfg(test)]
