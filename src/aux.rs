@@ -369,7 +369,7 @@ pub fn aux_info(
         out.push_str(&text.join(","));
     }
 
-    out.push_str(&reversibility_block(original));
+    out.push_str(&reversibility_block(original, options));
     Ok(out)
 }
 
@@ -440,7 +440,7 @@ fn kept_ion_pair_charges(original: &Structure) -> Option<std::collections::HashM
 
 /// The `/rA` `/rB` `/rC` echo of the submitted structure, in the
 /// input's own atom order, explicit hydrogens included.
-pub(crate) fn reversibility_block(original: &Structure) -> String {
+pub(crate) fn reversibility_block(original: &Structure, options: &Options) -> String {
     let n = original.atoms.len();
     // The atom-block prefix letter records the counts-line chiral
     // flag (the reference's WriteOrigAtoms: `c` chiral, `n`
@@ -451,12 +451,25 @@ pub(crate) fn reversibility_block(original: &Structure) -> String {
     // SUBMITTED structure (ichiprt1.c WriteOrigAtoms): the digit is
     // the valence the read-time derivation cannot reconstruct
     // unambiguously (the two-bond Na of the diethylamide recording
-    // echoes `Na2`), printed before the charge.
+    // echoes `Na2`), printed before the charge. The digit's `num_H`
+    // is the count the READ left on the atom: the standard read
+    // derived it from the same chemical bond valence (mol2atom.c
+    // calculate_valences), so the substitution below is exact —
+    // while DoNotAddH threads its flag into the very same get_num_H,
+    // which then keeps the submitted `inp_num_H` (util.c: the
+    // H-count column the reader never reads) — zero here — and the
+    // digit fires on the raw bond valence (the sodium-citrate
+    // deprotonated hydroxyl: the C–O⁻ oxygen and the H-short carbons
+    // echo `C2C3CO1`).
     let echo_context = crate::canonical::metals::MetalContext::new(original);
     for (index, atom) in original.atoms.iter().enumerate() {
         let el = crate::canonical::protons::el_number(&atom.element).unwrap_or(0);
         let cbv = echo_context.cbv2[index] / 2;
-        let num_h = crate::canonical::metals::get_num_h(el, atom.charge, cbv);
+        let num_h = if options.do_not_add_h {
+            atom.h_count
+        } else {
+            crate::canonical::metals::get_num_h(el, atom.charge, cbv)
+        };
         let valence = crate::canonical::metals::needed_unusual_valence(
             el,
             atom.charge,
@@ -465,8 +478,11 @@ pub(crate) fn reversibility_block(original: &Structure) -> String {
             echo_context.degrees[index],
         );
         out.push_str(&atom.element);
-        if valence > 0 {
-            out.push_str(&valence.to_string());
+        // The −1 sentinel (chemical valence zero: no valence fits an
+        // isolated atom) prints as `0` (ichiprt1.c: `val > 0 ? val :
+        // 0`); zero itself prints nothing.
+        if valence != 0 {
+            out.push_str(&valence.max(0).to_string());
         }
         match atom.charge {
             0 => {}
@@ -483,7 +499,12 @@ pub(crate) fn reversibility_block(original: &Structure) -> String {
                 }
             }
         }
-        let dotted = atom.element.chars().count() == 1;
+        // The isotope dot separates the `i` marker from a BARE element
+        // symbol only (ichiprt1.c: `len == len0 ? "." : ""`) — a
+        // valence digit or charge sign ahead of it swallows the dot
+        // (the DoNotAddH lone isotopes: `I0i125`, `O0i18` — not
+        // `I0.i125`).
+        let dotted = valence == 0 && atom.charge == 0;
         if atom.isotope != 0 {
             if dotted {
                 out.push('.');
