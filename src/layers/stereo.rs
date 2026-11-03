@@ -36,13 +36,46 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
     let no_taut = canonical::tautomer::without_mobile_h(&counts, &mask);
     let symmetry = canonical::base_symmetry(&adjacency, &invariants);
     let groups = canonical::group_membership(structure, &counts);
-    let ranks = canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
+    let base_ranks = canonical::canonical_ranks(&adjacency, &invariants, &no_taut, &groups);
+    // The ligand-identity classes the candidate filter judges with
+    // (the reference's nSymmRank): the H-aware constitutional
+    // equivalence over the same inputs the ranks speak.
+    let ligand_symmetry =
+        canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, &no_taut, &groups).1;
     let emission = canonical::stereo::Emission {
         keep_undefined: options.include_unknown_stereo,
         label_unknown: options.distinct_unknown_undefined,
         allow_at_pseudo: options.stereo_at_zz,
     };
-    let segments = canonical::stereo::segments(structure, &counts, &ranks, &symmetry, emission);
+    // The stereo-informed verdict decides the NUMBERING every
+    // rendering speaks: a wedge-defined center wins the tie against a
+    // same-orbit undefined one and takes the smaller canonical number
+    // (the oracle's nCanonOrdStereo; witnessed on the R005a THF
+    // product, whose lone wedge center renumbers from 4 to 3 while the
+    // undefined twin renders `?` at 4). Without a verdict — no
+    // perceivable parity at all — the base numbering stands.
+    let tautomeric = canonical::tautomer::mobile_groups(structure, &counts, &base_ranks)
+        .iter()
+        .any(|group| group.count > group.charge);
+    let verdict = canonical::stereo::informed_verdict(
+        structure,
+        &counts,
+        &base_ranks,
+        tautomeric,
+        options.stereo_at_zz,
+    );
+    let (ranks, symmetry) = match &verdict {
+        Some(verdict) => (verdict.ranks.clone(), verdict.symmetry.clone()),
+        None => (base_ranks.clone(), symmetry),
+    };
+    let segments = canonical::stereo::segments(
+        structure,
+        &counts,
+        &ranks,
+        &symmetry,
+        &ligand_symmetry,
+        emission,
+    );
     let stereo_type = options.requested_stereo_type();
     if stereo_type.is_none() {
         return segments;
@@ -51,16 +84,7 @@ fn segments_of(structure: &Structure, options: &Options) -> Vec<(char, String)> 
     // input assembly (tautomeric structures strip the mobile H and
     // drop the group rows) so the identifier and the aux speak one
     // verdict; no perceivable center means no set at all.
-    let tautomeric = canonical::tautomer::mobile_groups(structure, &counts, &ranks)
-        .iter()
-        .any(|group| group.count > group.charge);
-    let Some(verdict) = canonical::stereo::informed_verdict(
-        structure,
-        &counts,
-        &ranks,
-        tautomeric,
-        options.stereo_at_zz,
-    ) else {
+    let Some(verdict) = verdict else {
         return Vec::new();
     };
     if verdict.sign == 0 {

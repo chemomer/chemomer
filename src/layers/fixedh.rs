@@ -223,6 +223,16 @@ impl FixedHLayer {
             label_unknown: self.options.distinct_unknown_undefined,
             allow_at_pseudo: self.options.stereo_at_zz,
         };
+        let (adjacency, invariants) = crate::canonical::graph_of(structure);
+        let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
+        let groups = crate::canonical::group_membership(structure, &counts);
+        let ligand_symmetry = crate::canonical::canonical_ranks_and_symmetry(
+            &adjacency,
+            &invariants,
+            &crate::canonical::tautomer::without_mobile_h(&counts, &mask),
+            &groups,
+        )
+        .1;
         let mut segments = crate::canonical::bond_stereo::segments(
             structure,
             &counts,
@@ -234,6 +244,7 @@ impl FixedHLayer {
             &counts,
             &self.fixed.ranks,
             &self.fixed.symmetry,
+            &ligand_symmetry,
             emission,
         ));
         Ok(segments)

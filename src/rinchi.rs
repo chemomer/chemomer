@@ -88,6 +88,18 @@ const MDL_TAG_RXN_BEGIN: &str = "$RXN";
 const MDL_TAG_RXN_COMPONENT_START: &str = "$MOL";
 const MDL_TAG_MOLFILE_END: &str = "M  END";
 
+// MDL RDfile tags — mdl_rdfile.h.
+const MDL_RDTAG_RFMT: &str = "$RFMT";
+/// The agent-molecule marker line (mdl_rdfile.h's MDL_RDLINE_MFMT).
+const MDL_RDLINE_MFMT: &str = "$DATUM $MFMT";
+/// The lines the RDfile reader scans for the `$RFMT` entry start
+/// before giving up (mdl_rdfile_reader.cpp's skip cap).
+const RD_SEARCH_LINES: usize = 1000;
+/// The molecule-role keywords whose presence in the `$DATUM $MFMT`
+/// preceding line marks the block a non-agent (mdl_rdfile_reader.cpp's
+/// constructor list, the leading colons included).
+const NON_AGENT_KEYWORDS: [&str; 5] = [":REACTANT", ":PRODUCT", ":EDUCT", ":REAKTANT", ":PRODUKT"];
+
 /// The atom symbols that mark a placeholder structure — a component
 /// made of one of these is a No-Structure (mdl_molfile_reader.cpp's
 /// `is_special_atom`).
@@ -721,8 +733,17 @@ pub fn parse_rxn(input: &str) -> Result<RinchiReaction> {
             "{CONTEXT}: RXN files must begin with a '{MDL_TAG_RXN_BEGIN}' line"
         ));
     }
-    // Skip the name, source-and-timestamp, and comment lines.
-    let counts_line = lines.get(4).copied().unwrap_or("");
+    let mut cursor = 0;
+    read_rxn_body(&lines, &mut cursor)
+}
+
+/// The RXN block reader both input formats share: `lines[cursor]`
+/// names the `$RXN` header, the three title lines and the component
+/// count line follow, then the counted `$MOL` blocks. On success the
+/// cursor rests on the last consumed line (the final block's
+/// `M  END`) — the RDfile reader's agent scan resumes from there.
+fn read_rxn_body(lines: &[&str], cursor: &mut usize) -> Result<RinchiReaction> {
+    let counts_line = lines.get(*cursor + 4).copied().unwrap_or("");
     let trimmed = counts_line.trim_end_matches(' ');
     if trimmed.len() != 6 && trimmed.len() != 9 {
         return err(format!(
@@ -743,24 +764,145 @@ pub fn parse_rxn(input: &str) -> Result<RinchiReaction> {
         0
     };
 
-    let mut cursor = 5;
+    *cursor += 5;
     let mut reactants = Vec::with_capacity(reactant_count);
     for _ in 0..reactant_count {
-        reactants.push(read_component(&lines, &mut cursor)?);
+        reactants.push(read_component(lines, cursor)?);
     }
     let mut products = Vec::with_capacity(product_count);
     for _ in 0..product_count {
-        products.push(read_component(&lines, &mut cursor)?);
+        products.push(read_component(lines, cursor)?);
     }
     let mut agents = Vec::with_capacity(agent_count);
     for _ in 0..agent_count {
-        agents.push(read_component(&lines, &mut cursor)?);
+        agents.push(read_component(lines, cursor)?);
     }
     Ok(RinchiReaction {
         reactants,
         products,
         agents,
         directionality: Directionality::Directional,
+    })
+}
+
+/// Parses an MDL RDfile (reaction datafile): the `$RDFILE`/`$DATM`
+/// header, then a `$RFMT $RIREG` entry whose `$RXN` block the RXN
+/// reader consumes verbatim, then agent molecules — each announced by
+/// a `$DATUM $MFMT` line and read through its `M  END`. The line
+/// BEFORE the marker decides the block's fate: its first
+/// parenthesized number is the variation (a change stops the scan —
+/// one reaction entry per variation), and a non-agent role keyword
+/// (`:REACTANT`/`:PRODUCT`/`:EDUCT`/`:REAKTANT`/`:PRODUKT`) plus an
+/// identifier already present as a reactant or product drops the
+/// block again (mdl_rdfile_reader.cpp's drop rule). A `$RFMT` line
+/// ends the entry; the `$RDFILE` line itself is optional, and the
+/// `$RFMT` start must appear within the first 1000 lines.
+pub fn parse_rdf(input: &str) -> Result<RinchiReaction> {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut start = None;
+    for (index, line) in lines.iter().enumerate() {
+        if index >= RD_SEARCH_LINES {
+            break;
+        }
+        if line.starts_with(MDL_RDTAG_RFMT) {
+            start = Some(index);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return err(format!(
+            "{CONTEXT}: RD file section must contain an '{MDL_RDTAG_RFMT}' line."
+        ));
+    };
+    // Boldly assuming that the $RXN tag directly follows the $RFMT
+    // line (mdl_rdfile_reader.cpp).
+    if lines.get(start + 1).copied().unwrap_or("") != MDL_TAG_RXN_BEGIN {
+        return err(format!(
+            "{CONTEXT}: reaction components must be delimited by a '{MDL_TAG_RXN_BEGIN}' line"
+        ));
+    }
+    let mut cursor = start + 1;
+    let mut reaction = read_rxn_body(&lines, &mut cursor)?;
+
+    // Agents until end of file, a new $RFMT tag, or the variation
+    // number changes. The line before each $DATUM $MFMT marker speaks
+    // for the block; after a marker the line before the next one is
+    // the agent block's own `M  END` (the reference's prev_line rides
+    // the reader's last consumed line).
+    let mut variation_no: Option<i64> = None;
+    let mut prev_line = lines.get(cursor).copied().unwrap_or("");
+    while cursor + 1 < lines.len() {
+        cursor += 1;
+        let line = lines[cursor];
+        if line.starts_with(MDL_RDTAG_RFMT) {
+            break;
+        }
+        if line != MDL_RDLINE_MFMT {
+            prev_line = line;
+            continue;
+        }
+        // The variation number: the first parenthesized integer of the
+        // preceding line; unreadable ones are ignored.
+        let upper_prev = prev_line.to_ascii_uppercase();
+        let next_var = upper_prev
+            .find('(')
+            .and_then(|open| upper_prev[open..].find(')').map(|close| (open, close)))
+            .and_then(|(open, close)| upper_prev[open + 1..open + close].parse::<i64>().ok());
+        if let Some(no) = next_var {
+            match variation_no {
+                None => variation_no = Some(no),
+                Some(current) if current != no => break,
+                _ => {}
+            }
+        }
+        let is_non_agent = NON_AGENT_KEYWORDS
+            .iter()
+            .any(|keyword| upper_prev.contains(keyword));
+        // The molfile block starts after the marker line.
+        cursor += 1;
+        let agent = read_agent(&lines, &mut cursor)?;
+        // A block that looks like a non-agent and duplicates an
+        // existing reactant or product identifier drops again.
+        let mut drop = false;
+        if is_non_agent {
+            let agent_key = agent.identity()?.key;
+            let mut role_keys = Vec::new();
+            for component in reaction.reactants.iter().chain(reaction.products.iter()) {
+                role_keys.push(component.identity()?.key);
+            }
+            drop = role_keys.contains(&agent_key);
+        }
+        if !drop {
+            reaction.agents.push(agent);
+        }
+        // The block reader rests one past its `M  END`; the scan's
+        // cursor convention is the last consumed line.
+        cursor -= 1;
+        prev_line = lines[cursor];
+    }
+    Ok(reaction)
+}
+
+/// Reads one agent's molfile block after a `$DATUM $MFMT` marker
+/// (the cursor already rests on the marker's successor): everything
+/// through the block's `M  END` — the molfile reader's three skipped
+/// header lines included verbatim.
+fn read_agent(lines: &[&str], cursor: &mut usize) -> Result<RinchiComponent> {
+    let mut block: Vec<&str> = Vec::new();
+    loop {
+        let line = lines
+            .get(*cursor)
+            .ok_or_else(|| bad("truncated agent molfile block - no M  END"))?;
+        *cursor += 1;
+        let ends = *line == MDL_TAG_MOLFILE_END;
+        block.push(line);
+        if ends {
+            break;
+        }
+    }
+    Ok(RinchiComponent {
+        molfile: block.join("\n"),
+        identity: None,
     })
 }
 
@@ -1468,5 +1610,114 @@ mod tests {
             "RAuxInfo=1.00.1/0/N:1/rA:1nO/rB:/rC:12,12,0;!0/N:1/rA:1nO/rB:/rC:12,12,0;",
         )
         .is_err());
+    }
+
+    // RDfile input — mdl_rdfile_reader.cpp's walk. The $RXN block
+    // parses verbatim; the $DATUM $MFMT blocks after it are agents
+    // unless the preceding line's role keyword plus a duplicate
+    // identifier drops them, and a variation-number change ends the
+    // scan.
+    fn rdf_block(name: &str, reactants: &[&str], products: &[&str], agents: &[&str]) -> String {
+        let block = |molfile: &str| {
+            let body = molfile.trim_end_matches('\n');
+            format!("$MOL\n{body}\n")
+        };
+        let mut out = format!(
+            "$RDFILE 1\n$DATM 2026-11-03 12:00:00\n$RFMT $RIREG 42\n$RXN\n{name}\n  chemomer\n\n"
+        );
+        out += &format!("{:3}{:3}\n", reactants.len(), products.len());
+        for molfile in reactants.iter().chain(products.iter()).chain(agents.iter()) {
+            out += &block(molfile);
+        }
+        out
+    }
+
+    fn rdf_agent(dtype: &str, molfile: &str) -> String {
+        let body = molfile.trim_end_matches('\n');
+        format!("$DTYPE {dtype}\n$DATUM $MFMT\n{body}\n")
+    }
+
+    #[test]
+    fn an_rdfile_without_agent_markers_reads_the_rxn_block() {
+        let input = format!(
+            "{}$DTYPE RXN:RXNREGNO\n$DATUM 42\n",
+            rdf_block("no agents", &[WATER], &[WATER], &[])
+        );
+        let reaction = parse_rdf(&input).expect("parses");
+        assert_eq!(reaction.reactants().len(), 1);
+        assert_eq!(reaction.products().len(), 1);
+        assert_eq!(reaction.agents().len(), 0);
+        assert_eq!(
+            reaction.rinchi_string().expect("rinchi"),
+            "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d+"
+        );
+    }
+
+    #[test]
+    fn an_rdfile_agent_block_joins_the_agents_role() {
+        let input = format!(
+            "{}{}",
+            rdf_block("catalyzed", &[WATER], &[WATER], &[]),
+            rdf_agent(
+                "RXN:VARIATION(1):STEPNO(1):CATALYST(1):MOL(1):MOLSTRUCTURE",
+                WATER,
+            )
+        );
+        let reaction = parse_rdf(&input).expect("parses");
+        assert_eq!(reaction.agents().len(), 1, "the catalyst stays an agent");
+        assert_eq!(
+            reaction.rinchi_string().expect("rinchi"),
+            "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2<>H2O/h1H2/d+",
+            "the agent is the reaction's third group"
+        );
+    }
+
+    #[test]
+    fn a_non_agent_block_matching_a_role_component_drops() {
+        // The :PRODUCT keyword plus a structure already present as a
+        // product — the reference deletes the block again.
+        let input = format!(
+            "{}{}",
+            rdf_block("dropped repeat", &[WATER], &[WATER], &[]),
+            rdf_agent("RXN:VARIATION(1):PRODUCT(1):MOL(1):MOLSTRUCTURE", WATER)
+        );
+        let reaction = parse_rdf(&input).expect("parses");
+        assert_eq!(reaction.agents().len(), 0, "the repeat drops");
+    }
+
+    #[test]
+    fn a_variation_number_change_ends_the_agent_scan() {
+        let input = format!(
+            "{}{}{}",
+            rdf_block("variations", &[WATER], &[WATER], &[]),
+            rdf_agent(
+                "RXN:VARIATION(1):STEPNO(1):CATALYST(1):MOL(1):MOLSTRUCTURE",
+                WATER,
+            ),
+            rdf_agent(
+                "RXN:VARIATION(2):STEPNO(1):CATALYST(1):MOL(1):MOLSTRUCTURE",
+                WATER,
+            )
+        );
+        let reaction = parse_rdf(&input).expect("parses");
+        assert_eq!(
+            reaction.agents().len(),
+            1,
+            "only the first variation's agent reads"
+        );
+    }
+
+    #[test]
+    fn the_rdf_line_is_optional_but_an_rfmt_line_is_not() {
+        // Without the $RDFILE header the first $RFMT line still starts
+        // the entry (the reference scans for it within 1000 lines).
+        let with_header = rdf_block("header", &[WATER], &[WATER], &[]);
+        let without_header = with_header.lines().skip(2).collect::<Vec<_>>().join("\n") + "\n";
+        assert!(parse_rdf(&without_header).is_ok(), "$RDFILE optional");
+        let markerless = format!("{}\nsome text\nmore text\n", WATER);
+        assert!(
+            parse_rdf(&markerless).is_err(),
+            "no $RFMT line within the scan window is a rejection"
+        );
     }
 }
