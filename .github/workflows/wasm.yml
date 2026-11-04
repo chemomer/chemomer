@@ -1,0 +1,91 @@
+# The wasm binding — build, test, and the gated publish path.
+#
+# Dispatch-only: nothing runs on push or PR. A bare dispatch builds
+# the wasm module (wasm-pack, target nodejs) and runs the Node-side
+# smoke test. Publishing is doubly gated — an explicit `publish`
+# dispatch input AND the npm trusted-publisher registration (which
+# does NOT exist yet). The wasm package ALSO needs the maintainer's
+# npm name decision before it can ever publish: wasm-pack names the
+# package after the crate ("chemomer"), which collides with the napi
+# package — the name (chemomer-wasm, @chemomer/wasm, …) is a
+# maintainer call recorded in the PR that scaffolded this workflow.
+
+name: wasm
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the wasm package to npm after the build+test job passes"
+        required: false
+        default: false
+        type: boolean
+      version:
+        description: "Version to publish (must match Cargo.toml; required when publish=true)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+      - run: wasm-pack build --target nodejs --out-dir pkg --features wasm
+      - run: node scripts/smoke-wasm.mjs
+
+  publish:
+    # Unreachable until BOTH the trusted publisher is registered AND
+    # the wasm package's npm name is decided (see the header note) —
+    # the generated pkg/ carries the crate's name and version.
+    if: inputs.publish
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm trusted publishing (OIDC): the publish credential is the
+      # job's OIDC token — no stored secret.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify version matches input
+        run: |
+          actual=$(cargo metadata --no-deps --format-version 1 | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).packages[0].version))")
+          if [ "$actual" != "${{ inputs.version }}" ]; then
+            echo "Version mismatch: input=${{ inputs.version }}, Cargo.toml=$actual"
+            exit 1
+          fi
+          echo "Publishing $actual"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing (OIDC as the publish credential) needs
+      # npm >= 11.5; Node 22 bundles npm 10, where --provenance signs
+      # via OIDC but the PUT goes out anonymously (registry 404).
+      - run: npm install -g npm@latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+      - run: wasm-pack build --target nodejs --out-dir pkg --features wasm
+      - name: Publish (trusted publishing)
+        run: |
+          cd pkg
+          npm publish --provenance --access public
