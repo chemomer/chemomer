@@ -16,8 +16,9 @@ fn dump(dir: &PathBuf, fixture: &str, id: &str) {
             continue;
         }
         let molfile = case["molfile"].as_str().unwrap();
-        let engine = Engine::with_options(molfile, chemomer::Options::default().with_do_not_add_h())
-            .unwrap();
+        let engine =
+            Engine::with_options(molfile, chemomer::Options::default().with_do_not_add_h())
+                .unwrap();
         match engine.inchi_string() {
             Ok(s) => println!("{id} identifier:\n  ours   {s}"),
             Err(e) => println!("{id} identifier errored: {e}"),

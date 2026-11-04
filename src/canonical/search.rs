@@ -104,7 +104,34 @@ fn hfree_canonical(adjacency: &[Vec<usize>], invariants: &[(u16, u16)]) -> Hfree
         adjacency,
         &[],
         false,
+        Tables::Plain,
     )
+}
+
+/// The terminal-table flavor a walk compares with: plain tables over
+/// the walk adjacency, or the TAUT walk's layered tables (atom rows
+/// without the group edges, the non-taut hydrogen, the group rows).
+#[derive(Clone, Copy)]
+enum Tables<'a> {
+    Plain,
+    Taut {
+        atom_adjacency: &'a [Vec<usize>],
+        notaut: &'a [u32],
+        group_h: &'a [u32],
+    },
+}
+
+impl Tables<'_> {
+    fn build(&self, ranks: &[u32], adjacency: &[Vec<usize>]) -> ConnectionTable {
+        match *self {
+            Tables::Plain => ConnectionTable::build(ranks, adjacency),
+            Tables::Taut {
+                atom_adjacency,
+                notaut,
+                group_h,
+            } => ConnectionTable::build_taut(ranks, atom_adjacency, adjacency, notaut, group_h),
+        }
+    }
 }
 
 /// The fix-and-rerun flow over a ready-made seed partition, with the
@@ -126,6 +153,7 @@ fn hfree_canonical_bounded(
     refine_adjacency: &[Vec<usize>],
     aux_rank: &[u32],
     theta_skip: bool,
+    tables: Tables,
 ) -> HfreeCanon {
     let first = search_stage_one(
         adjacency,
@@ -135,6 +163,7 @@ fn hfree_canonical_bounded(
         refine_adjacency,
         aux_rank,
         theta_skip,
+        tables,
     );
     let first_symmetry = orbit_min_symmetry(&first);
     let h_seed = class_partition(&first_symmetry);
@@ -152,6 +181,7 @@ fn hfree_canonical_bounded(
             refine_adjacency,
             aux_rank,
             theta_skip,
+            tables,
         )
     } else {
         first
@@ -676,21 +706,22 @@ pub fn canonical_table(
 /// the endpoint count and the `num[]` pair at the TAUT_ISO slots), the
 /// whole set refines over the augmented graph, and the search
 /// individualizes ATOMS only (`PartitionGetFirstCell` over `n`) while
-/// the t-group tail rides. The connection table grows the t-group rows
-/// (`tgroup_rank, endpoint ranks ascending` — the reference's CT
-/// format comment), which is what pulls the group's endpoints against
-/// a non-endpoint twin the base numbering left tied (the DoNotAddH
-/// bicarbonate witness: the acid pair ranks ahead of the H-less O).
+/// the t-group tail rides. The connection table carries the layered
+/// compare (atom rows without the group edges, the non-taut hydrogen,
+/// the group rows — `bSplitTautCompare`), which is what pulls the
+/// group's endpoints against a non-endpoint twin the base numbering
+/// left tied (the DoNotAddH bicarbonate witness: the acid pair ranks
+/// ahead of the H-less O).
 ///
-/// Returns the atom numbering and the atom equivalence classes of the
-/// winning pass — the pair the identifier's `/h` digits and the aux
-/// `/N:`/`/E:` speak for a tautomeric structure.
+/// Returns both candidate numberings — the raw walk's pair first, the
+/// re-seeded class walk's pair second; the caller picks by mark
+/// presence (see [`taut_layer_ranks`]).
 pub fn taut_ranks_and_symmetry(
     adjacency: &[Vec<usize>],
     invariants: &[(u16, u16)],
     hydrogens: &[u32],
     groups: &[(u32, u32, Vec<usize>)],
-) -> (Vec<u32>, Vec<u32>) {
+) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
     let n = adjacency.len();
     let g = groups.len();
     let total = n + g;
@@ -773,7 +804,22 @@ pub fn taut_ranks_and_symmetry(
         false,
         &refine_view,
         &taut_aux,
-        true,
+        // No theta skip on the main walk: the reference's L14 skip is
+        // path-dependent (the L17 re-entry iterates candidates without
+        // the mcr test), so a skip here would hide branches the
+        // reference explores — the pyrophosphate's (endpoint, bare-O)
+        // branch order among them. Automorphic subtrees cannot beat
+        // their originals, so the wider walk only ever confirms the
+        // layered minimum.
+        false,
+        Tables::Taut {
+            atom_adjacency: adjacency,
+            notaut: hydrogens,
+            group_h: &groups
+                .iter()
+                .map(|(count, _, _)| *count)
+                .collect::<Vec<u32>>(),
+        },
     );
     let symmetry = orbit_min_symmetry(&hfree.final_search);
     let symmetry = if hydrogens_uniform(&symmetry, hydrogens) {
@@ -797,17 +843,32 @@ pub fn taut_ranks_and_symmetry(
         orbit_minima(&informed_ranks, &informed_orbits)
     };
 
-    // The stereo pass's tie-class walk: the numbering the identifier's
-    // /h digits and the aux /N:/E: actually speak (ichimak2.c reads
-    // nCanonOrdStereo whenever the stereo layers ran — the default —
-    // and builds pCanonRank from it). The pass re-seeds from the
-    // taut winner's classes (FixCanonEquivalenceInfo's hand-off to
-    // map_stereo_bonds4) and re-numbers WITHIN the classes: the cell's
-    // candidates walk by atom number, so a class whose members the
-    // taut winner ordered against atom order flips here (the
-    // center-free tie class the DoNotAddH aux debts live on).
+    // The stereo pass's tie-class walk (the reference's nCanonOrdStereo
+    // hand-off): the pass re-seeds from the taut winner's classes
+    // (FixCanonEquivalenceInfo's rebuild handed to map_stereo_bonds4)
+    // and re-numbers WITHIN the classes. It exists only when the stereo
+    // pass actually runs — the taut layer's bCanonStereo is false
+    // without stereo-bond marks, and the aux reads the TAUT walk's own
+    // order then (the instrumented lenStereo=0 probe: the aux
+    // N:3,4,1,7,9,8 of the pyrophosphate IS the raw walk's winner).
     let reseeded = class_partition(&symmetry);
-    let stereo = hfree_canonical_bounded(&augmented, reseeded, n, false, &refine_view, &[], true);
+    let stereo = hfree_canonical_bounded(
+        &augmented,
+        reseeded,
+        n,
+        false,
+        &refine_view,
+        &[],
+        true,
+        Tables::Taut {
+            atom_adjacency: adjacency,
+            notaut: hydrogens,
+            group_h: &groups
+                .iter()
+                .map(|(count, _, _)| *count)
+                .collect::<Vec<u32>>(),
+        },
+    );
     let stereo_symmetry = orbit_min_symmetry(&stereo.final_search);
     let stereo_ranks: Vec<u32>;
     let stereo_atom_symmetry: Vec<u32>;
@@ -835,7 +896,48 @@ pub fn taut_ranks_and_symmetry(
         stereo_atom_symmetry = orbit_minima(&stereo_ranks, &informed_orbits)[..n].to_vec();
     }
 
-    (stereo_ranks[..n].to_vec(), stereo_atom_symmetry)
+    let raw_ranks: Vec<u32> = (0..total)
+        .map(|node| hfree.final_search.partition.rank_of(node))
+        .collect();
+    (
+        raw_ranks[..n].to_vec(),
+        symmetry[..n].to_vec(),
+        stereo_ranks[..n].to_vec(),
+        stereo_atom_symmetry,
+    )
+}
+
+/// The TAUT layer's numbering and equivalence classes: the raw walk's
+/// winner when the structure carries no UNDF stereo-bond marks — the
+/// reference's taut layer runs no stereo pass then (`bCanonStereo`
+/// false over an empty stereo CT) and the aux and the identifier
+/// layers read the TAUT walk's own order (`nCanonOrd`, the
+/// NOSTEREO-ORD probe's `lenStereo=0` line) — and the re-seeded class
+/// walk's winner when they do (the stereo pass's
+/// FixCanonEquivalenceInfo hand-off, `nCanonOrdStereo`). `structure`
+/// and `counts` feed the mark perception over the raw winner's ranks
+/// and classes.
+pub fn taut_layer_ranks(
+    structure: &crate::graph::Structure,
+    counts: &[u32],
+    adjacency: &[Vec<usize>],
+    invariants: &[(u16, u16)],
+    hydrogens: &[u32],
+    groups: &[(u32, u32, Vec<usize>)],
+) -> (Vec<u32>, Vec<u32>) {
+    let (raw_ranks, raw_symmetry, stereo_ranks, stereo_symmetry) =
+        taut_ranks_and_symmetry(adjacency, invariants, hydrogens, groups);
+    let marks = crate::canonical::stereo_walk::undf_bond_marks(
+        structure,
+        counts,
+        &raw_ranks,
+        &raw_symmetry,
+    );
+    if marks.is_empty() {
+        (raw_ranks, raw_symmetry)
+    } else {
+        (stereo_ranks, stereo_symmetry)
+    }
 }
 
 /// Disjoint sets over atoms, merged by position-wise mappings of
@@ -893,6 +995,7 @@ fn search_stage_one(
     refine_adjacency: &[Vec<usize>],
     aux_rank: &[u32],
     theta_skip: bool,
+    tables: Tables,
 ) -> StageOne {
     let n = adjacency.len();
     trace_partition(trace_tag, root);
@@ -903,7 +1006,14 @@ fn search_stage_one(
         aux_rank: aux_rank.to_vec(),
         theta_skip,
     };
-    descend_hfree(root, adjacency, refine_adjacency, &mut state, atom_bound);
+    descend_hfree(
+        root,
+        adjacency,
+        refine_adjacency,
+        &mut state,
+        atom_bound,
+        tables,
+    );
     StageOne {
         partition: state.best.expect("a discrete partition is always reached"),
         orbits: state.orbits,
@@ -956,15 +1066,22 @@ fn descend_hfree(
     refine_adjacency: &[Vec<usize>],
     state: &mut StageOneState,
     atom_bound: usize,
+    tables: Tables,
 ) {
     match partition.first_nonsingleton_cell_within(atom_bound) {
         None => {
             let leaf = resolved_leaf(partition, refine_adjacency, atom_bound);
-            let table = ConnectionTable::build(leaf.ranks(), adjacency);
+            let table = tables.build(leaf.ranks(), adjacency);
             if let Some(first) = &state.first {
-                if table.entries() == ConnectionTable::build(first.ranks(), adjacency).entries() {
+                let first_table = tables.build(first.ranks(), adjacency);
+                if table.identical(&first_table) {
                     // Automorphic image of the first terminal: merge
-                    // the position-wise mapping into the orbits.
+                    // the position-wise mapping into the orbits. The
+                    // witness is the FULL-layer identity (the
+                    // reference's CtFullCompare reading zero) —
+                    // terminals equal on the connection rows alone
+                    // need not be automorphic, and unioning them
+                    // would hide branches the reference explores.
                     for position in 0..adjacency.len() {
                         state
                             .orbits
@@ -973,10 +1090,11 @@ fn descend_hfree(
                 }
                 if tracing() {
                     eprintln!(
-                        "S1 terminal ct={:?} equal_first={}",
+                        "S1 terminal atnum={:?} ct={:?} numh={:?} equal_first={}",
+                        leaf.at_number(),
                         table.entries(),
-                        table.entries()
-                            == ConnectionTable::build(first.ranks(), adjacency).entries()
+                        table.numh_len(),
+                        table.identical(&first_table)
                     );
                 }
             } else {
@@ -988,8 +1106,7 @@ fn descend_hfree(
             let better = match &state.best {
                 None => true,
                 Some(best_partition) => {
-                    table
-                        .compare_layered(&ConnectionTable::build(best_partition.ranks(), adjacency))
+                    table.compare_layered(&tables.build(best_partition.ranks(), adjacency))
                         == std::cmp::Ordering::Greater
                 }
             };
@@ -1029,7 +1146,14 @@ fn descend_hfree(
                 if tracing() {
                     trace_partition(&format!("S1 indiv v={}", v + 1), &branch);
                 }
-                descend_hfree(&branch, adjacency, refine_adjacency, state, atom_bound);
+                descend_hfree(
+                    &branch,
+                    adjacency,
+                    refine_adjacency,
+                    state,
+                    atom_bound,
+                    tables,
+                );
             }
         }
     }

@@ -744,7 +744,11 @@ fn map_bonds(
                 let mut pos2 = r2 as usize;
                 while pos2 > 0 {
                     pos2 -= 1;
-                    if stacks[base].from.rank_of(stacks[base].from.at_number()[pos2]) != r2 {
+                    if stacks[base]
+                        .from
+                        .rank_of(stacks[base].from.at_number()[pos2])
+                        != r2
+                    {
                         break;
                     }
                     let n2 = stacks[base].from.at_number()[pos2];
@@ -804,8 +808,14 @@ fn map_bonds(
             // mapping runs with NO pins at all (the reference's outer
             // same-parity branch — ClearPreviousMappings and recurse on
             // the slot unchanged).
-            let all_same =
-                all_sb_same(&stacks[base], base_ranks, cr1, cr2, bond_neighbors, adjacency);
+            let all_same = all_sb_same(
+                &stacks[base],
+                base_ranks,
+                cr1,
+                cr2,
+                bond_neighbors,
+                adjacency,
+            );
             let mut istk = base;
             let mut same2 = false;
             if !all_same {
@@ -817,8 +827,7 @@ fn map_bonds(
                         Err(()) => return false,
                         Ok(None) => istk,
                         Ok(Some(new_rank)) => {
-                            let pushed = pin_slot(stacks, istk, from_atom1, to_atom1, new_rank, adjacency);
-                            pushed
+                            pin_slot(stacks, istk, from_atom1, to_atom1, new_rank, adjacency)
                         }
                     };
                     last_mapped_to1 = Some(to_atom1);
@@ -832,7 +841,14 @@ fn map_bonds(
                 // The second All_SB_Same over the PINNED slot: skip
                 // only the second endpoint's pin.
                 if istk > base {
-                    same2 = all_sb_same(&stacks[istk], base_ranks, cr1, cr2, bond_neighbors, adjacency);
+                    same2 = all_sb_same(
+                        &stacks[istk],
+                        base_ranks,
+                        cr1,
+                        cr2,
+                        bond_neighbors,
+                        adjacency,
+                    );
                 }
                 if !same2 {
                     istk = match number_of_ties(&stacks[istk], from_atom2, to_atom2) {
@@ -929,11 +945,7 @@ fn pin_slot(
 /// rank (r - i1 + 1) when the cell holds a tie. Both sides' cells must
 /// agree on the size (the reference's CT_MAPCOUNT_ERR guards); a
 /// singleton cell pins nothing.
-fn number_of_ties(
-    state: &Walk,
-    from_atom: usize,
-    to_atom: usize,
-) -> Result<Option<u32>, ()> {
+fn number_of_ties(state: &Walk, from_atom: usize, to_atom: usize) -> Result<Option<u32>, ()> {
     let r = state.from.rank_of(from_atom);
     if r != state.to.rank_of(to_atom) {
         return Err(()); // atoms cannot be mapped onto each other
