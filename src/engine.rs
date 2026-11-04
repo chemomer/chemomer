@@ -77,7 +77,19 @@ impl Engine {
     /// reference's option flags (see [`Options`]). The default options
     /// reproduce the standard identifier bit-for-bit.
     pub fn with_options(input: &str, options: Options) -> Result<Self> {
-        let original = molfile::parse(input)?;
+        // The read follows the option set the way the reference's does
+        // (mol_fmt1.c arms its property-line loop on treat_polymers):
+        // the default read skips the whole V2000 Sgroup family
+        // (superatom abbreviations included — plain atoms + bonds,
+        // "Ignore polymer data"); the -Polymers reads parse it, where
+        // the superatom types fail the read with the accumulated line
+        // texts. The V3000 SGROUP blocks stay discarded under both
+        // (the reference's V3000 reader never converts them).
+        let original = if options.polymers == crate::options::PolymersMode::No {
+            molfile::parse(input)?
+        } else {
+            molfile::parse_with_polymers(input)?
+        };
         // The whole-structure preprocessing (the reference's read +
         // PreprocessOneStructure, runichi3.c:540-720): the ion-pair
         // normalization and the explicit-H fold run over the WHOLE

@@ -471,13 +471,13 @@ fn the_aux_info_equals_the_oracle_recording() {
 /// RDfile family (the `$DATUM $MFMT` agent scan: catalysts read,
 /// non-agent repeats drop, a variation change ends the scan).
 ///
-/// Dated note (2026-11-03, the parked-items pass): the distribution's
-/// R005a_with_agents.rxn still rejects on its `M  STY ... SUP`
-/// superatom Sgroup property lines — the V2000 reader does not expand
-/// superatoms yet (a molfile-reader feature outside the RInChI
-/// layer's canvas; the oracle expands them and encodes the reaction).
-/// R005a itself, the undefined-stereo `/t3-,4?` witness, encodes
-/// byte-for-byte and rides the unit tests.
+/// The distribution's R005a_with_agents.rxn (the fifth family, one
+/// fixture) carries `M  STY ... SUP` superatom abbreviation lines on
+/// its agent blocks; the RInChI reference reader ignores every sgroup
+/// property line, so the components read as plain graphs — recorded
+/// 2026-11-04 when the molfile superatom unit cleared the reader's
+/// STY-SUP rejection (the V2000 reader's default read skips the whole
+/// Sgroup family now; see the superatom input gate).
 #[test]
 fn the_rinchi_equals_the_oracle_recording() {
     let dir = suite_dir();
@@ -1850,4 +1850,129 @@ fn the_valence_code_input_matches_the_oracle() {
 fn the_metal_hydride_input_matches_the_oracle() {
     let dir = suite_dir();
     check_identity_tranche(&dir, "identity-metal2.json", "metal-hydride");
+}
+
+/// The superatom input gate: the corpus's superatoms tranche records
+/// V2000 molfiles carrying `M  STY ... SUP` superatom-abbreviation
+/// Sgroups (the shape the RInChI distribution's R005a_with_agents.rxn
+/// agents use) plus the cascade and V3000 controls, each under the
+/// oracle's DEFAULT read and its `-Polymers` read (`-Polymers105`
+/// where the two flavors share the fate). The pinned semantics —
+/// probed, never assumed, against the 1.07.5 oracle:
+///
+/// - The abbreviation is METADATA, not a construct. No expansion, no
+///   renumbering: the group's atoms stand in the atom block already
+///   (SAL lists them), and the default read skips the whole Sgroup
+///   family wholesale (mol_fmt1.c:1365-1372) — the plain graph
+///   identifiers record under `default`, charges/isotopes/crossing
+///   bonds intact ("Ignore polymer data" is the only trace, a warning
+///   the recordings don't carry).
+/// - Under `-Polymers` the STY reader maps only the six polymer types
+///   and fails on SUP (mol_fmt1.c:1498); the failure frees the whole
+///   sgroups table (a memset zero — `MolFmtSgroups_Append`'s ReAlloc
+///   refuses the zeroed struct, so a later VALID SRU declaration fails
+///   too), every later Sgroup line fails with it, and the read rejects
+///   with the accumulated message `Could not interpret Molfile
+///   polymer data:` + the failing lines verbatim, joined "; ",
+///   duplicates dropped (ichierr.c AddErrorMessage).
+/// - The V3000 flavor (BEGIN SGROUP blocks) stays discarded in EVERY
+///   mode — the reference's V3000 reader never converts SGROUP data,
+///   so the V3000 fixture reads plain under both modes (the polymer
+///   path's pinned contract, byte-identical here).
+/// - A single pseudo-atom spelling of an abbreviation (element
+///   "COOH") is rejected at the atom block by the oracle in both
+///   modes — no expansion there either; the engine rejects it the
+///   same way at its element check.
+///
+/// A missing tranche file reads as an empty one — the gate skips.
+#[test]
+fn the_superatom_input_matches_the_oracle() {
+    let dir = suite_dir();
+    let Ok(text) = fs::read_to_string(dir.join("corpus/fixtures/superatoms.json")) else {
+        println!("superatom gate: no superatoms.json tranche recorded; skipped");
+        return;
+    };
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(&text).expect("valid superatoms fixtures");
+    assert!(
+        !cases.is_empty(),
+        "the superatoms.json file carries no fixtures"
+    );
+
+    fn mode_options(mode: &str) -> chemomer::Options {
+        let mut options = chemomer::Options::default();
+        match mode {
+            "default" => {}
+            "polymers" => options.polymers = chemomer::options::PolymersMode::Modern,
+            "polymers105" => options.polymers = chemomer::options::PolymersMode::Legacy,
+            other => panic!("superatom mode word {other:?} unmapped"),
+        }
+        options
+    }
+
+    let mut pass = 0;
+    let mut rejects = 0;
+    let mut failures = Vec::new();
+    let mut total = 0;
+    for case in &cases {
+        let id = case["id"].as_str().expect("id");
+        let molfile = case["molfile"].as_str().expect("molfile");
+        let modes = case["modes"].as_object().expect("modes");
+        for (mode, recording) in modes {
+            total += 1;
+            let Some(recorded_inchi) = recording.get("inchi").and_then(|v| v.as_str()) else {
+                // The recorded rejection: the engine must refuse the
+                // structure with the oracle's message.
+                let expected = recording
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .expect("error or inchi recording");
+                match chemomer::Engine::with_options(molfile, mode_options(mode)) {
+                    Ok(_) => failures.push(format!(
+                        "{id} [{mode}]: assembled an identifier; the oracle rejects with {expected:?}"
+                    )),
+                    Err(error) if error.message() == expected => rejects += 1,
+                    Err(error) => failures.push(format!(
+                        "{id} [{mode}]: error {:?} != oracle {expected:?}",
+                        error.message()
+                    )),
+                }
+                continue;
+            };
+            let recorded_aux = recording.get("aux").and_then(|v| v.as_str());
+            match chemomer::Engine::with_options(molfile, mode_options(mode)) {
+                Ok(engine) => match (engine.inchi_string(), engine.aux_string()) {
+                    (Ok(assembled), Ok(aux)) => {
+                        if assembled != recorded_inchi {
+                            failures.push(format!(
+                                "{id} [{mode}]: assembled {assembled:?} != oracle {recorded_inchi:?}"
+                            ));
+                        } else if let Some(recorded) = recorded_aux {
+                            if aux != recorded {
+                                failures.push(format!(
+                                    "{id} [{mode}]: aux {aux:?} != oracle {recorded:?}"
+                                ));
+                            } else {
+                                pass += 1;
+                            }
+                        } else {
+                            pass += 1;
+                        }
+                    }
+                    (Ok(_), Err(error)) => {
+                        failures.push(format!("{id} [{mode}]: aux errored: {error}"))
+                    }
+                    (Err(error), _) => failures.push(format!("{id} [{mode}]: {error}")),
+                },
+                Err(error) => failures.push(format!("{id} [{mode}]: {error}")),
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} superatom mismatch(es):\n{}\n(superatom pass: {pass}, oracle rejections reproduced: {rejects}, total: {total})",
+        failures.len(),
+        failures.join("\n"),
+    );
+    println!("superatom gate: pass {pass}, rejections {rejects}, total {total}");
 }
