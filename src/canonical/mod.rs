@@ -26,6 +26,7 @@ pub mod polymer;
 pub mod protons;
 mod search;
 pub mod stereo;
+pub(crate) mod stereo_walk;
 mod table;
 pub mod tautomer;
 

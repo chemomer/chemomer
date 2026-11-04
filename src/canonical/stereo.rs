@@ -388,14 +388,39 @@ fn double_bond_centers(
     parity_atoms: &[usize],
 ) -> Vec<(usize, Vec<usize>, u32)> {
     let mut out = Vec::new();
-    // The alternation marks: bonds the reference's mark_alt machinery
-    // carries as ALTERN/TAUTOM/ALT_13 never become stereo-bond
-    // candidates. On this corpus the state reads through two shapes:
-    // the aromatic Kekulé cycles (the thiophene ring of
-    // breadth-994: every cycle bond bt=TAUTOM) and the open
-    // conjugated systems (its 3-11=12-13=14-15=16 triene: every
-    // member bond bt=ALT_13) — the isolated chain C=C of hex-2-ene
-    // stays SINGLE/DOUBLE and marks.
+    let isolated = isolated_double_bonds(structure);
+    for (index, &(from, to, kind)) in structure.bonds.iter().enumerate() {
+        if kind != 2 || !isolated.contains(&index) {
+            continue;
+        }
+        let code = structure.stereo_bonds.get(&index).copied();
+        if crate::graph::is_moved_stereo(code.unwrap_or(0)) {
+            // A frame-shift-moved double bond reads no stereo at all
+            // (ZTYPE_NONE — the /b reader's fall-through).
+            continue;
+        }
+        if matches!(code, Some(3 | 4)) {
+            out.push((from, vec![to], 3));
+            continue;
+        }
+        let Some(()) = bond_descriptor_gate(structure, counts, from, to) else {
+            continue;
+        };
+        out.push((from, vec![to], 2));
+    }
+    unmark_non_stereo(&mut out, structure, ligand_symmetry, parity_atoms);
+    out
+}
+
+/// The kind-2 bond indices outside the aromatic cycles and the
+/// conjugated systems — the bonds the strict stereo-bond gates read.
+/// The corpus-arbitrated reading of the mark_alt states: cycle bonds
+/// carry bt=TAUTOM and open alternating bonds bt=ALT_13, and
+/// set_stereo_bonds_parity's switch rejects both (`case BOND_SINGLE:
+/// case BOND_TAUTOM: continue`), while an isolated chain C=C (the
+/// hex-2-ene witness) stays SINGLE/DOUBLE around the switch and
+/// marks.
+pub(crate) fn isolated_double_bonds(structure: &Structure) -> std::collections::BTreeSet<usize> {
     let aromatic = crate::canonical::aromatic::aromatic_bonds(structure);
     let conjugated = {
         let mut set = std::collections::BTreeSet::new();
@@ -420,9 +445,19 @@ fn double_bond_centers(
                         }
                     })
                     .collect();
+                // The alternation the reference's mark_alt speaks is
+                // a carbon chain reading (a C=O never joins it: the
+                // ene of an alpha,beta-unsaturated acid stays
+                // bt=DOUBLE and marks — the instrumented breadth-27
+                // witness).
+                let carbon_carbon = |f: usize, t: usize| -> bool {
+                    structure.atoms[f].element == "C" && structure.atoms[t].element == "C"
+                };
                 neighbors.iter().any(|&neighbor| {
                     structure.bonds.iter().any(|&(f, t, o)| {
-                        o == 2 && ((f == neighbor && t != atom) || (t == neighbor && f != atom))
+                        o == 2
+                            && carbon_carbon(f, t)
+                            && ((f == neighbor && t != atom) || (t == neighbor && f != atom))
                     })
                 })
             };
@@ -432,27 +467,15 @@ fn double_bond_centers(
         }
         set
     };
-    for (index, &(from, to, kind)) in structure.bonds.iter().enumerate() {
-        if kind != 2 || aromatic.contains(&index) || conjugated.contains(&index) {
-            continue;
-        }
-        let code = structure.stereo_bonds.get(&index).copied();
-        if crate::graph::is_moved_stereo(code.unwrap_or(0)) {
-            // A frame-shift-moved double bond reads no stereo at all
-            // (ZTYPE_NONE — the /b reader's fall-through).
-            continue;
-        }
-        if matches!(code, Some(3 | 4)) {
-            out.push((from, vec![to], 3));
-            continue;
-        }
-        let Some(()) = bond_descriptor_gate(structure, counts, from, to) else {
-            continue;
-        };
-        out.push((from, vec![to], 2));
-    }
-    unmark_non_stereo(&mut out, structure, ligand_symmetry, parity_atoms);
-    out
+    structure
+        .bonds
+        .iter()
+        .enumerate()
+        .filter(|&(index, &(_, _, kind))| {
+            kind == 2 && !aromatic.contains(&index) && !conjugated.contains(&index)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// The UnmarkNonStereo prune over the bond marks: a class of
@@ -602,7 +625,7 @@ fn bond_descriptor_gate(structure: &Structure, counts: &[u32], a: usize, b: usiz
 /// The shortest cycle through the bond; `true` when it is smaller
 /// than 8 (the bond_stereo module's `in_small_ring`, kept local so
 /// the descriptor perception never depends on the /b emitter).
-fn in_small_ring_stereo(structure: &Structure, a: usize, b: usize) -> bool {
+pub(crate) fn in_small_ring_stereo(structure: &Structure, a: usize, b: usize) -> bool {
     use std::collections::VecDeque;
     let adjacency = |atom: usize| -> Vec<usize> {
         structure
