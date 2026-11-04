@@ -3,11 +3,11 @@
 //! DoNotAddH mode.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chemomer::Engine;
 
-fn dump(dir: &PathBuf, fixture: &str, id: &str) {
+fn dump(dir: &Path, fixture: &str, id: &str) {
     let path = dir.join("corpus/fixtures").join(fixture);
     let cases: Vec<serde_json::Value> =
         serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
