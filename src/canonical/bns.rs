@@ -66,6 +66,13 @@ pub(crate) struct Build<'a> {
     /// neutral members' flow 1).
     pub c_point_of: &'a [Option<usize>],
     pub c_charged: &'a [bool],
+    /// The reference's FIX_CPOINT_BOND_CAP block (ichi_bns.c
+    /// 9595-9619, the != 1 branch): a c-point member's zero-capacity
+    /// single-like bond rises to cap 1 when the far atom has st
+    /// capacity — the slack the charge-moving augmentation exploits.
+    /// Only the mark-gate's alternation pass sets it; the
+    /// registration's own network keeps the corpus-proven shape.
+    pub c_point_bond_raise: bool,
 }
 
 /// Which endpoints may play the donor (single-bond / H-owner) or
@@ -144,6 +151,20 @@ impl Network {
             let Some(gid) = spec.c_point_of.get(point).and_then(|g| *g) else {
                 continue;
             };
+            // The reference's FIX_CPOINT_BOND_CAP block: raise the
+            // c-point's zero-capacity single-like bonds when the far
+            // atom has st capacity (the charge-migration slack).
+            if spec.c_point_bond_raise {
+                for (position, &(neigh, _, _)) in spec.bond_adjacency[point].iter().enumerate() {
+                    let index = made[&(point.min(neigh), point.max(neigh))] as usize;
+                    if edges[index].cap == 0
+                        && verts[neigh].st_cap >= 1
+                        && spec.single_like[point][position]
+                    {
+                        edges[index].cap = 1;
+                    }
+                }
+            }
             let host = c_group_vertex(gid);
             let charged = spec.c_charged[point];
             let index = edges.len() as u32;
@@ -234,6 +255,22 @@ impl Network {
 
     pub(crate) fn edge_cap(&self, edge: usize) -> i32 {
         self.edges[edge].cap.min(MAX_BOND_EDGE_CAP)
+    }
+
+    /// The radical gap `pBNS->tot_st_cap > pBNS->tot_st_flow` over the
+    /// atom vertices — the bTestForNonStereoBond condition and the
+    /// BNS_EF_SET_NOSTEREO flag the reference derives from it. Returns
+    /// the gap itself (the pinned-bond test-flow adjustment reads the
+    /// same number).
+    pub(crate) fn radical_gap(&self) -> i32 {
+        let (cap, flow): (i32, i32) = self
+            .verts
+            .iter()
+            .filter(|vert| vert.kind == Kind::Atom)
+            .map(|vert| (vert.st_cap, vert.st_flow))
+            .reduce(|(a, b), (c, d)| (a + c, b + d))
+            .unwrap_or((0, 0));
+        cap - flow
     }
 
     /// nMinFlow2Check: how far the edge's flow can fall — the flow
@@ -816,10 +853,13 @@ fn add_st_cap(net: &mut Network, v1: usize, skip: usize, ndots: &mut i32) {
 
 /// One BnsTestAndMarkAltBonds probe: pin the edge at `test_flow`,
 /// run the augmentation, and report feasibility (2*sum == dots, or
-/// the trivially-pinned dots==0) with the bonds whose flow moved.
+/// the trivially-pinned dots==0) with the bonds whose flow moved —
+/// each as its (low atom, high atom, delta) triple, the delta the
+/// probe left on the edge against its pre-pass flow (the
+/// `flow2 - flow0` the reference's SetAtomBondType types by).
 pub(crate) struct FlowProbe {
     pub feasible: bool,
-    pub moved: Vec<(usize, usize)>,
+    pub moved: Vec<(usize, usize, i32)>,
 }
 
 pub(crate) fn probe_altern_flow(net: &Network, iedge: usize, test_flow: i32) -> FlowProbe {
@@ -861,7 +901,11 @@ pub(crate) fn probe_altern_flow(net: &Network, iedge: usize, test_flow: i32) -> 
             .filter(|&index| work.edges[index].flow != before[index])
             .map(|index| {
                 let edge = &net.edges[index];
-                (edge.a.min(edge.b) as usize, edge.a.max(edge.b) as usize)
+                (
+                    edge.a.min(edge.b) as usize,
+                    edge.a.max(edge.b) as usize,
+                    work.edges[index].flow - before[index],
+                )
             })
             .collect()
     } else {
@@ -1477,7 +1521,13 @@ pub(crate) fn any_alt_path(net: &Network, roles: &Roles, first: usize, second: u
 ///
 /// `counts` are the structure's per-atom H counts (zero under
 /// DoNotAddH, the read state otherwise).
-pub(crate) fn resolved_chem_valence(structure: &Structure, counts: &[u32]) -> Vec<i32> {
+/// `resolved_chem_valence`'s step 1 in isolation: the bond orders after
+/// the type-18 zero-charge promotion, before any aromatic matching.
+/// The mark gate reads the same promoted deck the reference's
+/// normalization leaves at `mark_alt` entry — the promoted N≡C is a
+/// wrong-typed (triple) bond there, feeding the ONE_BAD neighbor
+/// counting that kills the imine mark on valence-2 N.
+pub(crate) fn ion_pair_promoted_orders(structure: &Structure, counts: &[u32]) -> Vec<u32> {
     let n = structure.atoms.len();
     let element = |atom: usize| -> i32 {
         crate::canonical::protons::el_number(&structure.atoms[atom].element).unwrap_or(-1)
@@ -1629,6 +1679,29 @@ pub(crate) fn resolved_chem_valence(structure: &Structure, counts: &[u32]) -> Ve
             }
         }
     }
+    orders
+}
+
+/// The reference's read-back of the normalization's resolved bond
+/// state (`norm_at`: `chem_bonds_valence` = valence + resolved flow).
+/// The ion-pair promotion ([`ion_pair_promoted_orders`]) composes with
+/// the aromatic matching: the alternating bonds the input left resolve
+/// one π per matched bond — a maximum matching restricted to the atoms
+/// whose preferred registered valence still lacks one unit after their
+/// σ bonds and real multiples (furan's O resolves π-free at cbv 2
+/// while its four carbons take one π each; naphthalene's
+/// bridgeheads match once for cbv 4 against the outer carbons' 3).
+///
+/// `counts` are the structure's per-atom H counts (zero under
+/// DoNotAddH, the read state otherwise).
+pub(crate) fn resolved_chem_valence(structure: &Structure, counts: &[u32]) -> Vec<i32> {
+    let n = structure.atoms.len();
+    let orders = ion_pair_promoted_orders(structure, counts);
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (bond, &(from, to, _)) in structure.bonds.iter().enumerate() {
+        adjacency[from].push(bond);
+        adjacency[to].push(bond);
+    }
     // Aromatic matching over the (possibly promoted) orders.
     let mut degree = vec![0i32; n];
     let mut real_pi = vec![0i32; n];
@@ -1729,6 +1802,7 @@ mod tests {
             single_like: &single_like,
             c_point_of: &[None; 0],
             c_charged: &[false; 0],
+            c_point_bond_raise: false,
         })
     }
 

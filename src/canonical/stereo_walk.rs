@@ -36,19 +36,33 @@
 use super::partition::Partition;
 use crate::graph::Structure;
 
-/// The strict stereo-bond candidacy gate (the reference's
-/// `set_stereo_bonds_parity` counting core): every isolated double
-/// bond ([`super::stereo::isolated_double_bonds`]) both of whose ends
-/// carry valence + drawn hydrogen in the stereo-bond window [2, 3]
-/// (MIN/MAX_NUM_STEREO_BOND_NEIGH), an eligible element
-/// (`bCanAtomHaveAStereoBond`: C/Si/Ge neutral, N neutral or +1), no
-/// middle-cumulene shape at the registering end, exactly one double
-/// bond at the registering end, a legal opposite-end neighborhood
-/// (single/double bonds only, one double-bond type, two doubles only
-/// for an allene-middle end), and no ring smaller than
-/// MIN_SB_RING_SIZE = 8. Zero coordinates leave every surviving mark
-/// at AB_PARITY_UNDF. Returns the marks as unordered atom pairs.
-pub(crate) fn undf_bond_marks(structure: &Structure, counts: &[u32]) -> Vec<(usize, usize)> {
+/// The strict stereo-bond candidacy gate — the reference's
+/// `set_stereo_bonds_parity` counting core over the mark_alt
+/// alternation state. The bond types the normalization leaves
+/// ([`super::tautomer::mark_alt_bond_types`]) drive every reading:
+/// through `get_allowed_stereo_bond_type` (1.07.5 flags) a DOUBLE (2)
+/// or an ALTERN (4) bond is a stereo-bond candidate, SINGLE (1) and
+/// TAUTOM (8) pass unmarked, and TRIPLE/ALT_123/ALT_13/ALT_23/ALT12NS
+/// (3/5/6/7/9) read ZERO — the ONE_BAD wrong-type whose neighbors a
+/// valence-2 atom may carry once, never twice. The gates, in the
+/// reference's order: the atom windows ([2,3] heavy + drawn H), the
+/// element gate (C/Si/Ge neutral, N neutral or +1), the c-point
+/// rejection, the middle-cumulene early out; per candidate the
+/// opposite end's neighborhood (wrong-typed bonds counted, exactly one
+/// of alt/double present, at most two doubles with the N(V) exception),
+/// the type_N oxide pair, the allene chain walk, and the parity loop's
+/// ring gate — `is_bond_in_Nmax_memb_ring` only when both ends share
+/// the MarkRingSystemsInp ring system, rejecting cycles under
+/// MIN_SB_RING_SIZE = 8 (a spiro-split or terminal bond evades it
+/// whole). Zero coordinates leave every surviving mark at
+/// AB_PARITY_UNDF. Returns the marks as unordered atom pairs.
+pub(crate) fn undf_bond_marks(
+    structure: &Structure,
+    counts: &[u32],
+    ranks: &[u32],
+    classes: &[u32],
+) -> Vec<(usize, usize)> {
+    use super::tautomer::endpoint_valence;
     // The UNDF-only shape: the reference computes the parity from the
     // drawn geometry, and zero coordinates leave every mark undefined.
     // Any drawn coordinate means the geometry path — out of scope.
@@ -59,22 +73,49 @@ pub(crate) fn undf_bond_marks(structure: &Structure, counts: &[u32]) -> Vec<(usi
     {
         return Vec::new();
     }
-    let isolated = super::stereo::isolated_double_bonds(structure);
+    let types = super::tautomer::mark_alt_bond_types(structure, counts);
+    let c_point = super::tautomer::settled_c_points(structure, counts);
+    let ring = super::tautomer::ring_systems(structure);
     let neighbors = adjacency_of(structure);
-    let bond_kind = |atom: usize, other: usize| -> u32 {
-        structure
-            .bonds
-            .iter()
-            .find_map(|&(from, to, kind)| {
-                if (from == atom && to == other) || (to == atom && from == other) {
-                    Some(kind)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0)
+    let bond_index = |atom: usize, other: usize| -> Option<usize> {
+        structure.bonds.iter().position(|&(from, to, _)| {
+            (from == atom && to == other) || (to == atom && from == other)
+        })
     };
-    let eligible_element = |atom: usize| -> bool {
+    // get_allowed_stereo_bond_type (1.07.5: ADD_6MEMB_AROM_BOND_PARITY
+    // on, TAUTOM attachments allowed).
+    let allowed = |bond: usize| -> u32 {
+        match types[bond] {
+            1 | 2 | 4 | 8 => u32::from(types[bond]),
+            _ => 0,
+        }
+    };
+    // chem_bonds_valence over the normalized types, doubled to stay
+    // integral: 1/2/3 plain, the alternating blends 1.5 (bt4), the
+    // range mids (bt5/bt6: 2, bt7: 2.5), TAUTOM/ALT12NS 1.5 — the
+    // MABT-deck readings (a pyrophosphate P reads cbv 5 over 1+8+8+1).
+    let blend2 = |bond: usize| -> i32 {
+        match types[bond] {
+            1 => 2,
+            2 => 4,
+            3 => 6,
+            4 => 3,
+            5 | 6 => 4,
+            7 => 5,
+            8 | 9 => 3,
+            _ => 0,
+        }
+    };
+    let cbv2 = |atom: usize| -> i32 {
+        neighbors[atom]
+            .iter()
+            .filter_map(|&next| bond_index(atom, next))
+            .map(blend2)
+            .sum()
+    };
+    let degree = |atom: usize| -> u32 { neighbors[atom].len() as u32 };
+    let in_window = |atom: usize| -> bool { (2..=3).contains(&(degree(atom) + counts[atom])) };
+    let can_have_sb = |atom: usize| -> bool {
         let element = structure.atoms[atom].element.as_str();
         let charge = structure.atoms[atom].charge;
         matches!(
@@ -82,91 +123,435 @@ pub(crate) fn undf_bond_marks(structure: &Structure, counts: &[u32]) -> Vec<(usi
             ("C", 0) | ("Si", 0) | ("Ge", 0) | ("N", 0) | ("N", 1)
         )
     };
-    let in_window = |atom: usize| -> bool {
-        let valence = neighbors[atom].len() as u32 + counts[atom];
-        (2..=3).contains(&valence)
+    // bIsOxide: a DOUBLE bond to a terminal O-like atom (valence-2
+    // endpoint, uncharged, H-free), or a TAUTOM/ALT12NS bond to a
+    // terminal valence-2 endpoint.
+    let is_oxide = |atom: usize| -> bool {
+        neighbors[atom].iter().any(|&next| {
+            let Some(bond) = bond_index(atom, next) else {
+                return false;
+            };
+            let other_degree = neighbors[next].len();
+            match types[bond] {
+                2 => {
+                    other_degree == 1
+                        && structure.atoms[next].charge == 0
+                        && counts[next] == 0
+                        && endpoint_valence(&structure.atoms[next].element) == Some(2)
+                }
+                8 | 9 => {
+                    other_degree == 1 && endpoint_valence(&structure.atoms[next].element) == Some(2)
+                }
+                _ => false,
+            }
+        })
     };
-    // The middle-cumulene shape: two double bonds, no hydrogen — the
-    // registering end skips (`set_stereo_bonds_parity`'s early out).
+    // bIsSuitableHeteroInpAtom: 0 the =N-/=NH double neighbor, 1 the
+    // =O, -1 nothing.
+    let suitable_hetero = |atom: usize| -> i32 {
+        let record = &structure.atoms[atom];
+        if record.charge != 0 {
+            return -1;
+        }
+        let Some(valence) = endpoint_valence(&record.element) else {
+            return -1;
+        };
+        if cbv2(atom) / 2 + counts[atom] as i32 != valence as i32 {
+            return -1;
+        }
+        match valence {
+            2 if counts[atom] == 0 && neighbors[atom].len() == 1 => 0,
+            3 if (neighbors[atom].len() == 1 && counts[atom] == 1)
+                || (neighbors[atom].len() == 2 && counts[atom] == 0) =>
+            {
+                1
+            }
+            _ => -1,
+        }
+    };
+    // The N(V) shape type: -N= (valence 2, cbv 3) or >N(V) (valence 3,
+    // cbv 5) on a neutral hydrogen-free endpoint-valence-3 atom.
+    let type_n = |atom: usize| -> i32 {
+        let record = &structure.atoms[atom];
+        if counts[atom] != 0 || record.charge != 0 {
+            return 0;
+        }
+        if endpoint_valence(&record.element) != Some(3) {
+            return 0;
+        }
+        if degree(atom) == 2 && cbv2(atom) == 6 {
+            1
+        } else if degree(atom) == 3 && cbv2(atom) == 10 {
+            2
+        } else {
+            0
+        }
+    };
     let middle_cumulene = |atom: usize| -> bool {
         counts[atom] == 0
             && neighbors[atom].len() == 2
             && neighbors[atom]
                 .iter()
-                .all(|&other| bond_kind(atom, other) == 2)
+                .all(|&next| bond_index(atom, next).is_some_and(|bond| allowed(bond) == 2))
     };
-    // The bond indices for the aromatic exclusion.
-    let bond_index = |atom: usize, other: usize| -> Option<usize> {
-        structure.bonds.iter().position(|&(from, to, _)| {
-            (from == atom && to == other) || (to == atom && from == other)
-        })
+    let allene_end = |atom: usize| -> bool {
+        matches!(
+            (
+                structure.atoms[atom].element.as_str(),
+                structure.atoms[atom].charge
+            ),
+            ("C", 0) | ("Si", 0) | ("Ge", 0)
+        )
     };
     let mut out = Vec::new();
-    for high in 0..structure.atoms.len() {
-        // The registration end: the reference collects a bond only at
-        // its higher-numbered end (`at_1 > at_2`).
-        for &low in &neighbors[high] {
-            if low >= high {
-                continue;
-            }
-            let Some(bond) = bond_index(high, low) else {
+    for at_1 in 0..structure.atoms.len() {
+        if !in_window(at_1) || !can_have_sb(at_1) || c_point[at_1].is_some() {
+            continue;
+        }
+        // The middle-cumulene early out: an =C= atom is no bond-parity
+        // source.
+        if middle_cumulene(at_1) {
+            continue;
+        }
+        let mut num_2s_1 = 0u32;
+        let mut num_alt_1 = 0u32;
+        let mut num_wrong_1 = 0u32;
+        let mut num_chains = 0u32;
+        let mut chain_length = 0usize;
+        let mut hetero_n = 0u32;
+        let mut hetero_o = 0u32;
+        let mut candidates: Vec<usize> = Vec::new();
+        let mut abort = false;
+        for &start in &neighbors[at_1] {
+            let mut at_2 = start;
+            let Some(bond) = bond_index(at_1, at_2) else {
                 continue;
             };
-            if structure.bonds[bond].2 != 2 || !isolated.contains(&bond) {
-                continue;
-            }
-            // The C=C slice: the reference's normalized state types the
-            // C=N/N=N-adjacent bonds of amidine/azine systems with the
-            // mark_alt alternation marks (BOND_ALT_13 et al. — get
-            // _allowed_stereo_bond_type maps them to zero, the ONE_BAD
-            // wrong-type), and nothing in the local structure predicts
-            // where the flow puts them (the instrumented amidine
-            // trio: the same N=C(=S) shape typed bt1 on one fixture
-            // and bt0 on another). The carbon-carbon marks — where the
-            // corpus witnesses the walk — stay; the C=N/N=N marks are
-            // the alternation state's debt, dated in the ledger.
-            if structure.atoms[high].element != "C" || structure.atoms[low].element != "C" {
-                continue;
-            }
-            // The registering end: element, window, shape, one double.
-            if !eligible_element(high) || !in_window(high) || middle_cumulene(high) {
-                continue;
-            }
-            let doubles_here = neighbors[high]
-                .iter()
-                .filter(|&&next| bond_kind(high, next) == 2)
-                .count();
-            if doubles_here != 1 {
-                continue;
-            }
-            // The opposite end: element, window, legal neighborhood.
-            if !eligible_element(low) || !in_window(low) {
-                continue;
-            }
-            let mut doubles_opposite = 0;
-            let mut illegal = false;
-            for &next in &neighbors[low] {
-                match bond_kind(low, next) {
-                    2 => doubles_opposite += 1,
-                    1 => {}
-                    _ => illegal = true,
+            match allowed(bond) {
+                4 => {
+                    num_alt_1 += 1;
+                    // An alternation bond joins candidates only within
+                    // its ring system.
+                    if ring.system[at_1] != ring.system[at_2] || !can_have_sb(at_2) {
+                        continue;
+                    }
+                }
+                2 => {
+                    num_2s_1 += 1;
+                    // The cumulene chain walk: an =C= partner extends
+                    // the chain while the far atom stays =Y=; a chain
+                    // must end at a terminal-allene atom or the bond
+                    // drops out. The chain end REPLACES the candidate
+                    // partner.
+                    if allene_end(at_1) {
+                        let mut cursor = at_2;
+                        let mut back = at_1;
+                        let mut length = 0usize;
+                        let mut b_allene;
+                        loop {
+                            b_allene = counts[cursor] == 0
+                                && neighbors[cursor].len() == 2
+                                && neighbors[cursor].iter().all(|&next| {
+                                    bond_index(cursor, next).is_some_and(|bond| allowed(bond) == 2)
+                                });
+                            if !(b_allene && allene_end(cursor)) {
+                                break;
+                            }
+                            let k = neighbors[cursor][0] == back;
+                            back = cursor;
+                            cursor = neighbors[cursor][if k { 1 } else { 0 }];
+                            length += 1;
+                        }
+                        if length > 0 {
+                            num_chains += 1;
+                            if b_allene || !allene_end(cursor) {
+                                continue;
+                            }
+                            chain_length = length;
+                            at_2 = cursor;
+                        }
+                    }
+                    if chain_length == 0 {
+                        let n2sh = suitable_hetero(at_2);
+                        if n2sh == 0 {
+                            hetero_n += 1;
+                        } else if n2sh == 1 {
+                            hetero_o += 1;
+                        }
+                        if !can_have_sb(at_2) {
+                            continue;
+                        }
+                    }
+                }
+                1 | 8 => continue,
+                _ => {
+                    num_wrong_1 += 1;
+                    continue;
                 }
             }
-            if illegal || doubles_opposite == 0 || doubles_opposite > 2 {
+            // The registration end: the higher-numbered atom only.
+            if at_1 <= at_2 {
                 continue;
             }
-            if doubles_opposite == 2 && neighbors[low].len() != 2 {
+            if !in_window(at_2) {
                 continue;
             }
-            // No small ring through the bond (min_sb_ring_size = 8).
-            // No small ring through the bond (min_sb_ring_size = 8).
-            if super::stereo::in_small_ring_stereo(structure, high, low) {
+            // The opposite end's neighborhood.
+            let mut num_2s_2 = 0u32;
+            let mut num_alt_2 = 0u32;
+            let mut num_wrong_2 = 0u32;
+            let mut opposite_hetero_n = 0u32;
+            let mut opposite_hetero_o = 0u32;
+            let mut found_back = false;
+            for &next in &neighbors[at_2] {
+                let Some(next_bond) = bond_index(at_2, next) else {
+                    continue;
+                };
+                let next_type = allowed(next_bond);
+                if next_type == 0 {
+                    num_wrong_2 += 1;
+                    continue;
+                }
+                if next_type == 2 {
+                    num_2s_2 += 1;
+                    let n2sh = suitable_hetero(next);
+                    if n2sh == 0 {
+                        opposite_hetero_n += 1;
+                    } else if n2sh == 1 {
+                        opposite_hetero_o += 1;
+                    }
+                } else if next_type == 4 {
+                    num_alt_2 += 1;
+                }
+                if next == at_1 {
+                    found_back = true;
+                }
+            }
+            if num_wrong_2 > 1 || (num_wrong_2 > 0 && degree(at_2) <= 2) {
                 continue;
             }
-            out.push((high, low));
+            if i32::from(num_alt_2 > 0) + i32::from(num_2s_2 > 0) != 1 || !found_back {
+                continue;
+            }
+            if c_point[at_2].is_some() {
+                continue;
+            }
+            if num_2s_2 > 2 {
+                continue;
+            }
+            let (tn1, tn2) = (type_n(at_1), type_n(at_2));
+            if tn1 | tn2 == 3 && ((tn1 == 2 && !is_oxide(at_1)) || (tn2 == 2 && !is_oxide(at_2))) {
+                continue;
+            }
+            if num_2s_2 == 2 {
+                // The N(V) twin-double exception (the O=C=N / N=C=N /
+                // O=N=N shapes) — otherwise two doubles at the opposite
+                // end kill the bond (`set_stereo_bonds_parity` has no
+                // valence-2 pass-through here).
+                let record = &structure.atoms[at_2];
+                let nv = opposite_hetero_n | opposite_hetero_o == 1
+                    && degree(at_2) + counts[at_2] == 3
+                    && cbv2(at_2) / 2 + counts[at_2] as i32 == 5
+                    && endpoint_valence(&record.element) == Some(3)
+                    && (tn2 == 0 || is_oxide(at_2));
+                if !nv {
+                    continue;
+                }
+            }
+            if chain_length > 0 && num_alt_2 > 0 {
+                abort = true; // no alternation bonds inside cumulenes
+                break;
+            }
+            candidates.push(at_2);
+        }
+        if abort
+            || num_chains > 1
+            || num_wrong_1 > 1
+            || (num_wrong_1 > 0 && degree(at_1) <= 2)
+            || i32::from(num_alt_1 > 0) + i32::from(num_2s_1 > 0) != 1
+            || candidates.is_empty()
+        {
+            continue;
+        }
+        if chain_length > 0 && (candidates.len() != 1 || num_alt_1 > 0 || chain_length > 2) {
+            continue;
+        }
+        if num_2s_1 > 1 {
+            // The at_1 side's N(V) twin-double exception.
+            let record = &structure.atoms[at_1];
+            let nv = hetero_n | hetero_o == 1
+                && type_n(at_1) == 2
+                && degree(at_1) + counts[at_1] == 3
+                && cbv2(at_1) / 2 + counts[at_1] as i32 == 5
+                && endpoint_valence(&record.element) == Some(3);
+            if !nv {
+                continue;
+            }
+        }
+        // The parity loop's ring gate: is_bond_in_Nmax_memb_ring runs
+        // only when both ends share the ring system, and rejects the
+        // bonds in cycles under MIN_SB_RING_SIZE (8).
+        for &at_2 in &candidates {
+            if ring.system[at_1] == ring.system[at_2]
+                && super::stereo::in_small_ring_stereo(structure, at_1, at_2)
+            {
+                continue;
+            }
+            if std::env::var_os("INCHI_TRACE_BNS").is_some() {
+                eprintln!("UNDJPUSH at1={} at2={}", at_1 + 1, at_2 + 1);
+            }
+            out.push((at_1, at_2));
         }
     }
+    // The reference's RemoveKnownNonStereoBondParities fixpoint
+    // (ichicans.c, post-canonicalization): a mark whose registering
+    // end carries THREE heavy neighbors and whose OTHER two neighbors
+    // are constitutionally equivalent (in a different ring system than
+    // the atom, over parity-free equivalent branches) cannot speak
+    // stereo — the C=N+(Me)2 iminium mark dies, the valence-2 imine
+    // and azo marks survive.
+    prune_known_non_stereo(structure, &mut out, classes, &ring.system, ranks);
     out
+}
+
+/// `PathsHaveIdenticalKnownParities` over parity-free branches: a
+/// parallel DFS pairing both branches' next neighbors in ascending
+/// canon-rank order; every step's pair must share the class rank and
+/// visited state, and an edge that crosses a mark fails (the marks'
+/// parities are UNDF — never well-defined — so the reference's
+/// well-defined-parity requirement rejects the crossing).
+#[allow(clippy::too_many_arguments)]
+fn paths_identical(
+    neighbors: &[Vec<usize>],
+    classes: &[u32],
+    marks: &std::collections::BTreeSet<(usize, usize)>,
+    ranks: &[u32],
+    prev1: usize,
+    cur1: usize,
+    prev2: usize,
+    cur2: usize,
+    visited1: &mut [u32],
+    visited2: &mut [u32],
+    length: u32,
+) -> u32 {
+    let length = length + 1;
+    visited1[cur1] = length;
+    visited2[cur2] = length;
+    if neighbors[cur1].len() != neighbors[cur2].len() {
+        return 0;
+    }
+    if neighbors[cur1].len() == 1 {
+        return length;
+    }
+    // The paired-neighbor iterator: the smallest canon rank above the
+    // last, the parent excluded.
+    let next_of = |cur: usize, prev: usize, last: &mut u32| -> Option<usize> {
+        neighbors[cur]
+            .iter()
+            .copied()
+            .filter(|&next| next != prev)
+            .map(|next| (ranks[next], next))
+            .filter(|&(rank, _)| rank > *last)
+            .min_by_key(|&(rank, _)| rank)
+            .map(|(rank, next)| {
+                *last = rank;
+                next
+            })
+    };
+    let edge_marked =
+        |cur: usize, next: usize| -> bool { marks.contains(&(cur.min(next), cur.max(next))) };
+    let mut last1 = 0u32;
+    let mut last2 = 0u32;
+    let steps = neighbors[cur1].len() - 1;
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for _ in 0..steps {
+        let (Some(n1), Some(n2)) = (
+            next_of(cur1, prev1, &mut last1),
+            next_of(cur2, prev2, &mut last2),
+        ) else {
+            return 0;
+        };
+        if classes[n1] != classes[n2] || visited1[n1] != visited2[n2] {
+            return 0;
+        }
+        if edge_marked(cur1, n1) || edge_marked(cur2, n2) {
+            // Both edges would have to be marks with well-defined
+            // parities — the UNDF marks never are.
+            return 0;
+        }
+        pairs.push((n1, n2));
+    }
+    for (n1, n2) in pairs {
+        if visited1[n1] == 0
+            && paths_identical(
+                neighbors, classes, marks, ranks, cur1, n1, cur2, n2, visited1, visited2, length,
+            ) == 0
+        {
+            return 0;
+        }
+    }
+    length
+}
+
+/// The removal fixpoint.
+fn prune_known_non_stereo(
+    structure: &Structure,
+    out: &mut Vec<(usize, usize)>,
+    classes: &[u32],
+    ring_system: &[usize],
+    ranks: &[u32],
+) {
+    let neighbors = adjacency_of(structure);
+    let n = structure.atoms.len();
+    loop {
+        let marks: std::collections::BTreeSet<(usize, usize)> = out.iter().copied().collect();
+        let mut removed = false;
+        for index in (0..out.len()).rev() {
+            let (a, b) = out[index];
+            for &(atom, other) in &[(a, b), (b, a)] {
+                if neighbors[atom].len() != 3 {
+                    continue;
+                }
+                let rest: Vec<usize> = neighbors[atom]
+                    .iter()
+                    .copied()
+                    .filter(|&next| next != other)
+                    .collect();
+                if rest.len() != 2 || classes[rest[0]] != classes[rest[1]] {
+                    continue;
+                }
+                if ring_system[atom] == ring_system[rest[0]] {
+                    continue;
+                }
+                let mut visited1 = vec![0u32; n];
+                let mut visited2 = vec![0u32; n];
+                if paths_identical(
+                    &neighbors,
+                    classes,
+                    &marks,
+                    ranks,
+                    atom,
+                    rest[0],
+                    atom,
+                    rest[1],
+                    &mut visited1,
+                    &mut visited2,
+                    0,
+                ) > 0
+                {
+                    out.remove(index);
+                    removed = true;
+                    break;
+                }
+            }
+            if removed {
+                break;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
 }
 
 /// The stereo-pass numbering over `marks` — the two-sided mapping walk
