@@ -47,7 +47,7 @@ pub struct MobileGroup {
 }
 
 /// Endpoint valence per the reference's `get_endpoint_valence`.
-fn endpoint_valence(element: &str) -> Option<u32> {
+pub(crate) fn endpoint_valence(element: &str) -> Option<u32> {
     match element {
         "O" | "S" | "Se" | "Te" => Some(2),
         "N" => Some(3),
@@ -120,13 +120,13 @@ enum Role {
 /// size — a chain atom is a size-1 system of its own, rings joined by
 /// a bridge are separate systems, spiro fusions are one — plus the
 /// articulation points the 1,4 template requires.
-struct RingSystems {
-    system: Vec<usize>,
+pub(crate) struct RingSystems {
+    pub(crate) system: Vec<usize>,
     size: Vec<usize>,
     cut_vertex: Vec<bool>,
 }
 
-fn ring_systems(structure: &Structure) -> RingSystems {
+pub(crate) fn ring_systems(structure: &Structure) -> RingSystems {
     let n = structure.atoms.len();
     let mut neighbors: Vec<Vec<usize>> = vec![Vec::new(); n];
     for &(from, to, _) in &structure.bonds {
@@ -1062,6 +1062,7 @@ impl<'a> Context<'a> {
             single_like: &single_like,
             c_point_of: &state.c_point_of,
             c_charged: &state.c_charged,
+            c_point_bond_raise: false,
         });
         let (found, moved) = super::bns::charge_alt_path(&net, charged, neutral);
         let bonds = moved
@@ -1164,6 +1165,7 @@ impl<'a> Context<'a> {
             single_like: &single_like,
             c_point_of: &state.c_point_of,
             c_charged: &state.c_charged,
+            c_point_bond_raise: false,
         })
     }
 
@@ -1241,6 +1243,7 @@ impl<'a> Context<'a> {
             single_like: &single_like,
             c_point_of: &state.c_point_of,
             c_charged: &state.c_charged,
+            c_point_bond_raise: false,
         });
         let roles = super::bns::Roles {
             donor_ok: (0..n)
@@ -1797,6 +1800,7 @@ fn alternation_round(context: &Context, state: &mut Registration) -> bool {
         single_like: &single_like,
         c_point_of: &state.c_point_of,
         c_charged: &state.c_charged,
+        c_point_bond_raise: true,
     });
     let mut changed = false;
     for atom in 0..n {
@@ -1824,7 +1828,7 @@ fn alternation_round(context: &Context, state: &mut Registration) -> bool {
                 }
                 if probe.feasible {
                     state.altered.insert(index);
-                    for &(a, b) in &probe.moved {
+                    for &(a, b, _) in &probe.moved {
                         if let Some(&moved) = context.bond_index.get(&(a, b)) {
                             state.altered.insert(moved);
                         }
@@ -1836,6 +1840,324 @@ fn alternation_round(context: &Context, state: &mut Registration) -> bool {
         }
     }
     changed
+}
+
+// ─── The mark_alt alternation typing (the stereo mark gate's state) ──
+
+/// The bond types (the reference's `bond_type & BOND_TYPE_MASK` low
+/// nibble) `mark_alt_bonds_and_taut_groups` leaves normalized, as the
+/// stereo mark gate (`set_stereo_bonds_parity` through
+/// `get_allowed_stereo_bond_type`) reads them: 1/2/3 the single-like
+/// orders the flow settled on, 4 the alternating bonds, 5/6/7 the
+/// multi-range alternation marks (ALT_123/ALT_13/ALT_23 — all
+/// wrong-typed to the gate), 8 tautomeric, 9 the non-stereo
+/// alternation. The pass is the reference's `BnsTestAndMarkAltBonds`
+/// loop over the type-18-promoted deck: probe each bond (atom order,
+/// first encounter) at its other achievable flows against the balanced
+/// network; a feasible probe types the pinned bond AND everything the
+/// probe moved through the `SetAtomBondType` state machine — the
+/// (flow0, flow2) pair picks ALTERN/ALT_13/ALT_23 on a plain bond and
+/// upgrades the mark (toward ALT_123) on an already-alternating one —
+/// with `bNeedToTestTheFlow` skipping the flow/mark pairs already
+/// answered. Feasibility is flow-order-independent (each probe runs on
+/// a clone of the settled network); the accumulated TYPES are what the
+/// probes leave behind.
+///
+/// The radical gap (`tot_st_cap > tot_st_flow`) sets
+/// bTestForNonStereoBond: the test-flow range shifts on pinned bonds
+/// and the (0,1) alternation types ALT12NS instead of ALTERN.
+pub(crate) fn mark_alt_bond_types(structure: &Structure, hydrogens: &[u32]) -> Vec<u8> {
+    let context = Context::new(structure, hydrogens);
+    let (_, state) = build_links(&context);
+    let n = structure.atoms.len();
+    // The deck the BNS builds over: the type-18-promoted orders (the
+    // reference's at[] at mark_alt entry, its chem_bonds_valence
+    // included) — the promotion's N≡C raises that atom's valence slack
+    // exactly as the oracle's does.
+    let orders = super::bns::ion_pair_promoted_orders(structure, hydrogens);
+    let mut bond_valence = vec![0i32; n];
+    for (bond, &(from, to, _)) in structure.bonds.iter().enumerate() {
+        let unit = match orders[bond] {
+            1 => 1,
+            2 => 2,
+            3 => 3,
+            _ => 0, // alternating input bonds build as single; their π
+                    // rides the 1.5 blend below
+        };
+        bond_valence[from] += unit;
+        bond_valence[to] += unit;
+    }
+    for (atom, slack) in bond_valence.iter_mut().enumerate() {
+        let aromatic = adjacency_of_bonds(structure, atom)
+            .into_iter()
+            .filter(|&bond| orders[bond] > 3)
+            .count();
+        *slack += match aromatic {
+            0 => 0,
+            1 => 1,
+            k => k as i32 + 1,
+        };
+    }
+    let bond_adjacency: Vec<Vec<(usize, i32, bool)>> = (0..n)
+        .map(|atom| {
+            adjacency_of_bonds(structure, atom)
+                .into_iter()
+                .map(|bond| {
+                    let &(from, to, _) = &structure.bonds[bond];
+                    let neigh = if from == atom { to } else { from };
+                    (
+                        neigh,
+                        match orders[bond] {
+                            2 => 1,
+                            3 => 2,
+                            _ => 0,
+                        },
+                        !context.allowed_edge(atom, neigh),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let single_like: Vec<Vec<bool>> = (0..n)
+        .map(|atom| {
+            adjacency_of_bonds(structure, atom)
+                .into_iter()
+                .map(|bond| {
+                    let &(from, to, _) = &structure.bonds[bond];
+                    let neigh = if from == atom { to } else { from };
+                    matches!(
+                        context.bond_type(&state, atom, neigh),
+                        BondType::Single | BondType::Altern | BondType::Tautom | BondType::Alt12ns
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let max_flow: Vec<i32> = (0..n)
+        .map(|atom| (bond_valence[atom] - context.neighbors[atom].len() as i32).max(0))
+        .collect();
+    let donor: Vec<bool> = (0..n)
+        .map(|atom| context.bns_role(&state, atom) == Some(Role::Donor))
+        .collect();
+    let net = super::bns::Network::build(&super::bns::Build {
+        bond_adjacency: &bond_adjacency,
+        max_flow: &max_flow,
+        group_of: &state.group_of,
+        donor: &donor,
+        single_like: &single_like,
+        c_point_of: &state.c_point_of,
+        c_charged: &state.c_charged,
+        c_point_bond_raise: true,
+    });
+    let gap = net.radical_gap();
+    let b_test_non_stereo = gap > 0;
+    let mut types: Vec<u8> = orders
+        .iter()
+        .map(|&order| match order {
+            1..=3 => order as u8,
+            _ => 1, // Make Unknown or Alternating bonds single (AllocateAndInitBnStruct)
+        })
+        .collect();
+    let mut marks: Vec<u8> = vec![0u8; structure.bonds.len()];
+    for atom in 0..n {
+        for &(neigh, _) in &context.neighbors[atom] {
+            // The reference tests each bond once, from its smaller
+            // atom (`neigh < iat: continue`).
+            if neigh <= atom || !context.allowed_edge(atom, neigh) {
+                continue;
+            }
+            let Some(&bond) = context.bond_index.get(&(atom, neigh)) else {
+                continue;
+            };
+            let Some(iedge) = net.edge_between(atom, neigh) else {
+                continue;
+            };
+            let cur = net.cur_flow(iedge);
+            let cap = net.edge_cap(iedge);
+            let mut min = net.min_flow_2_check(iedge);
+            if min == cap {
+                if cap != 0 && b_test_non_stereo {
+                    min = (cap - gap).max(0);
+                } else {
+                    continue;
+                }
+            }
+            for test in min..=cap {
+                if test == cur {
+                    continue;
+                }
+                if !need_to_test_the_flow(types[bond], marks[bond], test, b_test_non_stereo) {
+                    continue;
+                }
+                let probe = super::bns::probe_altern_flow(&net, iedge, test);
+                if std::env::var_os("INCHI_TRACE_BNS").is_some() {
+                    eprintln!(
+                        "MABT {atom}-{neigh} cur={cur} test={test} min={min} cap={cap} gap={gap} -> feasible={} moved={}",
+                        probe.feasible, probe.moved.len()
+                    );
+                }
+                if probe.feasible {
+                    // The pinned bond types at the test flow; the
+                    // scratch network leaves the pinned edge itself at
+                    // zero flow, so the moved list's phantom delta on
+                    // it is overridden here.
+                    set_atom_bond_type(&mut types, &mut marks, bond, cur, test, b_test_non_stereo);
+                    for &(a, b, delta) in &probe.moved {
+                        if (a, b) == (atom.min(neigh), atom.max(neigh)) {
+                            continue;
+                        }
+                        if let Some(&moved) = context.bond_index.get(&(a, b)) {
+                            let Some(moved_edge) = net.edge_between(a, b) else {
+                                continue;
+                            };
+                            let flow0 = net.cur_flow(moved_edge);
+                            set_atom_bond_type(
+                                &mut types,
+                                &mut marks,
+                                moved,
+                                flow0,
+                                flow0 + delta,
+                                b_test_non_stereo,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    types
+}
+
+/// The bond indices of an atom's neighbors, in adjacency order.
+fn adjacency_of_bonds(structure: &Structure, atom: usize) -> Vec<usize> {
+    structure
+        .bonds
+        .iter()
+        .enumerate()
+        .filter_map(|(bond, &(from, to, _))| (from == atom || to == atom).then_some(bond))
+        .collect()
+}
+
+/// `bNeedToTestTheFlow`: an already-typed bond skips the flows its
+/// accumulated mark has answered; a radical-context pass
+/// (bTestForNonStereoBond) skips a slightly different set.
+fn need_to_test_the_flow(bond_type: u8, bond_mark: u8, test_flow: i32, non_stereo: bool) -> bool {
+    if !(bond_mark != 0 || bond_type == 4 || bond_type == 9) {
+        return true;
+    }
+    let skip = match (non_stereo, test_flow) {
+        (true, 0) => matches!(bond_mark, 0x50 | 0x20 | 0x30),
+        (true, 1) => matches!(bond_mark, 0x50 | 0x20 | 0x40),
+        (true, 2) => matches!(bond_mark, 0x30 | 0x20 | 0x40),
+        (false, 0) => matches!(bond_mark, 0x10 | 0x50 | 0x20 | 0x30),
+        (false, 1) => matches!(bond_mark, 0x10 | 0x50 | 0x20 | 0x40),
+        (false, 2) => matches!(bond_mark, 0x30 | 0x20 | 0x40),
+        _ => false,
+    };
+    !skip
+}
+
+/// `SetAtomBondType`'s alternation branch: retype `bond` per the
+/// (flow1, flow2) the probe realized. A plain single/double/triple
+/// takes the pair's alternation type; a TAUTOM bond keeps its type and
+/// takes the mark; an already-alternating bond upgrades its mark
+/// toward ALT_123 when the new range demands it.
+fn set_atom_bond_type(
+    types: &mut [u8],
+    marks: &mut [u8],
+    bond: usize,
+    flow1: i32,
+    flow2: i32,
+    non_stereo: bool,
+) {
+    if flow1 == flow2 {
+        return;
+    }
+    let (flow1, flow2) = (flow1.min(flow2), flow1.max(flow2));
+    let bond_type = types[bond] & 0x0f;
+    let mut new_type = bond_type;
+    let mut bond_mark = marks[bond] & 0x70;
+    match bond_type {
+        1..=3 => {
+            if flow1 == 0 && flow2 == 1 {
+                if non_stereo {
+                    bond_mark = 0x50;
+                    new_type = 9;
+                } else {
+                    bond_mark = 0x10;
+                    new_type = 4;
+                }
+            } else if flow1 == 0 && flow2 == 2 {
+                bond_mark = 0x30;
+                new_type = 6;
+            } else if flow1 == 1 && flow2 == 2 {
+                bond_mark = 0x40;
+                new_type = 7;
+            } else {
+                return; // BNS_BOND_ERR in the reference; keep the deck
+            }
+        }
+        8 => {
+            if flow1 == 0 && flow2 == 1 {
+                bond_mark = 0x50;
+            } else if flow1 == 1 && flow2 == 2 {
+                bond_mark = 0x40;
+            } else {
+                return;
+            }
+        }
+        _ => {
+            // The mark-upgrade switch; the ALT12 case falls through to
+            // the ALT12NS case unless the non-stereo (0,1) retype hits.
+            match bond_mark {
+                0x10 => {
+                    if non_stereo && flow1 == 0 && flow2 == 1 {
+                        bond_mark = 0x50;
+                        new_type = 9;
+                    } else if flow1 == 2 || flow2 == 2 {
+                        bond_mark = 0x20;
+                        new_type = 5;
+                    }
+                }
+                0x50 => {
+                    if flow1 == 2 || flow2 == 2 {
+                        bond_mark = 0x20;
+                        new_type = 5;
+                    }
+                }
+                0x30 => {
+                    if flow1 == 1 || flow2 == 1 {
+                        bond_mark = 0x20;
+                        new_type = 5;
+                    }
+                }
+                0x40 => {
+                    if flow1 == 0 || flow2 == 0 {
+                        bond_mark = 0x20;
+                        new_type = 5;
+                    }
+                }
+                0x20 => {}
+                0 => {
+                    if flow1 == 0 && flow2 == 1 {
+                        bond_mark = 0x10;
+                    } else if flow1 == 0 && flow2 == 2 {
+                        bond_mark = 0x30;
+                    } else if flow1 == 1 && flow2 == 2 {
+                        bond_mark = 0x40;
+                    } else {
+                        return;
+                    }
+                }
+                _ => return,
+            }
+            // The type switch: the alternating family keeps the
+            // (possibly upgraded) new type; TAUTOM keeps 8. Anything
+            // else never reaches this branch.
+        }
+    }
+    types[bond] = new_type;
+    marks[bond] = bond_mark;
 }
 
 /// The salt-subtype bits (incomdef.h:97): H-donor, (-)-donor,
@@ -4011,6 +4333,15 @@ pub fn mobile_groups_and_salt(
 /// i.e. real t-groups in the emitted identifier).
 pub fn salt_phase_done(structure: &Structure, hydrogens: &[u32]) -> bool {
     mobile_groups_and_salt(structure, hydrogens, &Vec::new()).1
+}
+
+/// The settled charge-group membership (the reference's `at[].c_point`
+/// after MarkChargeGroups) — the stereo mark gate's c-point rejection
+/// reads it.
+pub(crate) fn settled_c_points(structure: &Structure, hydrogens: &[u32]) -> Vec<Option<usize>> {
+    let context = Context::new(structure, hydrogens);
+    let (_, state) = build_links(&context);
+    state.c_point_of
 }
 
 /// The atoms whose hydrogens live in mobile groups (excluded from the

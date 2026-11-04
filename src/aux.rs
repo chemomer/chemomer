@@ -211,7 +211,8 @@ pub fn aux_info(
         // orbits (pCS->nSymmRank never sees the pass), decoded under
         // the new numbering.
         ranks_aux = if options.do_not_add_h {
-            let marks = crate::canonical::stereo_walk::undf_bond_marks(working, &counts);
+            let marks =
+                crate::canonical::stereo_walk::undf_bond_marks(working, &counts, &ranks, &classes);
             if marks.is_empty() {
                 ranks
             } else {

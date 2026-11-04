@@ -1418,6 +1418,7 @@ pub(crate) fn rem_proton_route(
         single_like: &single_like,
         c_point_of: &[None; 0],
         c_charged: &[false; 0],
+        c_point_bond_raise: false,
     });
     crate::canonical::bns::rem_proton_route_moved(&net, holder, acceptor)
 }
