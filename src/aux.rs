@@ -316,15 +316,19 @@ pub fn aux_info(
     // verdict (empty when the absolute pass won or the rows tied).
     out.push_str(&inverted_block);
 
-    // `/I:/E:m` — the isotopic block: fixed isotopic atoms present and
-    // constitutional equivalence spoken — the isotopic numbering adds
-    // nothing (the empty /I:) and the isotopic equivalence equals the
-    // plain classes (the `m` marker, "same as the main layer").
-    let fixed_isotopes = working.atoms.iter().any(|atom| atom.isotope != 0)
-        || working
-            .isotopic_h
-            .iter()
-            .any(|(carrier, _)| working.atoms[*carrier].element == "C");
+    // `/I:/E:m` — the isotopic block: isotopic HYDROGEN on a carbon
+    // carrier present and constitutional equivalence spoken — the
+    // isotopic numbering adds nothing (the empty /I:) and the isotopic
+    // equivalence equals the plain classes (the `m` marker, "same as
+    // the main layer"). Mass-number isotopes (/i1+1 via M ISO) never
+    // speak it: the sup/isotopic-member tranche probe (13C-ethane with
+    // an /E: class) recorded the oracle's aux WITHOUT the /I: block —
+    // the corpus's /I: recordings all carry D-carriers
+    // (breadth2-483 /i1D3, breadth2-1984 /i1D,2D,3D,4).
+    let fixed_isotopes = working
+        .isotopic_h
+        .iter()
+        .any(|(carrier, _)| working.atoms[*carrier].element == "C");
     if fixed_isotopes && out.contains("/E:") {
         out.push_str("/I:/E:m");
     }

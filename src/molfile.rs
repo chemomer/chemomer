@@ -16,7 +16,34 @@ const CONTEXT: &str = "molfile";
 /// its V3000 reader on "V3000" (mol_fmt1.c:630-645). Isotope mass
 /// numbers land on the atoms (the /i layer and the hydrogen fold read
 /// them).
+///
+/// This is the DEFAULT read (the reference's `treat_polymers` off,
+/// mol_fmt1.c:1365-1372): the whole V2000 Sgroup property family
+/// (`M  STY/SST/SLB/SCN/SAL/SBL/SDI/SMT/SBT` — superatom
+/// abbreviations included) is skipped wholesale, the structure reads
+/// as plain atoms + bonds, and the only trace is the reference's
+/// "Ignore polymer data" warning — no polymer data reaches the
+/// structure, so no sgroup line can fail it either.
 pub fn parse(input: &str) -> Result<Structure> {
+    read(input, false)
+}
+
+/// [`parse`] under the `-Polymers` option (the reference's
+/// `treat_polymers` on): the Sgroup property family parses into the
+/// polymer units, and the superatom/abbreviation types (SUP — the
+/// drawn-expanded group whose label rides `M  SMT`; TEMPLATE in
+/// modern writers) fail the read the way the reference's reader does,
+/// with every failing line's raw text accumulated into the message
+/// (mol_fmt1.c MolfileReadSgroupOfPolymer). The V3000 flavor carries
+/// the equivalent as SGROUP blocks — those stay discarded in EVERY
+/// mode (the reference's V3000 reader never converts them into
+/// polymer units; probe-pinned: a V3000 SUP reads plain under
+/// `-Polymers` too).
+pub fn parse_with_polymers(input: &str) -> Result<Structure> {
+    read(input, true)
+}
+
+fn read(input: &str, treat_polymers: bool) -> Result<Structure> {
     let lines: Vec<&str> = input.lines().collect();
     if lines.len() < 5 {
         return err(format!("{CONTEXT}: molfile too short"));
@@ -26,7 +53,7 @@ pub fn parse(input: &str) -> Result<Structure> {
     if counts_version(counts) == Some("V3000") {
         return parse_v3000(&lines[4..]);
     }
-    parse_v2000(&lines, counts)
+    parse_v2000(&lines, counts, treat_polymers)
 }
 
 /// The counts line's CTFile version tag — the whitespace token at
@@ -61,8 +88,10 @@ pub fn parse_sdf(input: &str) -> Vec<String> {
 }
 
 /// Reads the V2000 positional fields: counts line, atom block, bond
-/// block, and the `M  CHG` / `M  ISO` property lines.
-fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
+/// block, and the property-line tail. `treat_polymers` decides the
+/// Sgroup family's fate: skipped wholesale (the default read) or
+/// parsed into the polymer units (the `-Polymers` read).
+fn parse_v2000(lines: &[&str], counts: &str, treat_polymers: bool) -> Result<Structure> {
     let atom_count: usize = counts
         .get(0..3)
         .unwrap_or("")
@@ -194,7 +223,16 @@ fn parse_v2000(lines: &[&str], counts: &str) -> Result<Structure> {
     let property_tail = &lines[4 + atom_count + bond_count..];
     let isotopic_h = apply_alias_lines(property_tail, &mut atoms)?;
     apply_property_lines(property_tail, &mut atoms)?;
-    let polymer = parse_sgroup_lines(property_tail, atom_count, bond_count)?;
+    // The default read never parses the Sgroup family (the reference's
+    // reader `continue`s past every tag with `treat_polymers` off,
+    // mol_fmt1.c:1365-1372, and warns "Ignore polymer data") — the
+    // polymer units simply do not exist for this read; the -Polymers
+    // re-read parses them.
+    let polymer = if treat_polymers {
+        parse_sgroup_lines(property_tail, atom_count, bond_count)?
+    } else {
+        None
+    };
 
     Ok(Structure {
         atoms,
@@ -613,16 +651,32 @@ fn apply_property_lines(lines: &[&str], atoms: &mut [AtomRecord]) -> Result<()> 
     Ok(())
 }
 
-/// The polymer Sgroup property lines (mol_fmt1.c 1451–1900): `M  STY`
+/// The Sgroup property lines under the `-Polymers` read
+/// (mol_fmt1.c MolfileReadSgroupOfPolymer, 1451–1900): `M  STY`
 /// declares units (SRU/MON/COP/MOD/CRO/MER), `M  SST` subtypes
-/// (ALT/RAN/BLK), `M  SCN` connection patterns (HT/HH/EU), `M  SAL`
+/// (ALT/RAN/BLK), `M  SCN` connection patterns (HT/HH/EU), `M  SLB`
+/// unique-id labels (read; the /Z: echo never prints them), `M  SAL`
 /// atom lists, `M  SBL` crossing-bond lists, `M  SMT` subscripts,
 /// `M  SDI` bracket coordinates (first pair of lines per unit). The
-/// lines may arrive in any order — SST/SCN/SAL/SBL reference units by
-/// Sgroup number, and a reference to an undeclared unit is an error
-/// there exactly like the reference's
-/// MolFmtSgroups_GetIndexBySgroupId miss. A file with no Sgroup lines
-/// reads `Ok(None)`.
+/// lines may arrive in any order — SST/SCN/SLB/SAL/SBL/SDI/SMT
+/// reference units by Sgroup number, and a reference to an undeclared
+/// unit fails the line exactly like the reference's
+/// MolFmtSgroups_GetIndexBySgroupId miss.
+///
+/// The superatom/abbreviation types (SUP — TEMPLATE in modern
+/// writers — and every other CTFile type word: GRA, MUL, DAT, COM,
+/// MIX, FOR, ANY, GEN) are NOT polymer types: the reference's STY
+/// reader maps only the six and fails the line otherwise
+/// (mol_fmt1.c:1498-1503). A failure frees the WHOLE sgroups table
+/// (`MolFmtSgroups_Free` memsets it zero, mol_fmt4.c:751-765) — and
+/// the freed table never comes back (`MolFmtSgroups_Append`'s ReAlloc
+/// refuses a zeroed struct), so every later Sgroup line fails too and
+/// its raw text joins the accumulated message; the read rejects at
+/// the end (the executable's "no InChI" error over `Could not
+/// interpret Molfile polymer data:` + the failing lines, joined "; ",
+/// duplicate line texts dropped — ichierr.c AddErrorMessage).
+///
+/// A file with no Sgroup lines reads `Ok(None)`.
 fn parse_sgroup_lines(
     lines: &[&str],
     atom_count: usize,
@@ -632,6 +686,10 @@ fn parse_sgroup_lines(
     // SDI lines arrive pairwise per unit: the first fills xbr1, the
     // second xbr2 (mol_fmt1.c SDI handler's brkt1-not-yet-here test).
     let mut sdi_seen: Vec<usize> = Vec::new();
+    // The failure state: the table died (this and every later Sgroup
+    // line fails) and the failing lines so far.
+    let mut table_dead = false;
+    let mut failed_lines: Vec<String> = Vec::new();
     let find_unit = |units: &[crate::graph::PolymerUnit], id: usize| {
         units.iter().position(|unit| unit.id == id)
     };
@@ -641,19 +699,51 @@ fn parse_sgroup_lines(
         }
         let kind = &line[3..6.min(line.len())];
         let fields: Vec<&str> = line[6..].split_whitespace().collect();
+        // A failed line: its raw text joins the message and the table
+        // dies — units already collected from EARLIER lines included
+        // (the reference frees them all at err_exit).
+        macro_rules! fail_line {
+            () => {{
+                table_dead = true;
+                units.clear();
+                sdi_seen.clear();
+                failed_lines.push((*line).to_string());
+            }};
+        }
+        // The dead-table walk. The reference still evaluates each
+        // tag's own shape on the way: STY/SST/SCN/SLB read their count
+        // in the dispatch chain — a line whose count cannot read is
+        // silently ignored (the chain condition fails and nothing else
+        // matches); SAL/SBL/SDI/SMT run handler bodies that fail on
+        // ANY dead-table reference, unreadable fields included. Our
+        // whitespace-split parse draws the same line for every
+        // well-formed spelling, which is what the corpus carries.
         match kind {
             "STY" => {
                 // `M  STY nn8 (sg, type)...` — the count field then
                 // (number, 3-letter-type) pairs, at most 8 per line.
-                let count: usize = fields
-                    .first()
-                    .and_then(|f| f.parse().ok())
-                    .ok_or_else(|| bad(line))?;
-                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
-                    return err(format!("{CONTEXT}: malformed STY line: {line:?}"));
+                if table_dead {
+                    if let Some(count) = dead_count(&fields) {
+                        if fields.len() > 2 * count {
+                            fail_line!();
+                        }
+                    }
+                    continue;
                 }
+                // The count rides the dispatch chain's width-3 field:
+                // a line whose count cannot read (or whose pairs are
+                // missing) never enters the branch — silently ignored
+                // (mol_fmt1.c:1460-1463), the shape behind the oracle's
+                // treatment of the malformed spellings.
+                let Some(count) = fields.first().and_then(|f| f.parse::<usize>().ok()) else {
+                    continue;
+                };
+                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
+                    continue;
+                }
+                let mut rejected = false;
                 for pair in fields[1..1 + 2 * count].chunks(2) {
-                    let id: usize = pair[0].parse().map_err(|_| bad(line))?;
+                    let id = id_of(pair[0], line)?;
                     let unit_type = match pair[1] {
                         "SRU" => 1u8,
                         "MON" => 2,
@@ -661,8 +751,13 @@ fn parse_sgroup_lines(
                         "MOD" => 4,
                         "CRO" => 5,
                         "MER" => 6,
+                        // SUP and every other abbreviation type word:
+                        // the failure that kills the whole table — the
+                        // pairs the line declared BEFORE the bad one
+                        // die with it.
                         _ => {
-                            return err(format!("{CONTEXT}: unsupported Sgroup type {pair:?}"));
+                            rejected = true;
+                            break;
                         }
                     };
                     match find_unit(&units, id) {
@@ -674,123 +769,254 @@ fn parse_sgroup_lines(
                         }),
                     }
                 }
+                if rejected {
+                    fail_line!();
+                }
             }
             "SST" => {
-                let count: usize = fields
-                    .first()
-                    .and_then(|f| f.parse().ok())
-                    .ok_or_else(|| bad(line))?;
-                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
-                    return err(format!("{CONTEXT}: malformed SST line: {line:?}"));
+                if table_dead {
+                    if let Some(count) = dead_count(&fields) {
+                        if fields.len() > 2 * count {
+                            fail_line!();
+                        }
+                    }
+                    continue;
                 }
+                let Some(count) = fields.first().and_then(|f| f.parse::<usize>().ok()) else {
+                    continue;
+                };
+                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
+                    continue;
+                }
+                let mut rejected = false;
                 for pair in fields[1..1 + 2 * count].chunks(2) {
-                    let id: usize = pair[0].parse().map_err(|_| bad(line))?;
                     let subtype = match pair[1] {
                         "ALT" => 1u8,
                         "RAN" => 2,
                         "BLK" | "BLO" => 3,
                         _ => {
-                            return err(format!("{CONTEXT}: unsupported Sgroup subtype {pair:?}"));
+                            rejected = true;
+                            break;
                         }
                     };
-                    let index = find_unit(&units, id).ok_or_else(|| {
-                        Error::new(format!("{CONTEXT}: SST names undeclared unit {id}"))
-                    })?;
-                    units[index].subtype = subtype;
+                    match find_unit(&units, id_of(pair[0], line)?) {
+                        Some(index) => units[index].subtype = subtype,
+                        None => {
+                            rejected = true;
+                            break;
+                        }
+                    }
+                }
+                if rejected {
+                    fail_line!();
                 }
             }
             "SCN" => {
-                let count: usize = fields
-                    .first()
-                    .and_then(|f| f.parse().ok())
-                    .ok_or_else(|| bad(line))?;
-                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
-                    return err(format!("{CONTEXT}: malformed SCN line: {line:?}"));
+                if table_dead {
+                    if let Some(count) = dead_count(&fields) {
+                        if fields.len() > 2 * count {
+                            fail_line!();
+                        }
+                    }
+                    continue;
                 }
+                let Some(count) = fields.first().and_then(|f| f.parse::<usize>().ok()) else {
+                    continue;
+                };
+                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
+                    continue;
+                }
+                let mut rejected = false;
                 for pair in fields[1..1 + 2 * count].chunks(2) {
-                    let id: usize = pair[0].parse().map_err(|_| bad(line))?;
                     let conn = match pair[1] {
                         "HT" => 1u8,
                         "HH" => 2,
                         "EU" => 3,
                         _ => {
-                            return err(format!(
-                                "{CONTEXT}: unsupported Sgroup connection {pair:?}"
-                            ));
+                            rejected = true;
+                            break;
                         }
                     };
-                    let index = find_unit(&units, id).ok_or_else(|| {
-                        Error::new(format!("{CONTEXT}: SCN names undeclared unit {id}"))
-                    })?;
-                    units[index].conn = conn;
+                    match find_unit(&units, id_of(pair[0], line)?) {
+                        Some(index) => units[index].conn = conn,
+                        None => {
+                            rejected = true;
+                            break;
+                        }
+                    }
+                }
+                if rejected {
+                    fail_line!();
+                }
+            }
+            "SLB" => {
+                // `M  SLB nn8 (sg, label)...` — the label lands in the
+                // reference's unit struct but the /Z: echo never prints
+                // it; only the dead/undeclared reference matters here.
+                if table_dead {
+                    if let Some(count) = dead_count(&fields) {
+                        if fields.len() > 2 * count {
+                            fail_line!();
+                        }
+                    }
+                    continue;
+                }
+                let Some(count) = fields.first().and_then(|f| f.parse::<usize>().ok()) else {
+                    continue;
+                };
+                if count == 0 || count > 8 || fields.len() < 1 + 2 * count {
+                    continue;
+                }
+                let mut rejected = false;
+                for pair in fields[1..1 + 2 * count].chunks(2) {
+                    let declared = find_unit(&units, id_of(pair[0], line)?).is_some();
+                    let label = pair.get(1).and_then(|value| value.parse::<i32>().ok());
+                    if !declared || label.is_none() {
+                        rejected = true;
+                        break;
+                    }
+                }
+                if rejected {
+                    fail_line!();
                 }
             }
             "SAL" => {
-                if fields.len() < 2 {
-                    return err(format!("{CONTEXT}: malformed SAL line: {line:?}"));
+                // The handler-body shape: an unreadable id/count/pair
+                // fails the line like any dead reference (the reference's
+                // `else { fail = 1; }` paths, mol_fmt1.c:1705-1713).
+                if table_dead {
+                    fail_line!();
+                    continue;
                 }
-                let id: usize = fields[0].parse().map_err(|_| bad(line))?;
-                let count: usize = fields[1].parse().map_err(|_| bad(line))?;
+                let Some(id) = fields.first().and_then(|f| f.parse::<usize>().ok()) else {
+                    fail_line!();
+                    continue;
+                };
+                let Some(count) = fields.get(1).and_then(|f| f.parse::<usize>().ok()) else {
+                    fail_line!();
+                    continue;
+                };
                 if fields.len() < 2 + count {
-                    return err(format!("{CONTEXT}: malformed SAL line: {line:?}"));
+                    fail_line!();
+                    continue;
                 }
-                let index = find_unit(&units, id).ok_or_else(|| {
-                    Error::new(format!("{CONTEXT}: SAL names undeclared unit {id}"))
-                })?;
+                let index = match find_unit(&units, id) {
+                    Some(index) => index,
+                    None => {
+                        fail_line!();
+                        continue;
+                    }
+                };
+                let mut rejected = false;
                 for field in &fields[2..2 + count] {
-                    let atom: usize = field.parse().map_err(|_| bad(line))?;
+                    let Ok(atom) = field.parse::<usize>() else {
+                        rejected = true;
+                        break;
+                    };
                     if atom == 0 || atom > atom_count {
-                        return err(format!("{CONTEXT}: SAL atom {atom} out of range: {line:?}"));
+                        rejected = true;
+                        break;
                     }
                     units[index].alist.push(atom - 1);
                 }
+                if rejected {
+                    fail_line!();
+                }
             }
             "SBL" => {
-                if fields.len() < 2 {
-                    return err(format!("{CONTEXT}: malformed SBL line: {line:?}"));
+                if table_dead {
+                    fail_line!();
+                    continue;
                 }
-                let id: usize = fields[0].parse().map_err(|_| bad(line))?;
-                let count: usize = fields[1].parse().map_err(|_| bad(line))?;
+                let Some(id) = fields.first().and_then(|f| f.parse::<usize>().ok()) else {
+                    fail_line!();
+                    continue;
+                };
+                let Some(count) = fields.get(1).and_then(|f| f.parse::<usize>().ok()) else {
+                    fail_line!();
+                    continue;
+                };
                 if fields.len() < 2 + count {
-                    return err(format!("{CONTEXT}: malformed SBL line: {line:?}"));
+                    fail_line!();
+                    continue;
                 }
-                let index = find_unit(&units, id).ok_or_else(|| {
-                    Error::new(format!("{CONTEXT}: SBL names undeclared unit {id}"))
-                })?;
+                let index = match find_unit(&units, id) {
+                    Some(index) => index,
+                    None => {
+                        fail_line!();
+                        continue;
+                    }
+                };
+                let mut rejected = false;
                 for field in &fields[2..2 + count] {
-                    let bond: usize = field.parse().map_err(|_| bad(line))?;
+                    let Ok(bond) = field.parse::<usize>() else {
+                        rejected = true;
+                        break;
+                    };
                     if bond == 0 || bond > bond_count {
-                        return err(format!("{CONTEXT}: SBL bond {bond} out of range: {line:?}"));
+                        rejected = true;
+                        break;
                     }
                     units[index].blist.push(bond - 1);
                 }
+                if rejected {
+                    fail_line!();
+                }
             }
             "SMT" => {
-                if fields.len() < 2 {
-                    return err(format!("{CONTEXT}: malformed SMT line: {line:?}"));
+                if table_dead {
+                    fail_line!();
+                    continue;
                 }
-                let id: usize = fields[0].parse().map_err(|_| bad(line))?;
+                let Some(id) = fields.first().and_then(|f| f.parse::<usize>().ok()) else {
+                    fail_line!();
+                    continue;
+                };
+                if fields.len() < 2 {
+                    fail_line!();
+                    continue;
+                }
                 let label = fields[1..].join(" ");
-                let index = find_unit(&units, id).ok_or_else(|| {
-                    Error::new(format!("{CONTEXT}: SMT names undeclared unit {id}"))
-                })?;
-                units[index].smt = label;
+                match find_unit(&units, id) {
+                    Some(index) => units[index].smt = label,
+                    None => fail_line!(),
+                }
             }
             "SDI" => {
-                if fields.len() < 5 {
-                    return err(format!("{CONTEXT}: malformed SDI line: {line:?}"));
+                if table_dead {
+                    fail_line!();
+                    continue;
                 }
-                let id: usize = fields[0].parse().map_err(|_| bad(line))?;
-                if fields[1] != "4" {
-                    return err(format!("{CONTEXT}: SDI carries non-4 coords: {line:?}"));
+                let Some(id) = fields.first().and_then(|f| f.parse::<usize>().ok()) else {
+                    fail_line!();
+                    continue;
+                };
+                if fields.len() < 6 || fields.get(1) != Some(&"4") {
+                    fail_line!();
+                    continue;
                 }
                 let mut coords = [0.0f64; 4];
-                for (slot, field) in coords.iter_mut().zip(&fields[2..6]) {
-                    *slot = field.parse().map_err(|_| bad(line))?;
+                let mut rejected = false;
+                for (slot, field) in coords.iter_mut().zip(fields[2..6].iter()) {
+                    match field.parse::<f64>() {
+                        Ok(value) => *slot = value,
+                        Err(_) => {
+                            rejected = true;
+                            break;
+                        }
+                    }
                 }
-                let index = find_unit(&units, id).ok_or_else(|| {
-                    Error::new(format!("{CONTEXT}: SDI names undeclared unit {id}"))
-                })?;
+                if rejected {
+                    fail_line!();
+                    continue;
+                }
+                let index = match find_unit(&units, id) {
+                    Some(index) => index,
+                    None => {
+                        fail_line!();
+                        continue;
+                    }
+                };
                 let seen = sdi_seen.iter().filter(|&&s| s == id).count();
                 if seen == 0 {
                     units[index].xbr1 = Some(coords);
@@ -802,10 +1028,66 @@ fn parse_sgroup_lines(
             _ => {}
         }
     }
+    if !failed_lines.is_empty() {
+        return err(cascade_message(&failed_lines));
+    }
     // Units with no STY line never materialize (SAL/SBL-only files are
     // rejected by the reference's GetIndexBySgroupId miss, surfaced
     // above); a declaration pass with zero units means no polymer.
     Ok((!units.is_empty()).then_some(crate::graph::Polymer { units }))
+}
+
+/// The STY/SST/SCN/SLB count read over a dead table: the dispatch
+/// chain's width-3 window; `None` reads as the silent-ignore shape.
+fn dead_count(fields: &[&str]) -> Option<usize> {
+    fields
+        .first()
+        .and_then(|field| field.parse::<usize>().ok())
+        .filter(|count| (1..=8).contains(count))
+}
+
+fn id_of(field: &str, line: &str) -> Result<usize> {
+    field.parse().map_err(|_| bad(line))
+}
+
+/// The reference's accumulated read-error message (ichierr.c
+/// AddErrorMessage): the prefix once, then every failing line — the
+/// line after the ':'-terminated prefix joins with a single space,
+/// the rest with "; ", and a line already present (the
+/// already_have_this_message boundary check) is dropped.
+fn cascade_message(lines: &[String]) -> String {
+    let mut message = String::from("Could not interpret Molfile polymer data:");
+    for line in lines {
+        if already_have(&message, line) {
+            continue;
+        }
+        if message.ends_with(':') {
+            message.push(' ');
+        } else {
+            message.push_str("; ");
+        }
+        message.push_str(line);
+    }
+    message
+}
+
+/// ichierr.c already_have_this_message: the message contains `line`
+/// as a whole separator-bounded member.
+fn already_have(message: &str, line: &str) -> bool {
+    let mut search = 0;
+    while let Some(found) = message[search..].find(line) {
+        let start = search + found;
+        let end = start + line.len();
+        let bounded_before = start == 0
+            || (start >= 2
+                && (&message[start - 2..start] == "; " || &message[start - 2..start] == ": "));
+        let bounded_after = end == message.len() || message[end..].starts_with("; ");
+        if bounded_before && bounded_after {
+            return true;
+        }
+        search = start + 1;
+    }
+    false
 }
 
 fn line_or<'a>(lines: &'a [&'a str], index: usize, block: &str) -> Result<&'a str> {
@@ -830,6 +1112,82 @@ mod tests {
     use super::*;
 
     const WATER: &str = "water\n  AsciiChem\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n";
+
+    /// Propane drawn with its CH3 end marked as a superatom
+    /// abbreviation (STY SUP + SAL + SMT) — the shape the RInChI
+    /// distribution's R005a_with_agents.rxn agents carry.
+    const PROPANE_SUP: &str = "propane ch3 sup\n  chemomer\n\n  3  2  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n   24.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n   36.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0\n  2  3  1  0\nM  STY  1   1 SUP\nM  SAL   1  2   1   2\nM  SMT   1 CH3\nM  END\n";
+
+    /// The superatom is metadata, not a construct: the default read
+    /// (polymers off) skips the whole Sgroup family — the structure
+    /// reads as plain atoms + bonds, the reference's "Ignore polymer
+    /// data" behavior (mol_fmt1.c:1365-1372; oracle probe over the
+    /// recorded sup/propane-abbrev tranche fixture).
+    #[test]
+    fn the_default_read_skips_superatom_lines() {
+        let structure = parse(PROPANE_SUP).expect("parses");
+        assert_eq!(structure.atoms.len(), 3);
+        assert_eq!(structure.bonds, vec![(0, 1, 1), (1, 2, 1)]);
+        assert!(structure.polymer.is_none());
+    }
+
+    /// The -Polymers read fails the superatom the way the reference's
+    /// reader does: the STY line fails (mol_fmt1.c:1498), the table
+    /// frees, and the SAL/SMT lines referencing the freed unit fail
+    /// after it — the accumulated "Could not interpret Molfile polymer
+    /// data:" message carries every failing line verbatim
+    /// (ichierr.c AddErrorMessage; oracle-recorded message).
+    #[test]
+    fn the_polymers_read_rejects_superatoms_with_the_accumulated_lines() {
+        let error = parse_with_polymers(PROPANE_SUP).expect_err("rejects");
+        assert_eq!(
+            error.message(),
+            "Could not interpret Molfile polymer data: M  STY  1   1 SUP; \
+             M  SAL   1  2   1   2; M  SMT   1 CH3"
+        );
+    }
+
+    /// The freed table never comes back (MolFmtSgroups_Free memsets it
+    /// zero and Append's ReAlloc refuses the zeroed struct): a later
+    /// VALID SRU declaration fails too, and the read still rejects —
+    /// the sup/sup-before-sru tranche fixture's recording.
+    #[test]
+    fn a_valid_polymer_after_a_superatom_still_rejects() {
+        let molfile = "sup then sru\n  chemomer\n\n  4  3  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n   24.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0\n   36.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n   48.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0\n  2  3  1  0\n  3  4  1  0\nM  STY  1   1 SUP\nM  SAL   1  2   1   2\nM  SMT   1 MeO\nM  STY  1   2 SRU\nM  SAL   2  2   3   4\nM  SBL   2  1   3\nM  SCN   2 HT\nM  END\n";
+        let error = parse_with_polymers(molfile).expect_err("rejects");
+        assert_eq!(
+            error.message(),
+            "Could not interpret Molfile polymer data: M  STY  1   1 SUP; \
+             M  SAL   1  2   1   2; M  SMT   1 MeO; M  STY  1   2 SRU; \
+             M  SAL   2  2   3   4; M  SBL   2  1   3"
+        );
+    }
+
+    /// The polymer family itself still reads under -Polymers — the
+    /// superatom rejection must not have disturbed it.
+    #[test]
+    fn the_polymers_read_still_parses_polymer_units() {
+        let molfile = "sru chain\n  chemomer\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    1.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0  0  0  0\nM  STY  1   1 SRU\nM  SAL   1  2   1   2\nM  END\n";
+        let structure = parse_with_polymers(molfile).expect("parses");
+        let polymer = structure.polymer.expect("units");
+        assert_eq!(polymer.units.len(), 1);
+        assert_eq!(polymer.units[0].unit_type, 1);
+        assert_eq!(polymer.units[0].alist, vec![0, 1]);
+    }
+
+    /// An undeclared SLB reference fails under -Polymers (the
+    /// sup/slb-dead-reference tranche fixture) and stays ignored under
+    /// the default read.
+    #[test]
+    fn an_undeclared_slb_reference_fails_under_polymers() {
+        let molfile = "sru with slb\n  chemomer\n\n  3  2  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n   24.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n   36.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0\n  2  3  1  0\nM  STY  1   1 SRU\nM  SAL   1  2   1   2\nM  SBL   1  1   1\nM  SLB  1   9   7\nM  END\n";
+        assert!(parse(molfile).is_ok());
+        let error = parse_with_polymers(molfile).expect_err("rejects");
+        assert_eq!(
+            error.message(),
+            "Could not interpret Molfile polymer data: M  SLB  1   9   7"
+        );
+    }
 
     #[test]
     fn reads_elements_hcounts_and_charges() {
