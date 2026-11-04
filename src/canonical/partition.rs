@@ -128,6 +128,63 @@ impl Partition {
         self.refine(adjacency);
     }
 
+    /// The raw tie-break pin of the reference's mapping machinery
+    /// (`map_an_atom2` / `BreakAllTies`): assign `atom` the given rank
+    /// value, re-sort the atom order over the (possibly stale) values,
+    /// and run the full `DifferentiateRanks2` — atoms re-ranked from
+    /// their (rank, sorted-neighbor-ranks) signature groups, group
+    /// ranks the group's top position + 1, repeated until stable.
+    /// Unlike [`Partition::refine`] this reassigns EVERY rank from the
+    /// sorted order, so a pinned value only steers the sort.
+    pub(crate) fn pin_and_refine(&mut self, atom: usize, rank: u32, adjacency: &[Vec<usize>]) {
+        let n = self.rank.len();
+        self.rank[atom] = rank;
+        self.at_number.sort_by_key(|&a| (self.rank[a], a));
+        loop {
+            // The neighbor signatures: each atom's neighbor ranks,
+            // ascending (SortNeighLists2's rank-ordered neighbor
+            // lists).
+            let neighbors: Vec<Vec<u32>> = adjacency
+                .iter()
+                .map(|ns| {
+                    let mut ranks: Vec<u32> = ns.iter().map(|&b| self.rank[b]).collect();
+                    ranks.sort_unstable();
+                    ranks
+                })
+                .collect();
+            // SetNewRanksFromNeighLists: atoms sorted by (rank,
+            // signature, atom) — a total order — and each signature
+            // group assigned its top position + 1.
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| {
+                (self.rank[a], &neighbors[a])
+                    .cmp(&(self.rank[b], &neighbors[b]))
+                    .then(a.cmp(&b))
+            });
+            let mut new_rank = vec![0u32; n];
+            let mut current = n as u32;
+            if n > 0 {
+                new_rank[order[n - 1]] = current;
+            }
+            for position in (1..n).rev() {
+                if (
+                    self.rank[order[position - 1]],
+                    &neighbors[order[position - 1]],
+                ) != (self.rank[order[position]], &neighbors[order[position]])
+                {
+                    current = position as u32;
+                }
+                new_rank[order[position - 1]] = current;
+            }
+            let stable = new_rank == self.rank;
+            self.rank = new_rank;
+            self.at_number = order;
+            if stable {
+                return;
+            }
+        }
+    }
+
     pub fn is_discrete(&self) -> bool {
         self.first_nonsingleton_cell().is_none()
     }

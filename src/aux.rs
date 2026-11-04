@@ -201,7 +201,28 @@ pub fn aux_info(
             &counts,
             &groups_rows,
         );
-        ranks_aux = ranks;
+        // The stereo pass's numbering (the reference's nCanonOrdStereo):
+        // the pass runs on every structure — center-free included — and
+        // the aux reads its order in the no-stereo branch too
+        // (ichimak2.c). Under DoNotAddH the zero coordinates leave the
+        // eligible double bonds at AB_PARITY_UNDF, and the pass's
+        // mapping walk reorders within the base winner's equivalence
+        // classes; the equivalence classes themselves stay the base
+        // orbits (pCS->nSymmRank never sees the pass), decoded under
+        // the new numbering.
+        ranks_aux = if options.do_not_add_h {
+            let marks = crate::canonical::stereo_walk::undf_bond_marks(working, &counts);
+            if marks.is_empty() {
+                ranks
+            } else {
+                crate::canonical::stereo_walk::stereo_pass_ranks(
+                    &adjacency, &ranks, &classes, &marks,
+                )
+                .unwrap_or(ranks)
+            }
+        } else {
+            ranks
+        };
         symmetry = classes;
     }
 
