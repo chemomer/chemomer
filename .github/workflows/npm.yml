@@ -1,0 +1,92 @@
+# The napi binding (Node) — build, test, and the gated publish path.
+#
+# Dispatch-only: nothing runs on push or PR. A bare dispatch builds
+# the binding and runs the smoke test on the three desktop platforms.
+# Publishing is doubly gated — an explicit `publish` dispatch input
+# AND the npm trusted-publisher registration (which does NOT exist
+# yet: register package "chemomer" on npmjs.com with repository
+# chemomer/chemomer, workflow npm.yml, no environment). Until that
+# registration exists the publish step fails at the registry with no
+# upload, exactly like the release.yml credentials gate.
+
+name: npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm after the build+test matrix passes"
+        required: false
+        default: false
+        type: boolean
+      version:
+        description: "Version to publish (must match package.json; required when publish=true)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.settings.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run build:debug
+      - run: node scripts/smoke-napi.mjs
+      # The release build proves the packaging configuration, not just
+      # the dev build.
+      - run: npm run build
+
+  publish:
+    # NOTE: this scaffold publishes the dispatcher's platform binary
+    # only. The per-platform package split (napi create-npm-dirs /
+    # artifacts / universalize with the @chemomer/<platform> optional
+    # dependencies) is the follow-up once the trusted publisher is
+    # registered — the gate below keeps it unreachable until then.
+    if: inputs.publish
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm trusted publishing (OIDC): the publish credential is the
+      # job's OIDC token — no stored secret.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify version matches input
+        run: |
+          actual=$(node -p "require('./package.json').version")
+          if [ "$actual" != "${{ inputs.version }}" ]; then
+            echo "Version mismatch: input=${{ inputs.version }}, package.json=$actual"
+            exit 1
+          fi
+          echo "Publishing $actual"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing (OIDC as the publish credential) needs
+      # npm >= 11.5; Node 22 bundles npm 10, where --provenance signs
+      # via OIDC but the PUT goes out anonymously (registry 404).
+      - run: npm install -g npm@latest
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build
+      - name: Publish (trusted publishing)
+        run: npm publish --provenance --access public
