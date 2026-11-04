@@ -789,6 +789,10 @@ fn map_bonds(
     // LastMappedTo1); `sp1` is that slot pointer (nStackPtr[1]).
     let mut last_mapped_to1: Option<usize> = None;
     let mut sp1 = base;
+    // The last candidate's outer same-parity verdict: when the at_to2
+    // loop ends on a pin-free candidate the at_to1 loop stops too (the
+    // reference's post-j2 `if (bAllParitiesIdentical) break`).
+    let mut last_same1 = false;
     let mut pos = at_rank1 as usize;
     while pos > 0 {
         pos -= 1;
@@ -816,6 +820,7 @@ fn map_bonds(
                 bond_neighbors,
                 adjacency,
             );
+            last_same1 = all_same;
             let mut istk = base;
             let mut same2 = false;
             if !all_same {
@@ -911,6 +916,9 @@ fn map_bonds(
             if all_same || same2 {
                 break; // j2 cycle: at_to2 needs no repeat
             }
+        }
+        if last_same1 {
+            break; // at_to1: the same-parity verdict stops the scan
         }
     }
     // The level failed: restore the stored entry (prevBond).
