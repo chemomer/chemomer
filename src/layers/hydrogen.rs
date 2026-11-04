@@ -68,7 +68,15 @@ pub fn taut_aware_ranks(structure: &Structure, dna: bool) -> Vec<u32> {
     let (adjacency, invariants) = crate::canonical::graph_of(structure);
     let mask = crate::canonical::tautomer::endpoint_mask(structure, &counts);
     let notaut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
-    crate::canonical::taut_ranks_and_symmetry(&adjacency, &invariants, &notaut, &groups).0
+    crate::canonical::taut_layer_ranks(
+        structure,
+        &counts,
+        &adjacency,
+        &invariants,
+        &notaut,
+        &groups,
+    )
+    .0
 }
 
 impl LayerEmitter for HydrogenLayer {

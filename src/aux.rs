@@ -176,7 +176,11 @@ pub fn aux_info(
         // t-group nodes join the canonicalization over the base pass's
         // equitable seed, so the numbering and the equivalence classes
         // see the group membership (an acid pair ranks ahead of a
-        // non-endpoint twin, and the pair alone is the class).
+        // non-endpoint twin, and the pair alone is the class). Without
+        // stereo-bond marks the taut layer runs no stereo pass
+        // (`bCanonStereo` false over an empty stereo CT) and reads the
+        // TAUT walk's own order; with marks the numbering goes through
+        // the pass's FixCanonEquivalenceInfo hand-off (nCanonOrdStereo).
         let mask = crate::canonical::tautomer::endpoint_mask(working, &counts);
         let notaut = crate::canonical::tautomer::without_mobile_h(&counts, &mask);
         let groups_charged =
@@ -184,7 +188,9 @@ pub fn aux_info(
         let (ranks, classes) = if groups_charged.is_empty() || !options.do_not_add_h {
             crate::canonical::canonical_ranks_and_symmetry(&adjacency, &invariants, &notaut, &[])
         } else {
-            crate::canonical::taut_ranks_and_symmetry(
+            crate::canonical::taut_layer_ranks(
+                working,
+                &counts,
                 &adjacency,
                 &invariants,
                 &notaut,

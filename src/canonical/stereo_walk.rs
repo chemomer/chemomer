@@ -597,19 +597,27 @@ pub(crate) fn stereo_pass_ranks(
     // The seeds: both stacks carry the class partition (the reference's
     // FixCanonEquivalenceInfo rebuild of nRank/nAtomNumber).
     let seed: Vec<(u32, u32)> = (0..n).map(|atom| (symmetry[atom], 0)).collect();
-    let mut state = Walk {
+    let base = Walk {
         from: Partition::initial_pair(&seed),
         to: Partition::initial_pair(&seed),
-        used: bond_neighbors.iter().map(Vec::len).collect(),
     };
+    // The stack of mapping states: slot 0 is the seed, each accepted
+    // pin pushes a refined copy of both sides (`map_an_atom2`'s
+    // pRankStack push, `bAddStack`).
+    let mut stacks: Vec<Walk> = vec![base];
+    let mut used: Vec<usize> = bond_neighbors.iter().map(Vec::len).collect();
     let mut numbering = None;
+    let mut better = false;
     if map_bonds(
         adjacency,
         base_ranks,
-        &ct,
+        &mut ct,
         &bond_neighbors,
-        &mut state,
+        &mut stacks,
+        &mut used,
         0,
+        0,
+        &mut better,
         &mut numbering,
     ) {
         numbering
@@ -635,36 +643,50 @@ fn adjacency_of(structure: &Structure) -> Vec<Vec<usize>> {
     adjacency
 }
 
-/// The walk state: the two mapping sides and the to-side bond
-/// counters (`bAtomUsedForStereo` — the marks' per-atom counts).
+/// One stack slot: the two mapping sides (`pRankStack1`/`pRankStack2`
+/// rank+atomNumber pairs). Slots above the seed are pushed copies
+/// carrying accepted pins; the walk reads the slot its level's stack
+/// pointer names.
+#[derive(Clone)]
 struct Walk {
     from: Partition,
     to: Partition,
-    used: Vec<usize>,
-}
-
-impl Clone for Walk {
-    fn clone(&self) -> Walk {
-        Walk {
-            from: self.from.clone(),
-            to: self.to.clone(),
-            used: self.used.clone(),
-        }
-    }
 }
 
 /// The bond-level mapping (map_stereo_bonds4's body): enumerate the
-/// next CT entry, walk the to-side candidates, pin-and-refine both
-/// sides per mapped endpoint, recurse. `numbering` receives the FIRST
-/// complete mapping's result (`bFirstCT`).
+/// next CT entry, walk the to-side candidates, run the acceptance
+/// state machine per candidate — pin-and-refine through stack-slot
+/// pushes (the to-side bond counters drop while a sub-mapping runs),
+/// recurse. `numbering` receives the FIRST complete mapping's result
+/// (`bFirstCT`); `better` threads the reference's `bStereoIsBetter`
+/// (an earlier entry improved, so later entries compare unbounded).
+///
+/// The acceptance mechanics (witnessed on the biguanide fixture's
+/// single-pin trace): a candidate whose cell bonds all carry the same
+/// marks (`All_SB_Same`, over the level's slot) accepts WITHOUT any
+/// pin — the recursion rides the slot unchanged. Otherwise the first
+/// endpoint pins once per candidate first-atom (the reference's
+/// `LastMappedTo1` keeps the pushed slot across the second-endpoint
+/// candidates of the same first atom), a second `All_SB_Same` over the
+/// PINNED slot skips only the second endpoint's pin, and the known
+/// parity (UNDF never reaches the calc branch) accepts with the
+/// endpoint pins the state machine left behind. The CT compare gates
+/// each accept: a candidate past the stored entry rejects unless an
+/// earlier entry improved, and an accepted smaller entry raises
+/// `better` for everything above it — the lexicographic discipline
+/// that let the reference accept its second bond past a worse stored
+/// entry while the first stayed better.
 #[allow(clippy::too_many_arguments)]
 fn map_bonds(
     adjacency: &[Vec<usize>],
     base_ranks: &[u32],
-    ct: &[(u32, u32)],
+    ct: &mut [(u32, u32)],
     bond_neighbors: &[Vec<usize>],
-    state: &mut Walk,
+    stacks: &mut Vec<Walk>,
+    used: &mut [usize],
+    base: usize,
     entry: usize,
+    better: &mut bool,
     numbering: &mut Option<Vec<u32>>,
 ) -> bool {
     let n = adjacency.len();
@@ -673,8 +695,8 @@ fn map_bonds(
         // position-wise copy — the to-side order carrying the base
         // ranks of the from-side atoms at the same positions
         // (nCanonRankTo[n2] = nCanonRankFrom[n1]).
-        let mut from = state.from.clone();
-        let mut to = state.to.clone();
+        let mut from = stacks[base].from.clone();
+        let mut to = stacks[base].to.clone();
         break_all_ties(&mut from, adjacency);
         break_all_ties(&mut to, adjacency);
         let mut ranks = vec![0u32; n];
@@ -684,6 +706,7 @@ fn map_bonds(
         *numbering = Some(ranks);
         return true;
     }
+    let prev_bond = ct[entry];
     // The enumeration (Next_SB_At_CanonRanks2): seeded from the
     // previous CT entry, cr1 walks upward and cr2 keeps the smallest
     // adjacent partner rank; canon_rank2_inp resets whenever cr1
@@ -698,33 +721,37 @@ fn map_bonds(
     let mut cr1 = canon_rank1_inp;
     while cr1 <= n as u32 {
         let from_atom = canonical_atom(base_ranks, cr1 as usize - 1);
-        let r1 = state.from.rank_of(from_atom);
+        let r1 = stacks[base].from.rank_of(from_atom);
         let mut cr2_best = n as u32;
         // The to-side cell of rank r1, positions top-down.
         let mut pos = r1 as usize;
         while pos > 0 {
             pos -= 1;
-            if state.to.rank_of(state.to.at_number()[pos]) != r1 {
+            if stacks[base].to.rank_of(stacks[base].to.at_number()[pos]) != r1 {
                 break;
             }
-            let s1 = state.to.at_number()[pos];
-            if state.used[s1] == 0 {
+            let s1 = stacks[base].to.at_number()[pos];
+            if used[s1] == 0 {
                 continue;
             }
             for &s2 in &bond_neighbors[s1] {
-                if state.used[s2] == 0 {
+                if used[s2] == 0 {
                     continue;
                 }
-                let r2 = state.to.rank_of(s2);
+                let r2 = stacks[base].to.rank_of(s2);
                 // The from-side cell of rank r2: find the member
                 // adjacent to from_atom with the smallest base rank.
                 let mut pos2 = r2 as usize;
                 while pos2 > 0 {
                     pos2 -= 1;
-                    if state.from.rank_of(state.from.at_number()[pos2]) != r2 {
+                    if stacks[base]
+                        .from
+                        .rank_of(stacks[base].from.at_number()[pos2])
+                        != r2
+                    {
                         break;
                     }
-                    let n2 = state.from.at_number()[pos2];
+                    let n2 = stacks[base].from.at_number()[pos2];
                     if adjacency[from_atom].contains(&n2)
                         && base_ranks[n2] < cr2_best
                         && base_ranks[n2] > canon_rank2_inp
@@ -745,97 +772,235 @@ fn map_bonds(
     let Some((cr1, cr2)) = found else {
         return false;
     };
-    // The CT compare: reject the level when the enumerated entry is
-    // larger than the pre-filled one (c < 0: stored < candidate).
-    let (stored1, stored2) = ct[entry];
-    if stored1 < cr1 || (stored1 == cr1 && stored2 < cr2) {
+    // The level bound: an enumerated pair past the stored entry rejects
+    // the level — unless an earlier entry improved (bStereoIsBetter
+    // lifts the bound for the rest of the CT).
+    if !*better && (ct[entry].0 < cr1 || (ct[entry].0 == cr1 && ct[entry].1 < cr2)) {
+        ct[entry] = prev_bond;
         return false;
     }
     let from_atom1 = canonical_atom(base_ranks, cr1 as usize - 1);
     let from_atom2 = canonical_atom(base_ranks, cr2 as usize - 1);
-    let at_rank1 = state.from.rank_of(from_atom1);
-    // The to-side candidates: the cell of the from-atom's class rank,
-    // positions top-down (iMax = at_rank1 - 1 in the reference).
+    let at_rank1 = stacks[base].from.rank_of(from_atom1);
+    // The candidate scan: the to-side cell of the from-atom's class
+    // rank, positions top-down (iMax = at_rank1 - 1). `last_mapped_to1`
+    // keeps the first endpoint's pushed slot across the second-endpoint
+    // candidates of the same first atom (the reference's
+    // LastMappedTo1); `sp1` is that slot pointer (nStackPtr[1]).
+    let mut last_mapped_to1: Option<usize> = None;
+    let mut sp1 = base;
+    // The last candidate's outer same-parity verdict: when the at_to2
+    // loop ends on a pin-free candidate the at_to1 loop stops too (the
+    // reference's post-j2 `if (bAllParitiesIdentical) break`).
+    let mut last_same1 = false;
     let mut pos = at_rank1 as usize;
     while pos > 0 {
         pos -= 1;
-        if state.to.rank_of(state.to.at_number()[pos]) != at_rank1 {
+        if stacks[base].to.rank_of(stacks[base].to.at_number()[pos]) != at_rank1 {
             break;
         }
-        let to_atom1 = state.to.at_number()[pos];
+        let to_atom1 = stacks[base].to.at_number()[pos];
         if bond_neighbors[to_atom1].is_empty() {
-            continue;
+            continue; // at_to1 does not belong to a stereo bond
         }
         for &to_atom2 in &bond_neighbors[to_atom1] {
-            if state.from.rank_of(from_atom2) != state.to.rank_of(to_atom2) {
-                continue;
+            if stacks[base].from.rank_of(from_atom2) != stacks[base].to.rank_of(to_atom2) {
+                continue; // at_from2 cannot be mapped on at_to2
             }
-            // All_SB_Same: when every equivalent candidate bond around
-            // the cell carries the same marks, the mapping (and its
-            // refinements) is skipped entirely.
-            let all_same = all_sb_same(state, base_ranks, cr1, cr2, bond_neighbors, adjacency);
-            let saved = state.clone();
+            // All_SB_Same over the level's slot: when every equivalent
+            // candidate bond around the cell carries the same marks the
+            // mapping runs with NO pins at all (the reference's outer
+            // same-parity branch — ClearPreviousMappings and recurse on
+            // the slot unchanged).
+            let all_same = all_sb_same(
+                &stacks[base],
+                base_ranks,
+                cr1,
+                cr2,
+                bond_neighbors,
+                adjacency,
+            );
+            last_same1 = all_same;
+            let mut istk = base;
+            let mut same2 = false;
             if !all_same {
-                map_an_atom(state, from_atom1, to_atom1, adjacency);
+                if last_mapped_to1 != Some(to_atom1) {
+                    // map_an_atom2 for the first endpoint: a tied cell
+                    // pushes a refined copy of both sides; a singleton
+                    // pins nothing (bAddStack = 0).
+                    sp1 = match number_of_ties(&stacks[istk], from_atom1, to_atom1) {
+                        Err(()) => return false,
+                        Ok(None) => istk,
+                        Ok(Some(new_rank)) => {
+                            pin_slot(stacks, istk, from_atom1, to_atom1, new_rank, adjacency)
+                        }
+                    };
+                    last_mapped_to1 = Some(to_atom1);
+                }
+                istk = sp1;
                 // The endpoint-2 rank consistency after endpoint-1's
                 // refinement (the charge/bond-isomerism guard).
-                if state.from.rank_of(from_atom2) != state.to.rank_of(to_atom2) {
-                    *state = saved;
+                if stacks[istk].from.rank_of(from_atom2) != stacks[istk].to.rank_of(to_atom2) {
                     continue;
                 }
-                map_an_atom(state, from_atom2, to_atom2, adjacency);
-                // The bond's to-side counters drop while the sub-mapping
-                // runs (an atom with two marks cannot map twice).
-                state.used[to_atom1] -= 1;
-                state.used[to_atom2] -= 1;
+                // The second All_SB_Same over the PINNED slot: skip
+                // only the second endpoint's pin.
+                if istk > base {
+                    same2 = all_sb_same(
+                        &stacks[istk],
+                        base_ranks,
+                        cr1,
+                        cr2,
+                        bond_neighbors,
+                        adjacency,
+                    );
+                }
+                if !same2 {
+                    istk = match number_of_ties(&stacks[istk], from_atom2, to_atom2) {
+                        Err(()) => return false,
+                        Ok(None) => istk,
+                        Ok(Some(new_rank)) => {
+                            pin_slot(stacks, istk, from_atom2, to_atom2, new_rank, adjacency)
+                        }
+                    };
+                }
+            }
+            // The known-parity accept (UNDF never reaches the calc
+            // branch): compare the candidate against the stored entry —
+            // reject when past it unless an earlier entry improved;
+            // write the entry; recurse on the state the pins left.
+            let c = compare_ct(ct[entry], cr1, cr2);
+            if c < 0 && !*better {
+                continue; // reject: not a minimal CT
+            }
+            let mut better_was_set_here = false;
+            let mut prev_bond2 = prev_bond;
+            if c > 0 && !*better {
+                *better = true;
+                better_was_set_here = true;
+                prev_bond2 = ct[entry];
+            }
+            ct[entry] = (cr1, cr2);
+            if !all_same {
+                // the to-side counters drop only around a pinning
+                // sub-mapping (the reference guards with
+                // !bAllParitiesIdentical)
+                used[to_atom1] -= 1;
+                used[to_atom2] -= 1;
             }
             let mapped = map_bonds(
                 adjacency,
                 base_ranks,
                 ct,
                 bond_neighbors,
-                state,
+                stacks,
+                used,
+                istk,
                 entry + 1,
+                better,
                 numbering,
             );
             if !all_same {
-                state.used[to_atom1] += 1;
-                state.used[to_atom2] += 1;
+                used[to_atom1] += 1;
+                used[to_atom2] += 1;
             }
-            *state = saved;
             if mapped {
                 return true;
             }
+            if better_was_set_here {
+                // rollback: this level's improvement died with the
+                // failed sub-mapping
+                *better = false;
+                ct[entry] = prev_bond2;
+            }
+            if all_same || same2 {
+                break; // j2 cycle: at_to2 needs no repeat
+            }
+        }
+        if last_same1 {
+            break; // at_to1: the same-parity verdict stops the scan
         }
     }
+    // The level failed: restore the stored entry (prevBond).
+    ct[entry] = prev_bond;
     false
 }
 
-/// `map_an_atom2`: the shared-rank pin. When the atom's class holds
-/// more than one member, both sides' respective atoms pin to the
-/// cell's bottom rank (r - i1 + 1, i1 the cell size walked from
-/// position r - 2 down) and the equitable refinement cascades.
-fn map_an_atom(state: &mut Walk, from_atom: usize, to_atom: usize, adjacency: &[Vec<usize>]) {
+/// `map_an_atom2`'s pin: both sides refine onto fresh stack slots (the
+/// pushed copy; a repeat pin at the same depth overwrites the scratch
+/// slot, the way the reference's stack reuse does).
+fn pin_slot(
+    stacks: &mut Vec<Walk>,
+    slot: usize,
+    from_atom: usize,
+    to_atom: usize,
+    new_rank: u32,
+    adjacency: &[Vec<usize>],
+) -> usize {
+    let mut pushed = stacks[slot].clone();
+    pushed.from.pin_and_refine(from_atom, new_rank, adjacency);
+    pushed.to.pin_and_refine(to_atom, new_rank, adjacency);
+    let next = slot + 1;
+    if next < stacks.len() {
+        stacks[next] = pushed;
+    } else {
+        stacks.push(pushed);
+    }
+    next
+}
+
+/// `NumberOfTies`: the shared mapping rank's cell size, and the pin
+/// rank (r - i1 + 1) when the cell holds a tie. Both sides' cells must
+/// agree on the size (the reference's CT_MAPCOUNT_ERR guards); a
+/// singleton cell pins nothing.
+fn number_of_ties(state: &Walk, from_atom: usize, to_atom: usize) -> Result<Option<u32>, ()> {
     let r = state.from.rank_of(from_atom);
     if r != state.to.rank_of(to_atom) {
-        return;
+        return Err(()); // atoms cannot be mapped onto each other
     }
     let imax = r as usize - 1;
     let mut i1 = 1usize;
     while i1 <= imax && state.from.rank_of(state.from.at_number()[imax - i1]) == r {
         i1 += 1;
     }
+    let mut i2 = 1usize;
+    while i2 <= imax && state.to.rank_of(state.to.at_number()[imax - i2]) == r {
+        i2 += 1;
+    }
+    if i2 != i1 {
+        return Err(()); // must be identical number of equal ranks
+    }
     if i1 > 1 {
-        let new_rank = r - i1 as u32 + 1;
-        state.from.pin_and_refine(from_atom, new_rank, adjacency);
-        state.to.pin_and_refine(to_atom, new_rank, adjacency);
+        Ok(Some(r - i1 as u32 + 1))
+    } else {
+        Ok(None)
     }
 }
 
-/// `All_SB_Same`: true when every to-cell member's same-rank neighbor
-/// pairs carry the marks (so the mapping would repeat the same parity
-/// and the reference skips it); false when some pair is unmarked (a
-/// mapping onto a non-stereo bond exists). The reference's
+/// The stored-entry compare (`CompareLinCtStereoDoubleToValues` over
+/// the at_num1/at_num2 pair; the parity byte is UNDF on both sides of
+/// every corpus comparison): 1 when the stored entry is greater (the
+/// candidate improves it), -1 when past it, 0 when equal.
+fn compare_ct(stored: (u32, u32), cr1: u32, cr2: u32) -> i32 {
+    if stored.0 > cr1 {
+        return 1;
+    }
+    if stored.0 < cr1 {
+        return -1;
+    }
+    if stored.1 > cr2 {
+        return 1;
+    }
+    if stored.1 < cr2 {
+        return -1;
+    }
+    0
+}
+
+/// `All_SB_Same` (the UNDF simplification): true when every to-cell
+/// member's same-rank neighbor pairs carry the marks (so a pinning
+/// mapping would repeat the same parity); false when some pair is
+/// unmarked (a mapping onto a non-stereo bond exists). The reference's
 /// program-error path resolves to `false` — the mapping proceeds.
 fn all_sb_same(
     state: &Walk,
