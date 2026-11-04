@@ -1374,6 +1374,16 @@ struct Registration {
     /// A HARD (DE)PROTONATION phase moved a proton (the structure's
     /// FLAG_FORCE_SALT_TAUT): the salt gates relax to donor-only.
     force_salt_taut: bool,
+    /// The salt-phase completions, the reference's
+    /// bTautFlagsDone & TG_FLAG_ALL_SALT_DONE trio: salt step 0
+    /// (TG_FLAG_TEST_TAUT__SALTS_DONE), salt step 1
+    /// (TG_FLAG_TEST_TAUT2_SALTS_DONE), and the terminal merge
+    /// (TG_FLAG_MERGE_TAUT_SALTS_DONE). Recorded read-only — the aux
+    /// norm digit reads them; nothing in the registration depends on
+    /// them.
+    salt_done_step0: bool,
+    salt_done_step1: bool,
+    salt_done_merge: bool,
 }
 
 impl Registration {
@@ -1440,6 +1450,9 @@ fn fresh_state(n: usize) -> Registration {
         altered: BTreeSet::new(),
         salt_charges_found: false,
         force_salt_taut: false,
+        salt_done_step0: false,
+        salt_done_step1: false,
+        salt_done_merge: false,
     }
 }
 
@@ -1468,6 +1481,9 @@ fn build_links(context: &Context) -> (Vec<BTreeSet<usize>>, Registration) {
         altered: BTreeSet::new(),
         salt_charges_found: false,
         force_salt_taut: context.structure.protons_hard_moved,
+        salt_done_step0: false,
+        salt_done_step1: false,
+        salt_done_merge: false,
     };
     let mut alternated = alternation_round(context, &mut state);
     for pass in 0..8 {
@@ -1492,10 +1508,12 @@ fn build_links(context: &Context) -> (Vec<BTreeSet<usize>>, Registration) {
         if !changed {
             changed = salt_round(context, &mut state);
             s0 = changed;
+            state.salt_done_step0 |= changed;
         }
         if !changed {
             changed = salt2_round(context, &mut state);
             s1 = changed;
+            state.salt_done_step1 |= changed;
         }
         if !changed {
             changed = alternation_round(context, &mut state);
@@ -1520,7 +1538,8 @@ fn build_links(context: &Context) -> (Vec<BTreeSet<usize>>, Registration) {
     // feeds back into the charge rounds — a c-point the charge round
     // registers against a merged group is a c-point the reference
     // never registers.
-    merge_salt_round(context, &mut state);
+    let merged = merge_salt_round(context, &mut state);
+    state.salt_done_merge |= merged;
     // Adjacency over co-membership (components() then yields the
     // groups; empty ones drop).
     let mut members: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -3858,8 +3877,29 @@ fn components(
     hydrogens: &[u32],
     charge_units: &impl Fn(usize) -> u32,
 ) -> Vec<Vec<usize>> {
-    let n = context.structure.atoms.len();
     let (linked, links_state) = build_links(context);
+    component_walk(
+        context,
+        state,
+        &linked,
+        &links_state,
+        hydrogens,
+        charge_units,
+    )
+}
+
+/// The component walk over prebuilt co-member links — the caller may
+/// share one [`build_links`] result between the group walk and the
+/// settled-state readings (the aux norm digit reads both).
+fn component_walk(
+    context: &Context,
+    state: &Registration,
+    linked: &[BTreeSet<usize>],
+    links_state: &Registration,
+    hydrogens: &[u32],
+    charge_units: &impl Fn(usize) -> u32,
+) -> Vec<Vec<usize>> {
+    let n = context.structure.atoms.len();
     let mut component = vec![usize::MAX; n];
     let mut groups = Vec::new();
     // The seeding: base-predicate endpoints — plus, under the
@@ -3916,11 +3956,31 @@ pub fn tautomeric_bond_marks(structure: &Structure, hydrogens: &[u32]) -> Vec<bo
 }
 
 pub fn mobile_groups(structure: &Structure, hydrogens: &[u32], ranks: &[u32]) -> Vec<MobileGroup> {
+    mobile_groups_and_salt(structure, hydrogens, ranks).0
+}
+
+/// One registration fixpoint shared by the aux group reading and the
+/// salt-phase completion reading: the mobile groups (the same
+/// rendering [`mobile_groups`]) and whether the salt phase completed
+/// (any of the reference's TG_FLAG_ALL_SALT_DONE trio).
+pub fn mobile_groups_and_salt(
+    structure: &Structure,
+    hydrogens: &[u32],
+    ranks: &[u32],
+) -> (Vec<MobileGroup>, bool) {
     let context = Context::new(structure, hydrogens);
     let state = fresh_state(structure.atoms.len());
+    let (linked, links_state) = build_links(&context);
     let charge_units = charge_units_of(structure);
     let mut groups = Vec::new();
-    for members in components(&context, &state, hydrogens, &charge_units) {
+    for members in component_walk(
+        &context,
+        &state,
+        &linked,
+        &links_state,
+        hydrogens,
+        &charge_units,
+    ) {
         let count: u32 = members
             .iter()
             .map(|&atom| hydrogens[atom] + charge_units(atom))
@@ -3935,7 +3995,22 @@ pub fn mobile_groups(structure: &Structure, hydrogens: &[u32], ranks: &[u32]) ->
         });
     }
     groups.sort_by_key(|group| (group.ranks.len(), group.ranks[0]));
-    groups
+    let salt_done =
+        links_state.salt_done_step0 || links_state.salt_done_step1 || links_state.salt_done_merge;
+    (groups, salt_done)
+}
+
+/// The salt-phase completions over the settled registration — the
+/// reference's `bTautFlagsDone & TG_FLAG_ALL_SALT_DONE` trio
+/// (TEST_TAUT__SALTS, TEST_TAUT2_SALTS, MERGE_TAUT_SALTS), read the
+/// way the emit does: any of the three set. Read-only — the
+/// registration rounds run unmodified; only their completions are
+/// recorded. The aux norm digit's salt bit composes this with the
+/// emitted-t-groups reading (ichimak2.c: the INCHI_FLAG_ACID_TAUT
+/// flag lands only under `SortTautomerGroupsAndEndpoints() > 0`,
+/// i.e. real t-groups in the emitted identifier).
+pub fn salt_phase_done(structure: &Structure, hydrogens: &[u32]) -> bool {
+    mobile_groups_and_salt(structure, hydrogens, &Vec::new()).1
 }
 
 /// The atoms whose hydrogens live in mobile groups (excluded from the
@@ -4096,5 +4171,21 @@ mod tests {
         );
         let groups = mobile_groups(&s, &[0, 0, 0, 0, 0, 0, 1, 1], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn the_salt_phase_declines_on_a_single_acid_group() {
+        // Acetic acid: the carboxyl pair registers through the regular
+        // taut cycle; its two oxygens are one co-grouped candidate set,
+        // so the salt step-0 pair loop has no cross-group pair to test
+        // (the breadth2-1637 shape: the old aux reading fired the salt
+        // bit off the group's charge alone — the completion flag, not
+        // the group shape, is the reference's bit).
+        let s = structure(
+            vec![atom("C"), atom("C"), atom("O"), atom("O")],
+            vec![(0, 1, 1), (1, 2, 2), (1, 3, 1)],
+        );
+        let (_, salt_done) = mobile_groups_and_salt(&s, &[3, 0, 0, 1], &[1, 2, 3, 4]);
+        assert!(!salt_done);
     }
 }

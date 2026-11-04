@@ -89,34 +89,38 @@ pub fn aux_info(
     standardization::ensure_typable_charges(working)?;
     let counts = standardization::adjusted_hydrogens(working);
     let ranks = canonical_ranks_for(working);
-    let groups = crate::canonical::tautomer::mobile_groups(working, &counts, &ranks);
+    // One registration fixpoint feeds both the group reading and the
+    // salt-phase completion (the norm digit's salt bit).
+    let (groups, salt_done) =
+        crate::canonical::tautomer::mobile_groups_and_salt(working, &counts, &ranks);
 
     // The normalization-type digit (the reference's io.bTautomeric):
     // +1 a tautomeric representation exists — a registered mobile
     // group holding real hydrogen, or the normalization moved protons
     // (the `/p` layer — the reference's FLAG_NORM_CONSIDER_TAUT
     // marker), or an exchangeable isotopic H sits on a heteroatom
-    // (the reference's isotopic-endpoint branch). +1 a merged salt
-    // group (a real-H group that also carries charge — the (Hn±)
-    // super-group). +4 a hard (DE)PROTONATION moved a proton. The
-    // salt and hard bits count only when the +1 did (the reference
-    // adds them under `if (io.bTautomeric)`); charge-only c-point
-    // registrations are not t-groups and count nothing. DATED DEBT
-    // (2026-11-04): the reference's bit reads bTautFlagsDone &
-    // TG_FLAG_ALL_SALT_DONE — the post-taut-cycle salt phase's
-    // completions — and on the salt-tautomeric breadth fixtures the
-    // engine's settled state diverges from the oracle's norm state
-    // (the proton rides double bonds the oracle's per-atom H
-    // bookkeeping leaves single), so a registration-flag port cannot
-    // agree on both families; the group-shape reading stands.
+    // (the reference's isotopic-endpoint branch). +1 the salt bit —
+    // real emitted t-groups AND the post-taut-cycle salt phase
+    // completed (the reference: ichimak2.c sets INCHI_FLAG_ACID_TAUT
+    // only under `SortTautomerGroupsAndEndpoints() > 0` — real
+    // t-groups in the emitted identifier — AND bTautFlagsDone &
+    // TG_FLAG_ALL_SALT_DONE, the salt step 0 / step 1 / terminal
+    // merge completions; ichiprt1.c adds it under `if
+    // (io.bTautomeric)`). +4 a hard (DE)PROTONATION moved a proton.
+    // The salt and hard bits count only when the +1 did (the
+    // reference adds them under `if (io.bTautomeric)`); charge-only
+    // c-point registrations are not t-groups and count nothing. The
+    // salt phase runs read-only here: the registration rounds and
+    // their (Hn) folds are the identifier's — only their completions
+    // are recorded.
     let real_h = |group: &crate::canonical::tautomer::MobileGroup| group.count > group.charge;
-    let tautomeric = groups.iter().any(&real_h);
-    let salt_merged = groups.iter().any(|group| real_h(group) && group.charge > 0);
+    let real_groups = groups.iter().any(&real_h);
+    let tautomeric = real_groups;
     let has_p = proton_shift != 0 || standardization::proton_layer(working).is_some();
     let iso_exchangeable = exchangeable_isotopic_h(working, &counts);
     let mut norm = i32::from(tautomeric || has_p || iso_exchangeable);
     if norm > 0 {
-        norm += i32::from(salt_merged);
+        norm += i32::from(real_groups && salt_done);
         norm += 4 * i32::from(working.protons_hard_moved);
     }
 
