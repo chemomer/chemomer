@@ -156,6 +156,48 @@ fn mark_of(structure: &Structure, index: usize) -> Option<(i32, u32, u32)> {
     Some((delta, t, d))
 }
 
+/// The atom's isotopic mark: `Some((mass delta, T, D))` for a heavy
+/// isotope or a fixed isotopic-H carrier, `None` for a plain atom.
+pub fn isotopic_marks(structure: &Structure) -> Vec<Option<(i32, u32, u32)>> {
+    (0..structure.atoms.len())
+        .map(|index| mark_of(structure, index))
+        .collect()
+}
+
+/// Whether the aux speaks the `/I:/E:m` isotopic echo: an isotopic
+/// mark exists somewhere, the plain equivalence classes are spoken,
+/// and NO class mixes distinct marks — the isotopic pass's own
+/// equivalence (the reference's bIsotopicAtomEqu ←
+/// nConstitEquIsotopicNumbers) then equals the plain one and prints as
+/// the `m` repetition mark. A classmate pair split by an isotope
+/// (13C vs 12C) collapses the isotopic classes to singletons and the
+/// echo stays silent; a mark with no classmate to split (the CD3
+/// methyl, the CRU isotope's post-frame-shift singleton) leaves it.
+/// `marks_by_canonical` carries the marks in canonical order (the
+/// classes' members are canonical numbers).
+pub fn isotopic_aux_echo(
+    marks_by_canonical: &[Option<(i32, u32, u32)>],
+    classes: &[Vec<u32>],
+) -> bool {
+    if classes.is_empty() || !marks_by_canonical.iter().any(Option::is_some) {
+        return false;
+    }
+    classes.iter().all(|members| {
+        let mut marks: Vec<Option<(i32, u32, u32)>> = members
+            .iter()
+            .map(|&number| {
+                marks_by_canonical
+                    .get(number as usize - 1)
+                    .copied()
+                    .flatten()
+            })
+            .collect();
+        marks.sort();
+        marks.dedup();
+        marks.len() == 1
+    })
+}
+
 /// The recorded mass minus the element's standard mass, signed —
 /// `None` when the atom is the standard isotope or an H (H isotopes
 /// ride the carrier).

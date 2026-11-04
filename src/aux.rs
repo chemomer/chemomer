@@ -316,19 +316,26 @@ pub fn aux_info(
     // verdict (empty when the absolute pass won or the rows tied).
     out.push_str(&inverted_block);
 
-    // `/I:/E:m` — the isotopic block: isotopic HYDROGEN on a carbon
-    // carrier present and constitutional equivalence spoken — the
+    // `/I:/E:m` — the isotopic block: an isotope present that splits NO
+    // equivalence class, and constitutional equivalence spoken — the
     // isotopic numbering adds nothing (the empty /I:) and the isotopic
     // equivalence equals the plain classes (the `m` marker, "same as
-    // the main layer"). Mass-number isotopes (/i1+1 via M ISO) never
-    // speak it: the sup/isotopic-member tranche probe (13C-ethane with
-    // an /E: class) recorded the oracle's aux WITHOUT the /I: block —
-    // the corpus's /I: recordings all carry D-carriers
-    // (breadth2-483 /i1D3, breadth2-1984 /i1D,2D,3D,4).
-    let fixed_isotopes = working
-        .isotopic_h
-        .iter()
-        .any(|(carrier, _)| working.atoms[*carrier].element == "C");
+    // the main layer"). The reference gates the block on the isotopic
+    // pass's OWN equivalence array (ichiprt1.c bIsotopicAtomEqu ←
+    // nConstitEquIsotopicNumbers); the discriminator lives in
+    // `isotopic_aux_echo`.
+    let marks_by_canonical: Vec<Option<(i32, u32, u32)>> = {
+        let mut by_canonical = vec![None; working.atoms.len()];
+        for (atom, mark) in crate::layers::isotope::isotopic_marks(working)
+            .into_iter()
+            .enumerate()
+        {
+            by_canonical[ranks_aux[atom] as usize - 1] = mark;
+        }
+        by_canonical
+    };
+    let fixed_isotopes =
+        crate::layers::isotope::isotopic_aux_echo(&marks_by_canonical, &equivalents_main);
     if fixed_isotopes && out.contains("/E:") {
         out.push_str("/I:/E:m");
     }
