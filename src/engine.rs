@@ -808,13 +808,13 @@ impl Engine {
                         .unwrap_or_default()
                 };
                 let fields = match &sibling.fixed_h {
-                    Some(fixed) => crate::aux::fixed_pass_fields(
+                    Some(fixed) => crate::auxinfo::fixed_pass_fields(
                         &sibling.structure,
                         fixed,
                         &main("N:"),
                         &main("E:"),
                     ),
-                    None => crate::aux::FixedHPassFields {
+                    None => crate::auxinfo::FixedHPassFields {
                         numbering: String::new(),
                         equ: String::new(),
                         inverted: false,
@@ -850,7 +850,7 @@ impl Engine {
             out.push_str("/CRV:");
             out.push_str(&merge_runs(fields).join(";"));
         }
-        out.push_str(&crate::aux::reversibility_block(
+        out.push_str(&crate::auxinfo::reversibility_block(
             &self.original,
             &self.options,
         ));
@@ -906,7 +906,7 @@ impl Engine {
                         .unwrap_or(false)
                 })
                 .unwrap_or(false);
-            crate::aux::aux_info(
+            crate::auxinfo::aux_info(
                 &self.original,
                 &self.structure,
                 self.proton_shift,

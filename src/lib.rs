@@ -20,7 +20,7 @@ pub mod napi_binding;
 #[cfg(feature = "wasm")]
 pub mod wasm_binding;
 
-pub mod aux;
+pub mod auxinfo;
 pub mod canonical;
 pub mod engine;
 mod error;
