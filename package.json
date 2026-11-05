@@ -28,7 +28,7 @@
     "artifacts": "napi artifacts",
     "build": "napi build --platform --release --features napi --js index.js --dts index.d.ts",
     "build:debug": "napi build --platform --features napi --js index.js --dts index.d.ts",
-    "prepublishOnly": "napi prepublish -t --skip-optional-publish",
+    "prepublishOnly": "napi prepublish --tagstyle none --skip-optional-publish",
     "test": "npm run build:debug && node scripts/smoke-napi.mjs"
   },
   "devDependencies": {
