@@ -77,13 +77,14 @@ jobs:
             exit 1
           fi
           echo "Publishing $actual"
+      # NO registry-url here: setup-node would write an _authToken
+      # line into .npmrc referencing NODE_AUTH_TOKEN, and npm then PUTs
+      # with that empty token instead of the OIDC credential (registry
+      # 404). Trusted publishing needs no token line — npm ≥11.5 signs
+      # the publish with the job's OIDC identity (--provenance).
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: https://registry.npmjs.org
-      # Trusted publishing (OIDC as the publish credential) needs
-      # npm >= 11.5; Node 22 bundles npm 10, where --provenance signs
-      # via OIDC but the PUT goes out anonymously (registry 404).
       - run: npm install -g npm@latest
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
