@@ -12,13 +12,11 @@ crate-type = ["lib", "cdylib"]
 [features]
 default = []
 # Runtime bindings — each gates its own dependency tree; the core
-# stays dependency-free.
-pyo3 = ["dep:pyo3"]
+# stays dependency-free. (Python ships from chemomer/chemomer-py.)
 wasm = ["dep:wasm-bindgen"]
 napi = ["dep:napi", "dep:napi-derive"]
 
 [dependencies]
-pyo3 = { version = "0.22", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 napi = { version = "2", optional = true, default-features = false, features = ["napi8"] }
 napi-derive = { version = "2", optional = true }
