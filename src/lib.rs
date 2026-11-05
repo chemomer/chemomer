@@ -17,8 +17,6 @@ pub mod ffi;
 
 #[cfg(feature = "napi")]
 pub mod napi_binding;
-#[cfg(feature = "pyo3")]
-pub mod pyo3_binding;
 #[cfg(feature = "wasm")]
 pub mod wasm_binding;
 

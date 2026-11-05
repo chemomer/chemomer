@@ -29,9 +29,11 @@ not a settlement.
   `chemomer_inchikey`, `chemomer_string_free`,
   `chemomer_last_error` — drivable from Ruby FFI, Python ctypes,
   Node ffi-napi, Swift.
-- **Feature-gated bindings** — `pyo3` (a native `chemomer` Python
-  module), `wasm` (wasm-bindgen exports), `napi` (Node). Each gates
-  its own dependency tree; the default build compiles none of them.
+- **Feature-gated bindings** — `wasm` (wasm-bindgen exports), `napi`
+  (Node); the native `chemomer` Python module ships from
+  [chemomer/chemomer-py](https://github.com/chemomer/chemomer-py).
+  Each gates its own dependency tree; the default build compiles none
+  of them.
 
 The Ruby gem consumes the engine through the C ABI:
 `AsciiChem::Inchi::NativeEngine` in
