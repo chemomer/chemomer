@@ -1,6 +1,6 @@
 {
   "name": "chemomer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Native Rust InChI engine for Node — molfile in, identifier / AuxInfo / InChIKey out (the napi binding, feature `napi`)",
   "keywords": [
     "inchi",
@@ -36,5 +36,10 @@
   },
   "napi": {
     "binaryName": "chemomer"
+  },
+  "optionalDependencies": {
+    "chemomer-win32-x64-msvc": "0.1.1",
+    "chemomer-darwin-x64": "0.1.1",
+    "chemomer-linux-x64-gnu": "0.1.1"
   }
 }
