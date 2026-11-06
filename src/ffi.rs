@@ -68,6 +68,28 @@ pub unsafe extern "C" fn chemomer_from_molfile(molfile: *const c_char) -> *mut c
     }
 }
 
+/// Derives the AuxInfo line from a V2000 molfile. Null on error.
+///
+/// # Safety
+/// `molfile` must be a NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn chemomer_aux_from_molfile(molfile: *const c_char) -> *mut c_char {
+    let aux = derive(molfile, |engine| engine.aux_string());
+    match aux {
+        Ok(text) => match CString::new(text) {
+            Ok(text) => text.into_raw(),
+            Err(error) => {
+                set_error(format!("aux contains a NUL: {error}"));
+                std::ptr::null_mut()
+            }
+        },
+        Err(error) => {
+            set_error(error.message().to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Derives the InChIKey from a V2000 molfile. Null on error.
 ///
 /// # Safety
