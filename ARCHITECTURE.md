@@ -37,7 +37,7 @@ exactly the layers it can decide.
 | `canonical` | Native port of the reference's canonicalization paths (MIT source read at development time, never compiled or called): invariants → partition → equitable refinement → two-pass individualization search → connection table → `/c` DFS emission; `tautomer` ports the ichitaut endpoint semantics (valence arithmetic, donor/acceptor roles, the π-run walk grammar); `stereo` ports `set_stereo_atom_parity` (3D lift, H closure, triple product); `bond_stereo` the double-bond signs; `emit::parse_connection_segment` replays a segment back for the property test. | The seams stay corpus-arbitrated; new reference machinery joins as a sibling module. |
 | `key` | The InChIKey: dependency-free SHA-256, the reference's split (major formula+c/h/q, proton segment, minor block doubled), the base-26 triplets/dublets (E** and TAA..TTV skipped). | The layout constants are the corpus-arbitrated seam. |
 | `ffi` | The C ABI: owned C strings, a thread-local last error, `cdylib` build. The one module allowed `unsafe`. | New ABI functions join here; the engine surface they wrap never changes. |
-| `wasm_binding` / `napi_binding` | Runtime bindings behind the `wasm` / `napi` features; the default build compiles none of them. The Python binding ships from chemomer/chemomer-py. | A new runtime = a new feature + module. |
+| `wasm_binding` | Runtime binding behind the `wasm` feature; the default build compiles none of them. The Python binding ships from chemomer/chemomer-py, the Node binding from chemomer/chemomer-ts. | A new runtime = a new feature + module (or a wrapper repo, like chemomer-py / chemomer-ts). |
 | `engine` | The façade: `Engine::from_molfile`, `segments()`, `inchi_string()`, `inchikey()` — runs the registry, tags segments by kind. Closed for modification. | — |
 
 ## Encapsulation boundaries
@@ -86,6 +86,6 @@ the IUPAC reference binary:
 | M3 mobile-H groups | `canonical::tautomer`, `layers::hydrogen` | done — 92 triage entries retired by the template slice; 64 dated entries remain |
 | M4 stereo /t /b /m /s | `canonical::stereo`, `canonical::bond_stereo`, `layers::stereo` | done — the stereo (20/20) and E/Z (10/10) tranches gate |
 | M5 InChIKey | `key` | done — every recorded key reproduces (native SHA-256) |
-| M6 bindings | `ffi` (C ABI, cdylib) + the `wasm` / `napi` features (Python via chemomer-py) | done — default build compiles zero runtime dependencies |
+| M6 bindings | `ffi` (C ABI, cdylib) + the `wasm` feature (Python via chemomer-py, Node via chemomer-ts) | done — default build compiles zero runtime dependencies |
 | M7 engine claims | the Ruby `NativeEngine`, the site claims matrix | done — gem and matrix merged |
 | Hardening | `emit::parse_connection_segment` + proptest, `benches/identity.rs`, `fuzz/` | done — fuzz runs manually on nightly |

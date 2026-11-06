@@ -5,7 +5,8 @@
 
 [workspace]
 # GitHub releases are created on publish — downstream packaging
-# (npm bindings, the gem's NativeEngine) keys off them.
+# (the npm binding in chemomer/chemomer-ts, the gem's NativeEngine)
+# keys off them.
 git_release_enable = true
 
 # Update dependencies with `cargo update`

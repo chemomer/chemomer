@@ -15,8 +15,6 @@
 #[allow(unsafe_code)]
 pub mod ffi;
 
-#[cfg(feature = "napi")]
-pub mod napi_binding;
 #[cfg(feature = "wasm")]
 pub mod wasm_binding;
 
