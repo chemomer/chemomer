@@ -6,9 +6,10 @@
 # dispatch input AND the npm trusted-publisher registration (which
 # does NOT exist yet). The wasm package ALSO needs the maintainer's
 # npm name decision before it can ever publish: wasm-pack names the
-# package after the crate ("chemomer"), which collides with the napi
-# package — the name (chemomer-wasm, @chemomer/wasm, …) is a
-# maintainer call recorded in the PR that scaffolded this workflow.
+# package after the crate ("chemomer"), which collides with the Node
+# binding's package (chemomer/chemomer-ts) — the name (chemomer-wasm,
+# @chemomer/wasm, …) is a maintainer call recorded in the PR that
+# scaffolded this workflow.
 
 name: wasm
 

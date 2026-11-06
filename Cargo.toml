@@ -11,15 +11,13 @@ crate-type = ["lib", "cdylib"]
 
 [features]
 default = []
-# Runtime bindings — each gates its own dependency tree; the core
-# stays dependency-free. (Python ships from chemomer/chemomer-py.)
+# Runtime bindings — the wasm feature gates its own dependency tree;
+# the core stays dependency-free. (Python ships from
+# chemomer/chemomer-py, Node from chemomer/chemomer-ts.)
 wasm = ["dep:wasm-bindgen"]
-napi = ["dep:napi", "dep:napi-derive"]
 
 [dependencies]
 wasm-bindgen = { version = "0.2", optional = true }
-napi = { version = "2", optional = true, default-features = false, features = ["napi8"] }
-napi-derive = { version = "2", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0"
