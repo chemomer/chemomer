@@ -27,3 +27,13 @@ criterion = "0.5"
 [[bench]]
 name = "identity"
 harness = false
+
+# wasm-pack's wasm-opt needs a binaryen download that fails in CI
+# (the pinned release URL is dead); the pass is not load-bearing for
+# the engine's wasm smoke build. Mirrors chemomer-ts, which ships
+# the actual npm wasm package.
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
