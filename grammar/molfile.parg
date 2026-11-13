@@ -1,0 +1,110 @@
+grammar ChemomerMolfile version "1.0.0" {
+  ## The MDL V2000 molfile scan — counts line, atom block, bond block,
+  ## property tail (the alias, M CHG / M ISO and M Sgroup families) —
+  ## as a PARG text contract. The V3000 CTAB flavor and the SDfile
+  ## record framing stay engine-side (the V3000 free-form logical-line
+  ## reader is not part of this contract's phase).
+  ##
+  ## Column model: every line is captured as ORDERED positional
+  ## segments whose concatenation is the line verbatim (the fixed
+  ## granules carry their start column in the capture name — k0, k3,
+  ## k6 ... — and the token units ride an ordered array), so the
+  ## engine's column reads (get(a..b) over the line) slice the
+  ## segment stream byte-for-byte. A missing trailing granule means
+  ## the line ended before the column: the engine's tolerant
+  ## field defaults apply there exactly as they did when the reader
+  ## sliced the line directly.
+  ##
+  ## Language notes: `n( X )` is the exact counted repetition; `until`
+  ## is exclusive (the closer is restated); [ ] is the option syntax;
+  ## strict PEG — no repetition backtracking.
+  
+  entry mol: molfile
+  
+  ## One Rust whitespace character minus the newline (the line framing
+  ## owns %x0A): the char::is_whitespace set — the same set
+  ## split_whitespace and trim_end speak.
+  ws_ch = ( %x09 / %x0B / %x0C / %x0D / %x20 / %x85 / %xA0 / %x1680 / %x2000-200A / %x2028 / %x2029 / %x202F / %x205F / %x3000 )
+  
+  ## Any character except the newline.
+  any_nl = ( !%x0A %x00-10FFFF )
+  
+  ## A run of non-whitespace, non-newline characters — one property
+  ## token.
+  token = ( 1*( !%x0A !ws_ch %x00-10FFFF ) )
+  
+  ## A whitespace run, one captured character at a time (the run
+  ## concatenates back to its exact source text).
+  ws_run = 1*( ( ws_ch ) as ch )
+  
+  ## One text line: the content up to the newline (exclusive), then
+  ## the newline when present.
+  text_line = ( ( ( until "\n" ) ) as text [ "\n" ] )
+  
+  molfile = ( ( header ) as header ( counts_line ) as counts ( 0*( ( "\n" ) [ ( body_line ) as line ] ) ) as body ) as molfile
+  
+  ## The three free-text header lines (title, program, comment).
+  header = ( ( text_line ) as h0 ( text_line ) as h1 ( text_line ) as h2 ) as header
+  
+  ## The counts line. The eleven ignored fields and the version word
+  ## ride the column-named granules: k0/k3 = the atom/bond counts the
+  ## engine parses, k6/k9 = the ignored middle fields, k12 = the
+  ## chiral flag, k15 = the rest of the fixed columns, k33 = the
+  ## version word (the dispatch field). Every granule past k3 is
+  ## optional — a short line just omits the columns it does not
+  ## carry, the way the engine's get() reads returned None there. A
+  ## line too short for the k3 bond count is the degenerate shape:
+  ## the raw text rides k0 alone and the engine reports the
+  ## malformed counts line from it.
+  counts_line = ( ( counts_full / counts_degenerate ) ) as counts
+  
+  counts_full = ( ( 3( any_nl ) ) as k0 ( 3( any_nl ) ) as k3 ( ( ( 3( any_nl ) ) as k6 ( 3( any_nl ) ) as k9 ( 3( any_nl ) ) as k12 ( ( ( 18( any_nl ) ) as k15 [ ( ( ( until "\n" ) ) as k33 ) ] ) / ( ( ( until "\n" ) ) as krest ) ) ) / ( ( ( until "\n" ) ) as krest ) ) ) as counts_full
+  
+  counts_degenerate = ( ( ( ( until "\n" ) ) as k0 ) ) as counts_degenerate
+  
+  ## One body line: the newline rides the repetition; the shape
+  ## alternatives classify the line by its leading form. The
+  ## classification never changes the engine's reads — every shape
+  ## covers every column of its line, so the column arithmetic is
+  ## shape-independent.
+  body_line = ( ( m_line / a_line / atom_line / bond_line / other_line ) ) as body_line
+  
+  ## The `M  ` property-line family: the three-character tag (CHG,
+  ## ISO, STY, SST, SCN, SLB, SAL, SBL, SMT, SDI, END, ...) then
+  ## whitespace-separated tokens, each unit carrying its whitespace
+  ## run (u0) and token (u1); a trailing whitespace run rides kt.
+  ## Unit concatenation is the line verbatim — the polymer cascade
+  ## messages quote failing lines exactly.
+  m_line = ( ( "M  " ) as k0 ( 3( any_nl ) ) as k3 [ ( ( 1*( ( ( ws_run ) as u0 ( token ) as u1 ) ) ) as units ) ] [ ( ( ws_run ) as kt ) ] ) as m_line
+  
+  ## The `A  ` alias line: the two-space prefix, then the rest of the
+  ## line (the alias index text). The alias SYMBOL rides the NEXT
+  ## body line; the engine pairs them from the ordered body list.
+  a_line = ( ( ( "A  " ) as k0 ( ( ( until "\n" ) ) as k3 ) ) ) as a_line
+  
+  ## The atom line granules: x (k0), y (k10), z (k20), the column-30
+  ## separator, the element (k31), the mass-difference columns (k34),
+  ## the charge code (k37), the skipped query columns (k40), the
+  ## valence code (k48), the remainder (k51). The element is the
+  ## first granule the engine requires.
+  atom_line = ( ( ( 10( any_nl ) ) as k0 ( 10( any_nl ) ) as k10 ( 10( any_nl ) ) as k20 ( ( ( any_nl ) as k30 ( 3( any_nl ) ) as k31 ( ( ( 3( any_nl ) ) as k34 ( 3( any_nl ) ) as k37 ( ( ( 8( any_nl ) ) as k40 ( 3( any_nl ) ) as k48 [ ( ( ( until "\n" ) ) as k51 ) ] ) ) ) ) ) ) ) ) as atom_line
+  
+  ## The bond line granules: from (k0), to (k3), kind (k6), stereo
+  ## (k9), remainder (k12). The stereo column may be absent — a
+  ## nine-character bond line reads stereo as none.
+  bond_line = ( ( ( 3( any_nl ) ) as k0 ( 3( any_nl ) ) as k3 ( 3( any_nl ) ) as k6 ( ( ( 3( any_nl ) ) as k9 [ ( ( ( until "\n" ) ) as k12 ) ] ) / ( ( ( until "\n" ) ) as k12 ) ) ) ) as bond_line
+  
+  ## Any other line, raw.
+  other_line = ( ( ( 1*( any_nl ) ) as k0 ) ) as other_line
+  
+  test mol {
+    accept "water\n  AsciiChem\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n"
+    accept "d2o\n  InChIV10\n\n  1  0  0  0  0  0  0  0  0  3 V2000\n    0.0000    0.0000    0.0000 O   0  0  0     0  0  0  0  0  0\nA  1\nOD2\nM  END\n$$$$\n"
+    accept "charged\n  t\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 N   0  0  0  5  0  0  0  0  0  0  0\nM  CHG  1   1   1\nM  END\n"
+    accept "sru\n  t\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    1.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0  0  0  0\nM  STY  1   1 SRU\nM  SAL   1  2   1   2\nM  END\n"
+    accept "ethane\n  t\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   72.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0  0  0  0  0  0  0  0\nM  END"
+    accept "short\n"
+    accept ""
+  }
+}
+  

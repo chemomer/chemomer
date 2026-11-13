@@ -27,6 +27,7 @@ pub mod key;
 pub mod layers;
 mod molfile;
 pub mod options;
+mod parg;
 pub mod reverse;
 pub mod rinchi;
 

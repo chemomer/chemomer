@@ -17,6 +17,14 @@ default = []
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
+# The ONE parse dependency: the scanners (molfile, the InChI layers,
+# RInChI) run the compiled PARG artifacts in grammar/ on parsanol's
+# portable engine — the ecosystem's parsanol pattern (the same pin
+# asciichem-rs carries).
+parsanol = "0.18.9"
+# Runtime bindings — the wasm feature gates its own dependency tree;
+# the core stays dependency-free. (Python ships from
+# chemomer/chemomer-py, Node from chemomer/chemomer-ts.)
 wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]

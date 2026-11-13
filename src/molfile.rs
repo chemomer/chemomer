@@ -53,7 +53,7 @@ fn read(input: &str, treat_polymers: bool) -> Result<Structure> {
     if counts_version(counts) == Some("V3000") {
         return parse_v3000(&lines[4..]);
     }
-    parse_v2000(&lines, counts, treat_polymers)
+    parse_v2000(input, treat_polymers)
 }
 
 /// The counts line's CTFile version tag — the whitespace token at
@@ -87,165 +87,236 @@ pub fn parse_sdf(input: &str) -> Vec<String> {
     records
 }
 
-/// Reads the V2000 positional fields: counts line, atom block, bond
-/// block, and the property-line tail. `treat_polymers` decides the
-/// Sgroup family's fate: skipped wholesale (the default read) or
-/// parsed into the polymer units (the `-Polymers` read).
-fn parse_v2000(lines: &[&str], counts: &str, treat_polymers: bool) -> Result<Structure> {
-    let atom_count: usize = counts
-        .get(0..3)
-        .unwrap_or("")
-        .trim()
-        .parse()
-        .map_err(|_| bad_counts(counts))?;
-    let bond_count: usize = counts
-        .get(3..6)
-        .unwrap_or("")
-        .trim()
-        .parse()
-        .map_err(|_| bad_counts(counts))?;
-    // The chiral flag (counts column 12–15): nonzero marks the
-    // structure chiral (the reference's FLAG_INP_AT_CHIRAL, read at
-    // mol2atom.c:483) — the SUCF option and the aux /rA letter read
-    // it.
-    let chiral_flag: u32 = counts.get(12..15).unwrap_or("").trim().parse().unwrap_or(0);
+/// Reads the V2000 positional fields from the PARG capture tree: the
+/// counts line, atom block, bond block, and the property-line tail
+/// are the grammar's ordered line captures; the charge-code table,
+/// the tolerant field defaults, and the polymer semantics stay here.
+/// `treat_polymers` decides the Sgroup family's fate: skipped
+/// wholesale (the default read) or parsed into the polymer units
+/// (the `-Polymers` read).
+fn parse_v2000(input: &str, treat_polymers: bool) -> Result<Structure> {
+    crate::parg::with_molfile_capture(input, |capture| {
+        let mol = capture
+            .child(capture.root(), "molfile")
+            .ok_or_else(|| Error::new(format!("{CONTEXT}: molfile capture missing")))?;
+        // The counts ride the column-named granules; every read goes
+        // through the same get(a..b) slices the reader always used,
+        // so a short line's tolerant defaults land identically.
+        let counts = capture
+            .array_child(&mol, "counts")
+            .ok_or_else(|| Error::new(format!("{CONTEXT}: counts capture missing")))?;
+        let counts_segments = capture.segments(&counts);
+        let atom_count: usize = counts_segments
+            .column(0, 3)
+            .unwrap_or("")
+            .trim()
+            .parse()
+            .map_err(|_| bad_counts(counts_segments.raw()))?;
+        let bond_count: usize = counts_segments
+            .column(3, 6)
+            .unwrap_or("")
+            .trim()
+            .parse()
+            .map_err(|_| bad_counts(counts_segments.raw()))?;
+        // The chiral flag (counts column 12–15): nonzero marks the
+        // structure chiral (the reference's FLAG_INP_AT_CHIRAL, read
+        // at mol2atom.c:483) — the SUCF option and the aux /rA letter
+        // read it.
+        let chiral_flag: u32 = counts_segments
+            .column(12, 15)
+            .unwrap_or("")
+            .trim()
+            .parse()
+            .unwrap_or(0);
 
-    let mut atoms = Vec::with_capacity(atom_count);
-    let mut positions = Vec::with_capacity(atom_count);
-    for index in 0..atom_count {
-        let line = line_or(lines, 4 + index, "atom block")?;
-        let element = line.get(31..34).unwrap_or("").trim().to_string();
-        if element.is_empty() {
-            return err(format!("{CONTEXT}: atom {index} has no element symbol"));
+        // Each body unit descends its capture wrappers (the shape
+        // rule nests one or more levels deep) to its positional
+        // granules. A unit without granules is a blank line: an empty
+        // segment stream (its column reads return None, exactly what
+        // slicing an empty tail line did). Only MISSING units — the
+        // counts naming more lines than the file carries — stay None,
+        // the truncated-block error the direct slice raised.
+        let body = capture
+            .array_child(&mol, "body")
+            .map(|body| capture.array_items(&body))
+            .unwrap_or_default();
+        // The repetition's array carries an empty-marker element
+        // (the match's zero-length seed) before the iterations; the
+        // iterations are arrays themselves, blank lines included.
+        let mut lines: Vec<Option<crate::parg::Segments>> = Vec::with_capacity(body.len());
+        for unit in &body {
+            if capture.is_empty_marker(unit) {
+                continue;
+            }
+            lines.push(Some(capture.segments(unit)));
         }
-        // The MDL charge code (cols 37-40): the oracle SDfile flavor
-        // carries charges here (3 = +1, 5 = −1, …); the gem's
-        // molfiles keep it zero and use M CHG instead, which wins
-        // when both appear.
-        let charge_code: u32 = line.get(37..40).unwrap_or("").trim().parse().unwrap_or(0);
-        let charge = match charge_code {
-            0 => 0,
-            1 => 3,
-            2 => 2,
-            3 => 1,
-            5 => -1,
-            6 => -2,
-            7 => -3,
-            4 => {
-                return err(format!(
-                    "{CONTEXT}: atom {index} radical charge code unsupported"
-                ));
+        if lines.len() < atom_count + bond_count {
+            lines.resize(atom_count + bond_count, None);
+        }
+
+        let mut atoms = Vec::with_capacity(atom_count);
+        let mut positions = Vec::with_capacity(atom_count);
+        for (index, line) in lines.iter_mut().enumerate().take(atom_count) {
+            let segments = line
+                .as_ref()
+                .ok_or_else(|| Error::new(format!("{CONTEXT}: truncated atom block")))?;
+            let element = segments.column(31, 34).unwrap_or("").trim().to_string();
+            if element.is_empty() {
+                return err(format!("{CONTEXT}: atom {index} has no element symbol"));
             }
-            _ => {
-                return err(format!(
-                    "{CONTEXT}: atom {index} unknown charge code {charge_code}"
-                ));
-            }
-        };
-        let x: f64 = line.get(0..10).unwrap_or("").trim().parse().unwrap_or(0.0);
-        let y: f64 = line.get(10..20).unwrap_or("").trim().parse().unwrap_or(0.0);
-        positions.push((x, y));
-        atoms.push(AtomRecord {
-            // The MDL star atom reads as the pseudo-element Zz at
-            // parse (mol_fmt1.c MolfileTreatPseudoElementAtoms:
-            // `*` ===> "Zz" when pseudo-elements are allowed); the
-            // engine's option gate decides permission.
-            element: if element == "*" {
-                "Zz".to_string()
-            } else {
-                element
-            },
-            // The H-count code field is NEVER read by the release
-            // engine: mol_fmt1.c walks it only under MOL_FMT_QUERY,
-            // and mol_fmt.h:79 sets MOL_FMT_QUERY = MOL_FMT_ABSENT —
-            // inp_num_H reaches get_num_H (util.c:862) as zero
-            // (probe-proven: a bare N carrying H-count 2 still reads
-            // H3N, oracle recording valence-codes/hcount-ignored).
-            h_count: 0,
-            // The valence code column, by contrast, IS read in the
-            // release path: the same MolfileReadField walk reads it
-            // unconditionally (mol_fmt1.c:728), calculate_valences
-            // hands it to get_num_H (mol2atom.c:963) and codes 1-15
-            // re-derive the implicit H (bonded N with code 1 reads
-            // CH3N, bare N with 15 reads bare N, a singly-bonded C
-            // with 15 reads H14 — oracle-recorded probes; the parked
-            // sodium-citrate quaternary C with code 2 reads zero H
-            // either way, max(0, 2−4) = the gap, the one case that
-            // masked the read when this unit was parked). Column
-            // arithmetic is the walk's cumulative offsets: element
-            // 31..34, mass-difference 34..36, charge 36..39, parity
-            // 39..42, the skipped query pair 42..48, valence 48..51.
-            // Malformed or out-of-S_CHAR-range bytes store 0 there
-            // (util.c MolfileReadField) — the same tolerant default.
-            valence_code: line
-                .get(48..51)
+            // The MDL charge code (cols 37-40): the oracle SDfile flavor
+            // carries charges here (3 = +1, 5 = −1, …); the gem's
+            // molfiles keep it zero and use M CHG instead, which wins
+            // when both appear.
+            let charge_code: u32 = segments
+                .column(37, 40)
                 .unwrap_or("")
                 .trim()
-                .parse::<i32>()
-                .map_or(0, |v| i16::try_from(v).unwrap_or(0)),
-            charge,
-            h_pinned: false,
-            isotope: 0,
-        });
-    }
-
-    let mut bonds = Vec::with_capacity(bond_count);
-    let mut stereo_bonds = std::collections::BTreeMap::new();
-    for index in 0..bond_count {
-        let line = line_or(lines, 4 + atom_count + index, "bond block")?;
-        let from: usize = line
-            .get(0..3)
-            .unwrap_or("")
-            .trim()
-            .parse()
-            .map_err(|_| bad(line))?;
-        let to: usize = line
-            .get(3..6)
-            .unwrap_or("")
-            .trim()
-            .parse()
-            .map_err(|_| bad(line))?;
-        let kind: u32 = line
-            .get(6..9)
-            .unwrap_or("")
-            .trim()
-            .parse()
-            .map_err(|_| bad(line))?;
-        // The stereo column may be absent (9-char bond lines — the
-        // corpus's merged molfiles): absent reads as none.
-        let stereo: u8 = line.get(9..12).unwrap_or("0").trim().parse().unwrap_or(0);
-        if stereo != 0 {
-            stereo_bonds.insert(index, stereo);
+                .parse()
+                .unwrap_or(0);
+            let charge = match charge_code {
+                0 => 0,
+                1 => 3,
+                2 => 2,
+                3 => 1,
+                5 => -1,
+                6 => -2,
+                7 => -3,
+                4 => {
+                    return err(format!(
+                        "{CONTEXT}: atom {index} radical charge code unsupported"
+                    ));
+                }
+                _ => {
+                    return err(format!(
+                        "{CONTEXT}: atom {index} unknown charge code {charge_code}"
+                    ));
+                }
+            };
+            let x: f64 = segments
+                .column(0, 10)
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .unwrap_or(0.0);
+            let y: f64 = segments
+                .column(10, 20)
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .unwrap_or(0.0);
+            positions.push((x, y));
+            atoms.push(AtomRecord {
+                // The MDL star atom reads as the pseudo-element Zz at
+                // parse (mol_fmt1.c MolfileTreatPseudoElementAtoms:
+                // `*` ===> "Zz" when pseudo-elements are allowed); the
+                // engine's option gate decides permission.
+                element: if element == "*" {
+                    "Zz".to_string()
+                } else {
+                    element
+                },
+                // The H-count code field is NEVER read by the release
+                // engine: mol_fmt1.c walks it only under MOL_FMT_QUERY,
+                // and mol_fmt.h:79 sets MOL_FMT_QUERY = MOL_FMT_ABSENT —
+                // inp_num_H reaches get_num_H (util.c:862) as zero
+                // (probe-proven: a bare N carrying H-count 2 still reads
+                // H3N, oracle recording valence-codes/hcount-ignored).
+                h_count: 0,
+                // The valence code column, by contrast, IS read in the
+                // release path: the same MolfileReadField walk reads it
+                // unconditionally (mol_fmt1.c:728), calculate_valences
+                // hands it to get_num_H (mol2atom.c:963) and codes 1-15
+                // re-derive the implicit H (bonded N with code 1 reads
+                // CH3N, bare N with 15 reads bare N, a singly-bonded C
+                // with 15 reads H14 — oracle-recorded probes; the parked
+                // sodium-citrate quaternary C with code 2 reads zero H
+                // either way, max(0, 2−4) = the gap, the one case that
+                // masked the read when this unit was parked). Column
+                // arithmetic is the walk's cumulative offsets: element
+                // 31..34, mass-difference 34..36, charge 36..39, parity
+                // 39..42, the skipped query pair 42..48, valence 48..51.
+                // Malformed or out-of-S_CHAR-range bytes store 0 there
+                // (util.c MolfileReadField) — the same tolerant default.
+                valence_code: segments
+                    .column(48, 51)
+                    .unwrap_or("")
+                    .trim()
+                    .parse::<i32>()
+                    .map_or(0, |v| i16::try_from(v).unwrap_or(0)),
+                charge,
+                h_pinned: false,
+                isotope: 0,
+            });
         }
-        bonds.push((from - 1, to - 1, kind));
-    }
 
-    let property_tail = &lines[4 + atom_count + bond_count..];
-    let isotopic_h = apply_alias_lines(property_tail, &mut atoms)?;
-    apply_property_lines(property_tail, &mut atoms)?;
-    // The default read never parses the Sgroup family (the reference's
-    // reader `continue`s past every tag with `treat_polymers` off,
-    // mol_fmt1.c:1365-1372, and warns "Ignore polymer data") — the
-    // polymer units simply do not exist for this read; the -Polymers
-    // re-read parses them.
-    let polymer = if treat_polymers {
-        parse_sgroup_lines(property_tail, atom_count, bond_count)?
-    } else {
-        None
-    };
+        let mut bonds = Vec::with_capacity(bond_count);
+        let mut stereo_bonds = std::collections::BTreeMap::new();
+        for index in 0..bond_count {
+            let segments = lines[atom_count + index]
+                .as_ref()
+                .ok_or_else(|| Error::new(format!("{CONTEXT}: truncated bond block")))?;
+            let raw = segments.raw();
+            let from: usize = segments
+                .column(0, 3)
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .map_err(|_| bad(raw))?;
+            let to: usize = segments
+                .column(3, 6)
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .map_err(|_| bad(raw))?;
+            let kind: u32 = segments
+                .column(6, 9)
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .map_err(|_| bad(raw))?;
+            // The stereo column may be absent (9-char bond lines — the
+            // corpus's merged molfiles): absent reads as none.
+            let stereo: u8 = segments
+                .column(9, 12)
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            if stereo != 0 {
+                stereo_bonds.insert(index, stereo);
+            }
+            bonds.push((from - 1, to - 1, kind));
+        }
 
-    Ok(Structure {
-        atoms,
-        bonds,
-        stereo_bonds,
-        positions,
-        isotopic_h,
-        protons_hard_moved: false,
-        ride_marks: Vec::new(),
-        taut_ext: Default::default(),
-        fold_source: Vec::new(),
-        chiral_flag: chiral_flag != 0,
-        polymer,
+        // The property tail: every body line past the blocks, as raw
+        // text. The alias / property / sgroup scans walk it the way
+        // they walked the tail's line slice.
+        let tail: Vec<&str> = lines[atom_count + bond_count..]
+            .iter()
+            .map(|segments| segments.as_ref().map_or("", crate::parg::Segments::raw))
+            .collect();
+        let isotopic_h = apply_alias_lines(&tail, &mut atoms)?;
+        apply_property_lines(&tail, &mut atoms)?;
+        let polymer = if treat_polymers {
+            parse_sgroup_lines(&tail, atom_count, bond_count)?
+        } else {
+            None
+        };
+
+        Ok(Structure {
+            atoms,
+            bonds,
+            stereo_bonds,
+            positions,
+            isotopic_h,
+            protons_hard_moved: false,
+            ride_marks: Vec::new(),
+            taut_ext: Default::default(),
+            fold_source: Vec::new(),
+            chiral_flag: chiral_flag != 0,
+            polymer,
+        })
     })
 }
 
@@ -1090,13 +1161,6 @@ fn already_have(message: &str, line: &str) -> bool {
     false
 }
 
-fn line_or<'a>(lines: &'a [&'a str], index: usize, block: &str) -> Result<&'a str> {
-    lines
-        .get(index)
-        .copied()
-        .ok_or_else(|| Error::new(format!("{CONTEXT}: truncated {block}")))
-}
-
 use crate::error::Error;
 
 fn bad_counts(line: &str) -> Error {
@@ -1123,6 +1187,21 @@ mod tests {
     /// reads as plain atoms + bonds, the reference's "Ignore polymer
     /// data" behavior (mol_fmt1.c:1365-1372; oracle probe over the
     /// recorded sup/propane-abbrev tranche fixture).
+    #[test]
+    fn debug_slb() {
+        let molfile = "sru with slb\n  chemomer\n\n  3  2  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   24.0000   24.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   36.0000   36.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0\n  2  3  1  0\nM  STY  1   1 SRU\nM  SAL   1  2   1   2\nM  SBL   1  1   1\nM  SLB  1   9   7\nM  END\n";
+        let _ = crate::parg::with_molfile_capture(molfile, |capture| {
+            let mol = capture.child(capture.root(), "molfile").expect("mol");
+            for (i, item) in capture.array_items(&mol).iter().enumerate() {
+                println!("[{i}] {item:?}");
+                for (key, inner) in capture.hash_items(item) {
+                    println!("    {key} -> {inner:?}");
+                }
+            }
+            Ok(())
+        });
+    }
+
     #[test]
     fn the_default_read_skips_superatom_lines() {
         let structure = parse(PROPANE_SUP).expect("parses");
