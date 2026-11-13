@@ -1,0 +1,63 @@
+grammar ChemomerRinchi version "1.0.0" {
+  ## The RInChI string scan — the reaction-identity layer's read half:
+  ## the `RInChI=1.00.1S/` / `RAuxInfo=1.00.1/` headers, the `<>`-framed
+  ## role groups, the `!`-framed component identifiers, and the trailing
+  ## /u (No-Structure counts) and /d (direction) tags — as a PARG text
+  ## contract. The tags ride ONLY the last group's tail (the engine's
+  ## two-pass rfind walk), anchored at the end of input; the first two
+  ## groups run verbatim to their `<>` frame. The RAuxInfo groups ride
+  ## the same shape — their aux bodies never carry /u //d tails, and
+  ## the engine reassembles each group from its component texts, so
+  ## nothing is stripped on that path.
+  ##
+  ## The component bodies' layer content stays engine-side (the
+  ## per-component standard InChIs are validated through the key
+  ## machinery); the grammar owns the framing tokenization: the group
+  ## and component delimiters, the direction-flag character, and the
+  ## No-Structure count text.
+  ##
+  ## Language notes: `until` is exclusive (the closer is restated);
+  ## [ ] is the option syntax; strict PEG — no repetition backtracking.
+
+  entry rinchi: rinchi_line
+
+  rinchi_line = ( ( ( ( until "/" ) ) as prefix ) [ "/" ( group_mid ) as first_group ] [ "<>" ( group_mid ) as second_group ] [ "<>" ( group_last ) as last_group ] ) as rinchi_line
+
+  ## A framed group before the last: `!`-framed components, verbatim;
+  ## a component also stops before a /u //d tag that would run to the
+  ## end of input (which only happens when this group IS the last
+  ## present — the tags then ride its tail).
+  group_mid = ( ( comp_mid ) 0*( ( "!" ) ( comp_mid ) as comp ) [ ( utag / dtag ) ] [ ( utag / dtag ) ] ) as group_mid
+
+  comp_mid = ( ( 0*( ( !( ( "!" ) / ( "<>" ) / tag_to_end ) %x00-10FFFF ) ) ) as text ) as comp_mid
+
+  ## The last slot: the same shape, but a component no longer stops at
+  ## the `<>` frame — a fourth `<>`-separated stretch rides inside it
+  ## verbatim, the way the reference's splitn held it.
+  group_last = ( ( comp_last ) 0*( ( "!" ) ( comp_last ) as comp ) [ ( utag / dtag ) ] [ ( utag / dtag ) ] ) as group_last
+
+  comp_last = ( ( 0*( ( !( ( "!" ) / tag_to_end ) %x00-10FFFF ) ) ) as text ) as comp_last
+
+  ## A /u //d tag whose tail runs to the end of input without crossing
+  ## a `<>` frame — the engine's rfind tag, anchored.
+  tag_to_end = ( ( ( "/u" ) / ( "/d" ) ) ( 0*( ( !( "<>" ) %x00-10FFFF ) ) ) ( !( %x00-10FFFF ) ) )
+  ## The No-Structure counts read digits and dashes; a longer tail
+  ## stops the counts and (in the reference's walk) fails the parse.
+  utag = ( ( "/u" ) ( ( 0*( ( %x30-39 / "-" ) ) ) as counts ) ) as utag
+  ## The direction tail stops before another tag start; the reference's
+  ## pass walk then reports the duplicate.
+  dtag = ( ( "/d" ) ( ( 0*( ( !( ( "/u" ) / ( "/d" ) ) %x00-10FFFF ) ) ) as rest ) ) as dtag
+
+  test rinchi {
+    accept "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d+"
+    accept "RInChI=1.00.1S/C4H8O/c1-3-4(2)5-3/h3-4H,1-2H3/t3-,4?/m0/s1<>C4H9BrO/c1-3(5)4(2)6/h3-4,6H,1-2H3/t3-,4+/m1/s1!Na.H2O/h;1H2/q+1;/p-1/d-"
+    accept "RInChI=1.00.1S/<>H2O/h1H2/d-/u1-0-0"
+    accept "RInChI=1.00.1S/H2O/h1H2"
+    accept "RInChI=1.00.1S/<>ClH/h1H!H3N/h1H3/d-"
+    accept "RInChI=1.00.1S/H2O/h1H2 x!H2O/h1H2/d+"
+    accept "RInChI=1.00.1S/H2O/h1H2/d+/d+"
+    accept "RAuxInfo=1.00.1/0/N:4,1,3,2,5/E:(1,2)(3,4)/it:im/rA:5nCCCCO/rB:N1;s2;P3;s2s3;/rC:-1.127,-.5635,0;-.4125,-.151,0;.4125,-.151,0;1.127,-.5635,0;0,.5635,0;<>0/N:4,1,3,2,6,5/it:im/rA:6nCCCCOBr/rB:s1;s2;s3;N2;P3;/rC:-.825,-.7557,0;-.4125,-.0412,0;.4125,-.0412,0;.825,.6733,0;-.626,.7557,0;.825,-.7557,0;!1/N:1;2/rA:2nNaO/rB:s1;/rC:-.4125,0,0;.4125,0,0;"
+    accept "RAuxInfo=1.00.1/<>0/N:1/rA:1nO/rB:/rC:12,12,0;"
+    accept "garbage"
+  }
+}
