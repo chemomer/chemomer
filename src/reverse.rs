@@ -150,95 +150,303 @@ pub fn structure_from_inchi(inchi: &str) -> Result<Structure> {
     reconstruct(layers)
 }
 
-/// Parses the identifier into its layers (ichiread.c's segment
-/// dispatch over the '/'-separated body).
-fn parse_layers(inchi: &str) -> Result<Layers> {
-    let rest = inchi.strip_prefix("InChI=1S/").ok_or_else(|| {
-        crate::error::Error::new(format!(
-            "{CONTEXT}: not a standard InChI (InChI=1S/) string: {inchi:?}"
-        ))
-    })?;
-    let segments: Vec<&str> = rest.split('/').collect();
-    if segments.is_empty() {
-        return err(format!("{CONTEXT}: empty identifier body"));
-    }
+/// One parsed layer segment: its shape name (the grammar's layer
+/// alphabet that matched) with the capture node, or the raw segment
+/// text when no layer alphabet matched — the engine classifies those
+/// by their first byte, the way the reference's segment dispatch did.
+enum Segment<'a> {
+    Tokens(&'static str, parsanol::portable::ast::AstNode),
+    Raw(&'a str),
+}
 
-    let mut layers = Layers::default();
-    parse_formula(segments[0], &mut layers)?;
-
-    let mut seen_isotope = false;
-    for segment in &segments[1..] {
-        let head = segment.as_bytes().first().copied().unwrap_or(b'\0');
-        match head {
-            b'c' => parse_connections(segment, &mut layers)?,
-            b'h' if !seen_isotope => parse_hydrogen(segment, &mut layers)?,
-            b'q' => parse_charge(segment, &mut layers)?,
-            b'p' => parse_protons(segment, &mut layers)?,
-            b'i' => {
-                seen_isotope = true;
-                parse_isotope(segment, &mut layers)?;
-            }
-            // The isotopic-layer exchangeable-H record: `hD2` after an
-            // (empty) /i segment (ParseSegmentIsoExchgH).
-            b'h' => parse_exchanged_hydrogen(segment, &mut layers)?,
-            b'b' => parse_stereo_bonds(segment, &mut layers)?,
-            b't' => parse_stereo_centers(segment, &mut layers)?,
-            b'm' => parse_inversion(segment, &mut layers)?,
-            b's' => parse_stereo_type(segment, &mut layers)?,
-            b'f' => {
-                return err(format!(
-                    "{CONTEXT}: Fixed-H layer (/f) is out of the reverse slice: {inchi:?}"
-                ));
-            }
-            _ => {
-                return err(format!(
-                    "{CONTEXT}: unrecognized layer segment {segment:?} in {inchi:?}"
-                ));
-            }
+impl<'a> Segment<'a> {
+    /// The segment's verbatim text (its raw text, or the capture's
+    /// input span) — the error messages quote it whole.
+    fn text(&self, capture: &crate::parg::Capture<'a>) -> &'a str {
+        match self {
+            Segment::Tokens(_, node) => capture.text(node),
+            Segment::Raw(text) => text,
         }
     }
-    Ok(layers)
+
+    /// The layer's head byte ('c', 'h', ...).
+    fn head(&self, capture: &crate::parg::Capture<'a>) -> u8 {
+        self.text(capture)
+            .as_bytes()
+            .first()
+            .copied()
+            .unwrap_or(b'\0')
+    }
+
+    /// The body after the head letter.
+    fn body(&self, capture: &crate::parg::Capture<'a>) -> &'a str {
+        let text = self.text(capture);
+        text.get(1..).unwrap_or("")
+    }
+}
+
+/// Classifies a segment no layer alphabet matched. The reference's
+/// per-layer walkers checked the out-of-slice markers (`;` component
+/// separators, `*` multipliers, abc compression) before the token
+/// walk, and this ordering is reproduced here byte-for-byte.
+fn classify_raw(
+    kind: u8,
+    segment: &Segment,
+    capture: &crate::parg::Capture,
+) -> crate::error::Error {
+    let segment_text = segment.text(capture);
+    let body = segment.body(capture);
+    let multi = || body.contains(';') || body.contains('*');
+    let compressed = || body.bytes().any(|b| b.is_ascii_uppercase());
+    crate::error::Error::new(match kind {
+        b'c' if body.contains(';') => {
+            format!("{CONTEXT}: multi-component /c layer is out of the reverse slice")
+        }
+        b'c' if body.contains('*') => {
+            format!("{CONTEXT}: component-multiplied /c layer is out of the reverse slice")
+        }
+        b'c' if compressed() => {
+            format!("{CONTEXT}: compressed (abc) /c layer is out of the reverse slice")
+        }
+        b'c' => format!("{CONTEXT}: unexpected character in /c {segment_text:?}"),
+        b'h' if multi() => {
+            format!("{CONTEXT}: multi-component /h layer is out of the reverse slice")
+        }
+        b'h' => format!("{CONTEXT}: expected atom number in /h {segment_text:?}"),
+        b'q' if multi() => {
+            format!("{CONTEXT}: multi-component /q layer is out of the reverse slice")
+        }
+        b'q' => format!("{CONTEXT}: expected +/- value in {segment_text:?}"),
+        b'p' if body.contains(';') => {
+            format!("{CONTEXT}: multi-component /p layer is out of the reverse slice")
+        }
+        b'p' => format!("{CONTEXT}: expected +/- value in {segment_text:?}"),
+        b'i' if multi() => {
+            format!("{CONTEXT}: multi-component /i layer is out of the reverse slice")
+        }
+        b'i' => format!("{CONTEXT}: expected atom number in /i {segment_text:?}"),
+        b'b' | b't' | b'm' | b's' if multi() || compressed() => format!(
+            "{CONTEXT}: multi-component or multiplied stereo segment {segment_text:?} is out of the reverse slice"
+        ),
+        b'b' | b't' | b'm' | b's' if compressed() => format!(
+            "{CONTEXT}: compressed (abc) stereo segment {segment_text:?} is out of the reverse slice"
+        ),
+        b'b' if body.is_empty() => format!("{CONTEXT}: empty /b layer in {segment_text:?}"),
+        b't' if body.is_empty() => format!("{CONTEXT}: empty /t layer in {segment_text:?}"),
+        b'm' => format!(
+            "{CONTEXT}: unsupported /m layer {segment_text:?} (per-component dots and other forms are out of the reverse slice)"
+        ),
+        b's' => format!("{CONTEXT}: unsupported /s layer {segment_text:?}"),
+        _ => format!("{CONTEXT}: unrecognized layer segment {segment_text:?}"),
+    })
+}
+
+/// Parses the identifier into its layers: the grammar segments the
+/// body into its layer token streams (each shape name names the
+/// layer), and this walk applies the reference's semantic checks —
+/// ichiread.c's segment dispatch over the '/'-separated body.
+fn parse_layers(inchi: &str) -> Result<Layers> {
+    crate::parg::with_inchi_capture(inchi, |capture| {
+        let string = capture
+            .child(capture.root(), "inchi_string")
+            .ok_or_else(|| crate::error::Error::new(format!("{CONTEXT}: inchi capture missing")))?;
+        // The prefix up to the first slash must speak the standard
+        // flavor.
+        let prefix = capture
+            .array_child(&string, "prefix")
+            .map(|node| capture.text(&node))
+            .unwrap_or("");
+        if prefix != "InChI=1S" {
+            return err(format!(
+                "{CONTEXT}: not a standard InChI (InChI=1S/) string: {inchi:?}"
+            ));
+        }
+
+        let mut segments: Vec<Segment> = Vec::new();
+        if let Some(first) = capture.array_child(&string, "first_seg") {
+            segments.push(segment_of(&capture, &first));
+        }
+        if let Some(segs) = capture.array_child(&string, "segs") {
+            for unit in capture.array_items(&segs).iter() {
+                if capture.is_empty_marker(unit) {
+                    continue;
+                }
+                if let Some(seg) = capture.deep_child(unit, "seg") {
+                    segments.push(segment_of(&capture, &seg));
+                }
+            }
+        }
+        if segments.is_empty() {
+            return err(format!("{CONTEXT}: empty identifier body"));
+        }
+
+        let mut layers = Layers::default();
+        parse_formula(&segments[0], &capture, &mut layers)?;
+
+        let mut seen_isotope = false;
+        for segment in &segments[1..] {
+            let head = segment.head(&capture);
+            match (segment, head) {
+                (Segment::Tokens("c_seg", node), _) => {
+                    parse_connections(node.clone(), &capture, &mut layers)?
+                }
+                (Segment::Tokens("h_seg", node), _) if !seen_isotope => {
+                    parse_hydrogen(node.clone(), &capture, &mut layers)?
+                }
+                (Segment::Tokens("q_seg", node), _) => {
+                    parse_charge(node.clone(), &capture, &mut layers)?
+                }
+                (Segment::Tokens("p_seg", node), _) => {
+                    parse_protons(node.clone(), &capture, &mut layers)?
+                }
+                (Segment::Tokens("i_seg", node), _) => {
+                    seen_isotope = true;
+                    parse_isotope(node.clone(), &capture, &mut layers)?;
+                }
+                // The isotopic-layer exchangeable-H record: `hD2` after
+                // an (empty) /i segment (ParseSegmentIsoExchgH).
+                (Segment::Tokens("exh_seg", node), _) if seen_isotope => {
+                    parse_exchanged_hydrogen(node.clone(), &capture, &mut layers)?
+                }
+                (Segment::Tokens("b_seg", node), _) => {
+                    parse_stereo_bonds(node.clone(), &capture, &mut layers)?
+                }
+                (Segment::Tokens("t_seg", node), _) => {
+                    parse_stereo_centers(node.clone(), &capture, &mut layers)?
+                }
+                (Segment::Tokens("m_seg", node), _) => {
+                    parse_inversion(node.clone(), &capture, &mut layers)?
+                }
+                (Segment::Tokens("s_seg", node), _) => {
+                    parse_stereo_type(node.clone(), &capture, &mut layers)?
+                }
+                (_, b'f') => {
+                    return err(format!(
+                        "{CONTEXT}: Fixed-H layer (/f) is out of the reverse slice: {inchi:?}"
+                    ));
+                }
+                // An /h-shaped segment after the /i layer is the
+                // exchangeable-H record: the fixed-H alphabet never
+                // matches a T/D run (and vice versa), so a shape in
+                // the wrong dispatch state is the reference's read
+                // error.
+                (Segment::Tokens("h_seg", _), _) => {
+                    return err(format!(
+                        "{CONTEXT}: unexpected exchangeable-H marker in {:?}",
+                        segment.text(&capture)
+                    ));
+                }
+                (Segment::Tokens("exh_seg", _), _) => {
+                    return err(format!(
+                        "{CONTEXT}: unexpected exchangeable-H marker in {:?}",
+                        segment.text(&capture)
+                    ));
+                }
+                (Segment::Raw(_), _) => return Err(classify_raw(head, segment, &capture)),
+                (Segment::Tokens(_, _), _) => {
+                    return err(format!(
+                        "{CONTEXT}: unrecognized layer segment {:?} in {inchi:?}",
+                        segment.text(&capture)
+                    ));
+                }
+            }
+        }
+        Ok(layers)
+    })
+}
+
+/// One segment's shape: the single-key capture (`{c_seg: ...}`) names
+/// the layer alphabet; the unshaped fallback carries the raw text.
+fn segment_of<'a>(
+    capture: &crate::parg::Capture<'a>,
+    seg: &parsanol::portable::ast::AstNode,
+) -> Segment<'a> {
+    let mut inner = seg.clone();
+    if let Some((name, value)) = capture.unwrap_single(&inner) {
+        if is_shape(&name) {
+            return Segment::Tokens(leak_kind(&name), value);
+        }
+        inner = value;
+    }
+    if let Some((name, value)) = capture.find_shape(&inner, 0) {
+        return Segment::Tokens(leak_kind(&name), value);
+    }
+    Segment::Raw(capture.text(seg))
+}
+
+/// Whether a capture name names a layer shape (the grammar's fixed
+/// set) or the raw fallback.
+fn is_shape(name: &str) -> bool {
+    name.ends_with("_seg") || name == "raw"
+}
+
+/// The shape names are the fixed grammar set.
+fn leak_kind(name: &str) -> &'static str {
+    match name {
+        "formula_seg" => "formula_seg",
+        "c_seg" => "c_seg",
+        "exh_seg" => "exh_seg",
+        "h_seg" => "h_seg",
+        "q_seg" => "q_seg",
+        "p_seg" => "p_seg",
+        "i_seg" => "i_seg",
+        "b_seg" => "b_seg",
+        "t_seg" => "t_seg",
+        "m_seg" => "m_seg",
+        "s_seg" => "s_seg",
+        "f_seg" => "f_seg",
+        "raw" => "raw",
+        _ => "raw",
+    }
 }
 
 /// Formula layer → heavy element list (canonical numbering) plus the
 /// formula H count. The reference numbers heavy atoms only, in the
 /// formula's Hill order, ignoring H entirely (ichiread.c:10129-10169);
 /// an H-only formula is the single-atom bridge case (ichiread.c:10171).
-fn parse_formula(segment: &str, layers: &mut Layers) -> Result<()> {
-    if segment.contains('.') {
+fn parse_formula(
+    segment: &Segment,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let Segment::Tokens("formula_seg", node) = segment else {
+        let segment_text = segment.text(capture);
+        if segment_text.contains('.') {
+            return err(format!(
+                "{CONTEXT}: multi-component formula {segment_text:?} is out of the reverse slice"
+            ));
+        }
         return err(format!(
-            "{CONTEXT}: multi-component formula {segment:?} is out of the reverse slice"
+            "{CONTEXT}: malformed formula layer {segment_text:?}"
         ));
-    }
-    let bytes = segment.as_bytes();
-    let mut index = 0;
+    };
+    let segment_text = segment.text(capture);
     let mut hydrogens = 0u32;
-    while index < bytes.len() {
-        let upper = bytes[index];
-        if !upper.is_ascii_uppercase() {
-            return err(format!("{CONTEXT}: malformed formula layer {segment:?}"));
-        }
-        let mut symbol = String::new();
-        symbol.push(upper as char);
-        index += 1;
-        if index < bytes.len() && bytes[index].is_ascii_lowercase() {
-            symbol.push(bytes[index] as char);
-            index += 1;
-        }
-        let mut count = 1u32;
-        let start = index;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-        if index > start {
-            count = segment[start..index].parse().map_err(|_| {
+    let Some(elements) = capture.deep_child(node, "elements") else {
+        return Ok(());
+    };
+    for unit in capture.reps(&elements, "element") {
+        let upper = capture
+            .deep_child(&unit, "upper")
+            .map(|n| capture.text(&n))
+            .unwrap_or("");
+        let lower = capture
+            .deep_child(&unit, "lower")
+            .map(|n| capture.text(&n))
+            .unwrap_or("");
+        let symbol = format!("{upper}{lower}");
+        let count = capture
+            .deep_child(&unit, "cnt")
+            .map(|n| capture.text(&n))
+            .unwrap_or("1")
+            .parse()
+            .map_err(|_| {
                 crate::error::Error::new(format!(
-                    "{CONTEXT}: malformed count in formula {segment:?}"
+                    "{CONTEXT}: malformed count in formula {segment_text:?}"
                 ))
             })?;
-        }
         if count == 0 {
-            return err(format!("{CONTEXT}: zero count in formula {segment:?}"));
+            return err(format!("{CONTEXT}: zero count in formula {segment_text:?}"));
         }
         if symbol == "H" {
             hydrogens += count;
@@ -268,30 +476,14 @@ fn parse_formula(segment: &str, layers: &mut Layers) -> Result<()> {
 /// number bonds back to the opener; `,` bonds another branch member to
 /// the same opener; `)` pops one level, bonds the next number to the
 /// popped base and continues the chain from that number.
-fn parse_connections(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = &segment[1..];
-    if body.contains(';') {
-        return err(format!(
-            "{CONTEXT}: multi-component /c layer is out of the reverse slice"
-        ));
-    }
-    if body.contains('*') {
-        return err(format!(
-            "{CONTEXT}: component-multiplied /c layer is out of the reverse slice"
-        ));
-    }
-    if body.bytes().any(|b| b.is_ascii_uppercase()) {
-        return err(format!(
-            "{CONTEXT}: compressed (abc) /c layer is out of the reverse slice"
-        ));
-    }
-    let bytes = body.as_bytes();
-    let mut index = 0usize;
-    // Depth stack of "current base" atoms; capacity matches the
-    // reference's LAST_AT_LEN bracket without its arbitrary bound.
+fn parse_connections(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let segment = capture.text(&node);
     let mut stack: Vec<usize> = Vec::new();
-    // State: None (expect first number), or the last separator seen.
-    #[derive(PartialEq, Clone, Copy)]
+    #[derive(Debug, PartialEq, Clone, Copy)]
     enum State {
         Start,
         Number,
@@ -302,97 +494,109 @@ fn parse_connections(segment: &str, layers: &mut Layers) -> Result<()> {
     }
     let mut state = State::Start;
     let mut highest = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        match byte {
-            b'(' | b')' | b',' | b'-' => {
-                if state != State::Number {
-                    return err(format!("{CONTEXT}: misplaced separator in /c {segment:?}"));
-                }
-                state = match byte {
-                    b'(' => State::Open,
-                    b')' => State::Close,
-                    b',' => State::Comma,
-                    _ => State::Dash,
-                };
-                index += 1;
+    let atom = |node: &parsanol::portable::ast::AstNode| -> Result<usize> {
+        capture.text(node).parse().map_err(|_| {
+            crate::error::Error::new(format!("{CONTEXT}: bad atom number in /c {segment:?}"))
+        })
+    };
+    let first = capture.deep_child(&node, "first");
+    let pairs = capture
+        .deep_child(&node, "pairs")
+        .map(|pairs| capture.iterations(&pairs))
+        .unwrap_or_default();
+    // (the walk below drives over the token stream)
+    let mut tokens: Vec<(Option<char>, usize)> = Vec::new();
+    if let Some(first) = first {
+        tokens.push((None, atom(&first)?));
+    }
+    for unit in &pairs {
+        let sep = capture
+            .deep_child(unit, "sep")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .as_bytes()
+            .first()
+            .copied()
+            .map(|b| b as char);
+        let num = capture.deep_child(unit, "num").ok_or_else(|| {
+            crate::error::Error::new(format!("{CONTEXT}: bad atom number in /c {segment:?}"))
+        })?;
+        tokens.push((sep, atom(&num)?));
+    }
+    for (separator, atom) in tokens {
+        // The separator transitions the branch state; the paired
+        // number then lands per that state (the reference's char walk
+        // processes each character in the same pass).
+        if let Some(sep) = separator {
+            if state != State::Number {
+                return err(format!("{CONTEXT}: misplaced separator in /c {segment:?}"));
             }
-            b'0'..=b'9' => {
-                let start = index;
-                while index < bytes.len() && bytes[index].is_ascii_digit() {
-                    index += 1;
-                }
-                let atom: usize = body[start..index].parse().map_err(|_| {
+            state = match sep {
+                '(' => State::Open,
+                ')' => State::Close,
+                ',' => State::Comma,
+                _ => State::Dash,
+            };
+        }
+        if atom == 0 || atom > layers.elements.len() + 1 {
+            return err(format!(
+                "{CONTEXT}: /c atom {atom} out of range 1..={} in {segment:?}",
+                layers.elements.len()
+            ));
+        }
+        highest = highest.max(atom);
+        match state {
+            State::Start => {
+                stack.push(atom);
+                state = State::Number;
+            }
+            State::Open => {
+                let base = *stack.last().ok_or_else(|| {
                     crate::error::Error::new(format!(
-                        "{CONTEXT}: bad atom number in /c {segment:?}"
+                        "{CONTEXT}: branch without base in /c {segment:?}"
                     ))
                 })?;
-                if atom == 0 || atom > layers.elements.len() + 1 {
-                    return err(format!(
-                        "{CONTEXT}: /c atom {atom} out of range 1..={} in {segment:?}",
-                        layers.elements.len()
-                    ));
-                }
-                highest = highest.max(atom);
-                match state {
-                    State::Start => {
-                        stack.push(atom);
-                        state = State::Number;
-                    }
-                    State::Open => {
-                        let base = *stack.last().ok_or_else(|| {
-                            crate::error::Error::new(format!(
-                                "{CONTEXT}: branch without base in /c {segment:?}"
-                            ))
-                        })?;
-                        layers.bonds.push((base - 1, atom - 1));
-                        stack.push(atom);
-                        state = State::Number;
-                    }
-                    State::Close => {
-                        if stack.len() < 2 {
-                            return err(format!("{CONTEXT}: unbalanced ')' in /c {segment:?}"));
-                        }
-                        stack.pop();
-                        let base = *stack.last().ok_or_else(|| {
-                            crate::error::Error::new(format!(
-                                "{CONTEXT}: pop without base in /c {segment:?}"
-                            ))
-                        })?;
-                        layers.bonds.push((base - 1, atom - 1));
-                        *stack.last_mut().expect("depth") = atom;
-                        state = State::Number;
-                    }
-                    State::Comma => {
-                        if stack.len() < 2 {
-                            return err(format!(
-                                "{CONTEXT}: ',' outside a branch in /c {segment:?}"
-                            ));
-                        }
-                        let base = stack[stack.len() - 2];
-                        layers.bonds.push((base - 1, atom - 1));
-                        *stack.last_mut().expect("depth") = atom;
-                        state = State::Number;
-                    }
-                    State::Dash => {
-                        let base = *stack.last().ok_or_else(|| {
-                            crate::error::Error::new(format!(
-                                "{CONTEXT}: chain without base in /c {segment:?}"
-                            ))
-                        })?;
-                        layers.bonds.push((base - 1, atom - 1));
-                        *stack.last_mut().expect("depth") = atom;
-                        state = State::Number;
-                    }
-                    State::Number => {
-                        return err(format!(
-                            "{CONTEXT}: adjacent atom numbers in /c {segment:?}"
-                        ));
-                    }
-                }
+                layers.bonds.push((base - 1, atom - 1));
+                stack.push(atom);
+                state = State::Number;
             }
-            _ => {
-                return err(format!("{CONTEXT}: unexpected character in /c {segment:?}"));
+            State::Close => {
+                if stack.len() < 2 {
+                    return err(format!("{CONTEXT}: unbalanced ')' in /c {segment:?}"));
+                }
+                stack.pop();
+                let base = *stack.last().ok_or_else(|| {
+                    crate::error::Error::new(format!(
+                        "{CONTEXT}: pop without base in /c {segment:?}"
+                    ))
+                })?;
+                layers.bonds.push((base - 1, atom - 1));
+                *stack.last_mut().expect("depth") = atom;
+                state = State::Number;
+            }
+            State::Comma => {
+                if stack.len() < 2 {
+                    return err(format!("{CONTEXT}: ',' outside a branch in /c {segment:?}"));
+                }
+                let base = stack[stack.len() - 2];
+                layers.bonds.push((base - 1, atom - 1));
+                *stack.last_mut().expect("depth") = atom;
+                state = State::Number;
+            }
+            State::Dash => {
+                let base = *stack.last().ok_or_else(|| {
+                    crate::error::Error::new(format!(
+                        "{CONTEXT}: chain without base in /c {segment:?}"
+                    ))
+                })?;
+                layers.bonds.push((base - 1, atom - 1));
+                *stack.last_mut().expect("depth") = atom;
+                state = State::Number;
+            }
+            State::Number => {
+                return err(format!(
+                    "{CONTEXT}: adjacent atom numbers in /c {segment:?}"
+                ));
             }
         }
     }
@@ -421,210 +625,182 @@ fn parse_connections(segment: &str, layers: &mut Layers) -> Result<()> {
 /// prefix lists `<atoms>H<count>` tokens (ranges allowed); everything
 /// from the first `(` is the `(H<count>,atoms...)` group sequence
 /// (ichiread.c:8568-8641 immobile, 8848-8990 groups).
-fn parse_hydrogen(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = &segment[1..];
-    if body.contains(';') || body.contains('*') {
-        return err(format!(
-            "{CONTEXT}: multi-component /h layer is out of the reverse slice"
-        ));
-    }
+fn parse_hydrogen(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let segment = capture.text(&node);
     let n = layers.elements.len();
     layers.fixed_h = vec![0; n];
-    let group_start = body.find('(').unwrap_or(body.len());
-    let (immobile, groups) = body.split_at(group_start);
 
-    // Immobile tokens: "1-2,3H2,4,5H3" — atoms before the 'H', count
-    // after it. Lowercase 'h' reads negative (the FixedH subtractive
-    // form; refused here — slice 1 sees 'H' only).
-    let mut index = 0usize;
-    let bytes = immobile.as_bytes();
-    while index < bytes.len() {
-        // Atom list: "a", "a-b", or comma-joined lists.
-        let mut covered: Vec<usize> = Vec::new();
-        loop {
-            let start = index;
-            while index < bytes.len() && bytes[index].is_ascii_digit() {
-                index += 1;
-            }
-            if index == start {
-                return err(format!("{CONTEXT}: expected atom number in /h {segment:?}"));
-            }
-            let first: usize = immobile[start..index].parse().map_err(|_| {
-                crate::error::Error::new(format!("{CONTEXT}: bad atom in /h {segment:?}"))
+    // The immobile tokens: the first, then its comma-joined rest.
+    // Each token's atom list is itself comma-joined (the reference's
+    // list items, each a number with an optional range).
+    let mut tokens: Vec<parsanol::portable::ast::AstNode> = Vec::new();
+    if let Some(token) = capture.deep_child(&node, "token") {
+        tokens.push(token);
+    }
+    if let Some(rest) = capture.deep_child(&node, "rest") {
+        tokens.extend(capture.reps(&rest, "token"));
+    }
+    let mut placed: Vec<usize> = Vec::new();
+    for token in &tokens {
+        let marker = capture
+            .deep_child(token, "marker")
+            .map(|n| capture.text(&n))
+            .unwrap_or("H")
+            .as_bytes()
+            .first()
+            .copied()
+            .unwrap_or(b'H');
+        if marker == b'h' {
+            return err(format!(
+                "{CONTEXT}: negative /h counts are FixedH-layer territory: {segment:?}"
+            ));
+        }
+        let count: u32 = capture
+            .deep_child(token, "cnt")
+            .map(|n| capture.text(&n))
+            .unwrap_or("1")
+            .parse()
+            .map_err(|_| {
+                crate::error::Error::new(format!("{CONTEXT}: bad H count in /h {segment:?}"))
             })?;
-            let mut last = first;
-            if index < bytes.len() && bytes[index] == b'-' {
-                index += 1;
-                let rstart = index;
-                while index < bytes.len() && bytes[index].is_ascii_digit() {
-                    index += 1;
-                }
-                last = immobile[rstart..index].parse().map_err(|_| {
-                    crate::error::Error::new(format!("{CONTEXT}: bad range in /h {segment:?}"))
+        if count > i32::MAX as u32 {
+            return err(format!("{CONTEXT}: absurd H count in /h {segment:?}"));
+        }
+        // The atom list: a leading number, then ,/- joined numbers —
+        // a '-' ends the current item with a range top, a ',' closes
+        // the item and opens the next (the reference's atom list).
+        let Some(h_list) = capture.deep_child(token, "list") else {
+            continue;
+        };
+        let Some(first_node) = capture.deep_child(&h_list, "first") else {
+            continue;
+        };
+        let first: usize = capture.text(&first_node).parse().map_err(|_| {
+            crate::error::Error::new(format!("{CONTEXT}: bad atom in /h {segment:?}"))
+        })?;
+        let mut items: Vec<(usize, Option<usize>)> = vec![(first, None)];
+        let Some(pairs) = capture.deep_child(&h_list, "pairs") else {
+            continue;
+        };
+        for unit in capture.iterations(&pairs) {
+            let sep = capture
+                .deep_child(&unit, "sep")
+                .map(|n| capture.text(&n))
+                .unwrap_or("")
+                .as_bytes()
+                .first()
+                .copied()
+                .unwrap_or(b',');
+            let num: usize = capture
+                .deep_child(&unit, "num")
+                .map(|n| capture.text(&n))
+                .unwrap_or("")
+                .parse()
+                .map_err(|_| {
+                    crate::error::Error::new(format!("{CONTEXT}: bad atom in /h {segment:?}"))
                 })?;
+            match sep {
+                b'-' => {
+                    let last = items.last_mut().expect("seeded");
+                    last.1 = Some(num);
+                }
+                _ => items.push((num, None)),
             }
+        }
+        for (first, last) in items {
+            let last = last.unwrap_or(first);
             if first == 0 || last < first || last > n {
                 return err(format!(
                     "{CONTEXT}: /h atom range {first}-{last} out of 1..{n} in {segment:?}"
                 ));
             }
-            covered.extend(first..=last);
-            if index < bytes.len() && bytes[index] == b',' {
-                index += 1;
-                continue;
+            for atom in first..=last {
+                layers.fixed_h[atom - 1] = count;
+                placed.push(atom);
             }
-            break;
-        }
-        // The H marker with optional count.
-        if index >= bytes.len() || (bytes[index] != b'H' && bytes[index] != b'h') {
-            return err(format!(
-                "{CONTEXT}: expected H count after atom list in /h {segment:?}"
-            ));
-        }
-        let negative = bytes[index] == b'h';
-        index += 1;
-        let cstart = index;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-        let count: u32 = if index > cstart {
-            immobile[cstart..index].parse().map_err(|_| {
-                crate::error::Error::new(format!("{CONTEXT}: bad H count in /h {segment:?}"))
-            })?
-        } else {
-            1
-        };
-        if negative {
-            return err(format!(
-                "{CONTEXT}: negative /h counts are FixedH-layer territory: {segment:?}"
-            ));
-        }
-        if count > i32::MAX as u32 {
-            return err(format!("{CONTEXT}: absurd H count in /h {segment:?}"));
-        }
-        for atom in covered {
-            layers.fixed_h[atom - 1] = count;
-        }
-        if index < bytes.len() && bytes[index] == b',' {
-            index += 1;
         }
     }
 
-    // Mobile groups: "(H<count>,a,b,...)(H<count2>,...)".
-    let mut rest = groups;
-    while !rest.is_empty() {
-        let bytes = rest.as_bytes();
-        if bytes.first() != Some(&b'(') {
-            return err(format!("{CONTEXT}: expected (H group in /h {segment:?}"));
-        }
-        let mut index = 1usize;
-        // H with optional count.
-        if bytes.get(index) != Some(&b'H') {
-            return err(format!("{CONTEXT}: group must start 'H' in /h {segment:?}"));
-        }
-        index += 1;
-        let cstart = index;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-        let hydrogens: u32 = if index > cstart {
-            rest[cstart..index].parse().map_err(|_| {
+    // The mobile groups: "(H<count>,a,b,...)".
+    let groups = capture
+        .deep_child(&node, "h_groups")
+        .map(|g| capture.reps(&g, "h_group"))
+        .unwrap_or_default();
+    for group in groups {
+        let hydrogens: u32 = capture
+            .deep_child(&group, "hcnt")
+            .map(|n| capture.text(&n))
+            .unwrap_or("1")
+            .parse()
+            .map_err(|_| {
                 crate::error::Error::new(format!("{CONTEXT}: bad group H count in /h {segment:?}"))
-            })?
-        } else {
-            1
-        };
-        // Optional minus charge inside the group — FixedH territory,
-        // refused in this slice.
-        let mut minus = 0u32;
-        if bytes.get(index) == Some(&b'-') {
-            index += 1;
-            let mstart = index;
-            while index < bytes.len() && bytes[index].is_ascii_digit() {
-                index += 1;
-            }
-            minus = if index > mstart {
-                rest[mstart..index].parse().map_err(|_| {
-                    crate::error::Error::new(format!(
-                        "{CONTEXT}: bad group minus count in /h {segment:?}"
-                    ))
-                })?
-            } else {
-                1
-            };
-        }
-        if minus > 0 {
+            })?;
+        if capture.deep_child(&group, "minus").is_some() {
             return err(format!(
                 "{CONTEXT}: minus-in-group is FixedH territory: {segment:?}"
             ));
         }
-        if bytes.get(index) != Some(&b',') {
+        let Some(endpoints) = capture.deep_child(&group, "h_endpoints") else {
             return err(format!(
-                "{CONTEXT}: expected ',' before endpoints in /h {segment:?}"
+                "{CONTEXT}: expected endpoint atom in /h {segment:?}"
             ));
-        }
-        index += 1;
-        let mut endpoints = Vec::new();
-        loop {
-            let start = index;
-            while index < bytes.len() && bytes[index].is_ascii_digit() {
-                index += 1;
-            }
-            if index == start {
-                return err(format!(
-                    "{CONTEXT}: expected endpoint atom in /h {segment:?}"
-                ));
-            }
-            let atom: usize = rest[start..index].parse().map_err(|_| {
+        };
+        let mut atoms: Vec<usize> = Vec::new();
+        let first: usize = capture
+            .deep_child(&endpoints, "first")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .parse()
+            .map_err(|_| {
                 crate::error::Error::new(format!("{CONTEXT}: bad endpoint in /h {segment:?}"))
             })?;
-            if atom == 0 || atom > n {
+        atoms.push(first);
+        if let Some(rest) = capture.deep_child(&endpoints, "rest") {
+            for unit in capture.reps(&rest, "more") {
+                let atom: usize = capture.text(&unit).parse().map_err(|_| {
+                    crate::error::Error::new(format!("{CONTEXT}: bad endpoint in /h {segment:?}"))
+                })?;
+                atoms.push(atom);
+            }
+        }
+        for atom in &atoms {
+            if *atom == 0 || *atom > n {
                 return err(format!(
                     "{CONTEXT}: endpoint {atom} out of 1..{n} in /h {segment:?}"
                 ));
             }
-            endpoints.push(atom - 1);
-            if bytes.get(index) == Some(&b',') {
-                index += 1;
-                continue;
-            }
-            break;
         }
-        if bytes.get(index) != Some(&b')') {
-            return err(format!("{CONTEXT}: unterminated group in /h {segment:?}"));
-        }
-        index += 1;
         layers.groups.push(MobileGroup {
             hydrogens,
-            endpoints,
+            endpoints: atoms.into_iter().map(|a| a - 1).collect(),
         });
-        rest = &rest[index..];
     }
     Ok(())
 }
 
 /// /q layer → component total charge (ichiread.c:8096-8130).
-fn parse_charge(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = &segment[1..];
-    if body.contains(';') || body.contains('*') {
-        return err(format!(
-            "{CONTEXT}: multi-component /q layer is out of the reverse slice"
-        ));
-    }
-    let value = signed_value(body, segment)?;
-    layers.charge = value;
+fn parse_charge(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let segment = capture.text(&node);
+    layers.charge = signed_pair(node, capture, segment)?;
     Ok(())
 }
 
 /// /p layer → proton shift (ichiread.c:7450-7465: a single ±N).
-fn parse_protons(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = &segment[1..];
-    if body.contains(';') {
-        return err(format!(
-            "{CONTEXT}: multi-component /p layer is out of the reverse slice"
-        ));
-    }
-    let value = signed_value(body, segment)?;
+fn parse_protons(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let segment = capture.text(&node);
+    let value = signed_pair(node, capture, segment)?;
     if value == 0 {
         return err(format!("{CONTEXT}: /p 0 is not a valid proton shift"));
     }
@@ -632,21 +808,31 @@ fn parse_protons(segment: &str, layers: &mut Layers) -> Result<()> {
     Ok(())
 }
 
-fn signed_value(body: &str, segment: &str) -> Result<i32> {
-    let bytes = body.as_bytes();
-    let (sign, start) = match bytes.first() {
-        Some(b'+') => (1i32, 1usize),
-        Some(b'-') => (-1i32, 1usize),
-        _ => {
-            return err(format!("{CONTEXT}: expected +/- value in {segment:?}"));
-        }
+/// The sign/magnitude pair both /q and /p carry.
+fn signed_pair(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    segment: &str,
+) -> Result<i32> {
+    let sign: i32 = match capture
+        .deep_child(&node, "sign")
+        .map(|n| capture.text(&n))
+        .unwrap_or("")
+        .as_bytes()
+        .first()
+    {
+        Some(b'+') => 1,
+        Some(b'-') => -1,
+        _ => return err(format!("{CONTEXT}: expected +/- value in {segment:?}")),
     };
-    if !bytes.get(start).is_some_and(|b| b.is_ascii_digit()) {
-        return err(format!("{CONTEXT}: expected digits in {segment:?}"));
-    }
-    let magnitude: i32 = body[start..].parse().map_err(|_| {
-        crate::error::Error::new(format!("{CONTEXT}: value out of range in {segment:?}"))
-    })?;
+    let magnitude: i32 = capture
+        .deep_child(&node, "digits")
+        .map(|n| capture.text(&n))
+        .unwrap_or("")
+        .parse()
+        .map_err(|_| {
+            crate::error::Error::new(format!("{CONTEXT}: value out of range in {segment:?}"))
+        })?;
     Ok(sign * magnitude)
 }
 
@@ -654,143 +840,140 @@ fn signed_value(body: &str, segment: &str) -> Result<i32> {
 /// `atom[±delta][T[n]][D[n]][H[n]]`, comma separated). An empty body
 /// records "no atom isotopes"; a following `h`-segment then carries
 /// the exchangeable-H counts.
-fn parse_isotope(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = &segment[1..];
-    if body.is_empty() || body == "_" {
+fn parse_isotope(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let segment = capture.text(&node);
+    if capture.deep_child(&node, "empty_form").is_some()
+        && capture.deep_child(&node, "entries").is_none()
+    {
         return Ok(());
     }
-    if body.contains(';') || body.contains('*') {
-        return err(format!(
-            "{CONTEXT}: multi-component /i layer is out of the reverse slice"
-        ));
+    let Some(entries) = capture.deep_child(&node, "entries") else {
+        // The bare `_` and the truly empty body both read as "no atom
+        // isotopes".
+        return Ok(());
+    };
+    let mut entries_flat: Vec<parsanol::portable::ast::AstNode> = Vec::new();
+    if let Some(entry) = capture.deep_child(&entries, "entry") {
+        entries_flat.push(entry);
     }
-    for token in body.split(',') {
-        let bytes = token.as_bytes();
-        let mut index = 0usize;
-        let start = index;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-        if index == start {
-            return err(format!("{CONTEXT}: expected atom number in /i {segment:?}"));
-        }
-        let atom: usize = token[start..index].parse().map_err(|_| {
-            crate::error::Error::new(format!("{CONTEXT}: bad atom in /i {segment:?}"))
-        })?;
+    if let Some(rest) = capture.deep_child(&entries, "rest") {
+        entries_flat.extend(capture.reps(&rest, "entry"));
+    }
+    for unit in entries_flat.iter() {
+        // A trailing comma yields no optional entry node: the
+        // reference's split walks into the empty token and demands an
+        // atom number.
+        let entry = unit;
+        let atom: usize = capture
+            .deep_child(entry, "atom")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .parse()
+            .map_err(|_| {
+                crate::error::Error::new(format!("{CONTEXT}: bad atom in /i {segment:?}"))
+            })?;
         if atom == 0 || atom > layers.elements.len() {
             return err(format!(
                 "{CONTEXT}: /i atom {atom} out of 1..{} in {segment:?}",
                 layers.elements.len()
             ));
         }
-        let mut entry = IsoEntry {
+        let mut iso = IsoEntry {
             atom: atom - 1,
             ..Default::default()
         };
-        if bytes.get(index) == Some(&b'+') || bytes.get(index) == Some(&b'-') {
-            let sign = if bytes[index] == b'+' { 1 } else { -1 };
-            index += 1;
-            let dstart = index;
-            while index < bytes.len() && bytes[index].is_ascii_digit() {
-                index += 1;
-            }
-            if index == dstart {
-                return err(format!(
-                    "{CONTEXT}: expected delta digits in /i {segment:?}"
-                ));
-            }
-            let magnitude: i32 = token[dstart..index].parse().map_err(|_| {
-                crate::error::Error::new(format!("{CONTEXT}: bad delta in /i {segment:?}"))
-            })?;
-            entry.delta = Some(sign * magnitude);
+        if let Some(delta) = capture.deep_child(entry, "delta") {
+            let sign: i32 = match capture
+                .deep_child(&delta, "sign")
+                .map(|n| capture.text(&n))
+                .unwrap_or("")
+                .as_bytes()
+                .first()
+            {
+                Some(b'+') => 1,
+                _ => -1,
+            };
+            let magnitude: i32 = capture
+                .deep_child(&delta, "digits")
+                .map(|n| capture.text(&n))
+                .unwrap_or("")
+                .parse()
+                .map_err(|_| {
+                    crate::error::Error::new(format!("{CONTEXT}: bad delta in /i {segment:?}"))
+                })?;
+            iso.delta = Some(sign * magnitude);
         }
-        while index < bytes.len() {
-            let count_of = |_marker: u8, position: &mut usize| -> Result<u32> {
-                *position += 1;
-                let begin = *position;
-                while *position < bytes.len() && bytes[*position].is_ascii_digit() {
-                    *position += 1;
-                }
-                let count: u32 = if *position > begin {
-                    token[begin..*position].parse().map_err(|_| {
+        if let Some(markers) = capture.deep_child(entry, "markers") {
+            for unit in capture.iter_items(&markers, "mark") {
+                let Some(marker) = capture.deep_child(&unit, "mark") else {
+                    continue;
+                };
+                let count: u32 = capture
+                    .deep_child(&marker, "cnt")
+                    .map(|n| capture.text(&n))
+                    .unwrap_or("1")
+                    .parse()
+                    .map_err(|_| {
                         crate::error::Error::new(format!(
                             "{CONTEXT}: bad isotope count in /i {segment:?}"
                         ))
-                    })?
-                } else {
-                    1
-                };
-                Ok(count)
-            };
-            match bytes[index] {
-                b'T' => {
-                    let count = count_of(b'T', &mut index)?;
-                    entry.tritiums += count;
-                }
-                b'D' => {
-                    let count = count_of(b'D', &mut index)?;
-                    entry.deuteriums += count;
-                }
-                _ => {
-                    return err(format!(
-                        "{CONTEXT}: unexpected isotope marker in /i {segment:?}"
-                    ));
+                    })?;
+                match capture
+                    .deep_child(&marker, "marker")
+                    .map(|n| capture.text(&n))
+                    .unwrap_or("")
+                    .as_bytes()
+                    .first()
+                {
+                    Some(b'T') => iso.tritiums += count,
+                    _ => iso.deuteriums += count,
                 }
             }
         }
-        if entry.delta.is_none() && entry.deuteriums == 0 && entry.tritiums == 0 {
+        if iso.delta.is_none() && iso.deuteriums == 0 && iso.tritiums == 0 {
             return err(format!("{CONTEXT}: empty /i entry in {segment:?}"));
         }
-        layers.isotopes.push(entry);
+        layers.isotopes.push(iso);
     }
     Ok(())
 }
 
 /// The exchangeable-H record after an (empty) /i: `hT2D1`-style
 /// counts of exchanged hydrogens (ichiread.c:5589-5609).
-fn parse_exchanged_hydrogen(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = &segment[1..];
-    let bytes = body.as_bytes();
-    let mut index = 0usize;
+fn parse_exchanged_hydrogen(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let segment = capture.text(&node);
     let mut deuteriums = 0u32;
     let mut tritiums = 0u32;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'T' => {
-                index += 1;
-                let start = index;
-                while index < bytes.len() && bytes[index].is_ascii_digit() {
-                    index += 1;
-                }
-                let count: u32 = if index > start {
-                    body[start..index].parse().map_err(|_| {
-                        crate::error::Error::new(format!("{CONTEXT}: bad count in {segment:?}"))
-                    })?
-                } else {
-                    1
-                };
-                tritiums += count;
-            }
-            b'D' => {
-                index += 1;
-                let start = index;
-                while index < bytes.len() && bytes[index].is_ascii_digit() {
-                    index += 1;
-                }
-                let count: u32 = if index > start {
-                    body[start..index].parse().map_err(|_| {
-                        crate::error::Error::new(format!("{CONTEXT}: bad count in {segment:?}"))
-                    })?
-                } else {
-                    1
-                };
-                deuteriums += count;
-            }
-            _ => {
-                return err(format!(
-                    "{CONTEXT}: unexpected exchangeable-H marker in {segment:?}"
-                ));
-            }
+    let marks = capture
+        .deep_child(&node, "exh")
+        .map(|exh| capture.reps(&exh, "mark"))
+        .unwrap_or_default();
+    for mark in marks {
+        let count: u32 = capture
+            .deep_child(&mark, "cnt")
+            .map(|n| capture.text(&n))
+            .unwrap_or("1")
+            .parse()
+            .map_err(|_| {
+                crate::error::Error::new(format!("{CONTEXT}: bad count in {segment:?}"))
+            })?;
+        match capture
+            .deep_child(&mark, "marker")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .as_bytes()
+            .first()
+        {
+            Some(b'T') => tritiums += count,
+            _ => deuteriums += count,
         }
     }
     layers.exchanged = (deuteriums, tritiums);
@@ -803,71 +986,48 @@ fn is_parity_mark(byte: u8) -> bool {
     matches!(byte, b'-' | b'+' | b'u' | b'?')
 }
 
-/// Guards shared by the stereo segment parsers: the single-component,
-/// uncompressed, multiplier-free forms only (the reference's `;`
-/// component separators, `N*` multipliers and abc compression read
-/// elsewhere in ParseSegmentSp2/Sp3).
-fn check_stereo_segment_shape(segment: &str) -> Result<&str> {
-    let body = &segment[1..];
-    if body.contains(';') || body.contains('*') {
-        return err(format!(
-            "{CONTEXT}: multi-component or multiplied stereo segment {segment:?} is out of the reverse slice"
-        ));
-    }
-    if body.bytes().any(|b| b.is_ascii_uppercase()) {
-        return err(format!(
-            "{CONTEXT}: compressed (abc) stereo segment {segment:?} is out of the reverse slice"
-        ));
-    }
-    Ok(body)
-}
-
 /// /t layer → stereocenter entries `at1p,at2p,...` (ParseSegmentSp3 +
 /// SegmentSp3StoreStereoCenters: strictly ascending canonical atoms,
 /// one parity mark each).
-fn parse_stereo_centers(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = check_stereo_segment_shape(segment)?;
-    if body.is_empty() {
-        // The deliberately-empty segment ("no stereo"): a standard
-        // InChI never emits it.
+fn parse_stereo_centers(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let segment = capture.text(&node);
+    let n = layers.elements.len();
+    let mut entries: Vec<parsanol::portable::ast::AstNode> = Vec::new();
+    if let Some(entry) = capture.deep_child(&node, "entry") {
+        entries.push(entry);
+    }
+    if let Some(rest) = capture.deep_child(&node, "rest") {
+        entries.extend(capture.reps(&rest, "entry"));
+    }
+    if entries.is_empty() {
         return err(format!("{CONTEXT}: empty /t layer in {segment:?}"));
     }
-    let n = layers.elements.len();
-    for token in body.split(',') {
-        let bytes = token.as_bytes();
-        let split = bytes
-            .iter()
-            .position(|b| b.is_ascii_digit())
-            .map(|start| {
-                let end = bytes
-                    .iter()
-                    .position(|b| !b.is_ascii_digit())
-                    .unwrap_or(bytes.len());
-                (start, end)
-            })
-            .ok_or_else(|| {
-                crate::error::Error::new(format!(
-                    "{CONTEXT}: expected atom number in /t {segment:?}"
-                ))
+    for entry in entries {
+        let atom: usize = capture
+            .deep_child(&entry, "atom")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .parse()
+            .map_err(|_| {
+                crate::error::Error::new(format!("{CONTEXT}: bad atom number in /t {segment:?}"))
             })?;
-        if split.0 != 0 {
-            return err(format!(
-                "{CONTEXT}: malformed /t entry {token:?} in {segment:?}"
-            ));
-        }
-        let atom: usize = token[..split.1].parse().map_err(|_| {
-            crate::error::Error::new(format!("{CONTEXT}: bad atom number in /t {segment:?}"))
-        })?;
         if atom == 0 || atom > n {
             return err(format!(
                 "{CONTEXT}: /t atom {atom} out of 1..{n} in {segment:?}"
             ));
         }
-        let &[mark] = bytes.get(split.1..).unwrap_or(&[]) else {
-            return err(format!(
-                "{CONTEXT}: expected a parity mark in /t {segment:?}"
-            ));
-        };
+        let mark = capture
+            .deep_child(&entry, "mark")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .as_bytes()
+            .first()
+            .copied()
+            .unwrap_or(b' ');
         if !is_parity_mark(mark) {
             return err(format!(
                 "{CONTEXT}: unknown parity mark {:?} in /t {segment:?}",
@@ -875,7 +1035,7 @@ fn parse_stereo_centers(segment: &str, layers: &mut Layers) -> Result<()> {
             ));
         }
         if let Some(previous) = layers.stereo_centers.last() {
-            if previous.atom >= atom {
+            if previous.atom >= atom - 1 {
                 return err(format!(
                     "{CONTEXT}: /t atoms not strictly ascending in {segment:?}"
                 ));
@@ -891,14 +1051,22 @@ fn parse_stereo_centers(segment: &str, layers: &mut Layers) -> Result<()> {
 
 /// /m layer → the inversion digit: `0` even (nCompInv2Abs = +1), `1`
 /// odd (nCompInv2Abs = −1) — ParseSegmentSp3m's single-component form.
-fn parse_inversion(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = check_stereo_segment_shape(segment)?;
-    match body {
+fn parse_inversion(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let digit = capture
+        .deep_child(&node, "digit")
+        .map(|n| capture.text(&n))
+        .unwrap_or("");
+    match digit {
         "0" => layers.inversion = Some(0),
         "1" => layers.inversion = Some(1),
         _ => {
             return err(format!(
-                "{CONTEXT}: unsupported /m layer {segment:?} (per-component dots and other forms are out of the reverse slice)"
+                "{CONTEXT}: unsupported /m layer {:?} (per-component dots and other forms are out of the reverse slice)",
+                capture.text(&node)
             ));
         }
     }
@@ -908,17 +1076,28 @@ fn parse_inversion(segment: &str, layers: &mut Layers) -> Result<()> {
 /// /s layer → the stereo-type digit (ParseSegmentSp3s: 1 absolute,
 /// 2 relative, 3 racemic). Only the absolute type reconstructs — the
 /// engine's standard pipeline speaks no other.
-fn parse_stereo_type(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = check_stereo_segment_shape(segment)?;
-    match body {
+fn parse_stereo_type(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let digit = capture
+        .deep_child(&node, "digit")
+        .map(|n| capture.text(&n))
+        .unwrap_or("");
+    match digit {
         "1" => layers.stereo_type = Some(1),
         "2" | "3" => {
             return err(format!(
-                "{CONTEXT}: relative/racemic {segment:?} is out of the reverse slice (the standard pipeline emits /s1 only)"
+                "{CONTEXT}: relative/racemic {:?} is out of the reverse slice (the standard pipeline emits /s1 only)",
+                capture.text(&node)
             ));
         }
         _ => {
-            return err(format!("{CONTEXT}: unsupported /s layer {segment:?}"));
+            return err(format!(
+                "{CONTEXT}: unsupported /s layer {:?}",
+                capture.text(&node)
+            ));
         }
     }
     Ok(())
@@ -927,53 +1106,48 @@ fn parse_stereo_type(segment: &str, layers: &mut Layers) -> Result<()> {
 /// /b layer → double-bond stereo entries `atHi-atLo p` (ParseSegmentSp2:
 /// the high canonical number first, hi > lo, pairs strictly ascending,
 /// one parity mark each).
-fn parse_stereo_bonds(segment: &str, layers: &mut Layers) -> Result<()> {
-    let body = check_stereo_segment_shape(segment)?;
-    if body.is_empty() {
+fn parse_stereo_bonds(
+    node: parsanol::portable::ast::AstNode,
+    capture: &crate::parg::Capture,
+    layers: &mut Layers,
+) -> Result<()> {
+    let segment = capture.text(&node);
+    let n = layers.elements.len();
+    let mut entries: Vec<parsanol::portable::ast::AstNode> = Vec::new();
+    if let Some(entry) = capture.deep_child(&node, "entry") {
+        entries.push(entry);
+    }
+    if let Some(rest) = capture.deep_child(&node, "rest") {
+        entries.extend(capture.reps(&rest, "entry"));
+    }
+    if entries.is_empty() {
         return err(format!("{CONTEXT}: empty /b layer in {segment:?}"));
     }
-    let n = layers.elements.len();
-    for token in body.split(',') {
-        let bytes = token.as_bytes();
-        let first_end = bytes
-            .iter()
-            .position(|b| !b.is_ascii_digit())
-            .ok_or_else(|| {
-                crate::error::Error::new(format!(
-                    "{CONTEXT}: expected 'hi-lo<mark>' in /b {segment:?}"
-                ))
+    for entry in entries {
+        let high: usize = capture
+            .deep_child(&entry, "hi")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .parse()
+            .map_err(|_| {
+                crate::error::Error::new(format!("{CONTEXT}: bad atom number in /b {segment:?}"))
             })?;
-        if first_end == 0 || bytes.get(first_end) != Some(&b'-') {
-            return err(format!(
-                "{CONTEXT}: malformed /b entry {token:?} in {segment:?}"
-            ));
-        }
-        let high: usize = token[..first_end].parse().map_err(|_| {
-            crate::error::Error::new(format!("{CONTEXT}: bad atom number in /b {segment:?}"))
-        })?;
-        let rest = &token[first_end + 1..];
-        let rbytes = rest.as_bytes();
-        let second_end = rbytes
-            .iter()
-            .position(|b| !b.is_ascii_digit())
-            .ok_or_else(|| {
-                crate::error::Error::new(format!(
-                    "{CONTEXT}: expected a parity mark in /b {segment:?}"
-                ))
+        let low: usize = capture
+            .deep_child(&entry, "lo")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .parse()
+            .map_err(|_| {
+                crate::error::Error::new(format!("{CONTEXT}: bad atom number in /b {segment:?}"))
             })?;
-        if second_end == 0 {
-            return err(format!(
-                "{CONTEXT}: malformed /b entry {token:?} in {segment:?}"
-            ));
-        }
-        let low: usize = rest[..second_end].parse().map_err(|_| {
-            crate::error::Error::new(format!("{CONTEXT}: bad atom number in /b {segment:?}"))
-        })?;
-        let &[mark] = rbytes.get(second_end..).unwrap_or(&[]) else {
-            return err(format!(
-                "{CONTEXT}: expected a parity mark in /b {segment:?}"
-            ));
-        };
+        let mark = capture
+            .deep_child(&entry, "mark")
+            .map(|n| capture.text(&n))
+            .unwrap_or("")
+            .as_bytes()
+            .first()
+            .copied()
+            .unwrap_or(b' ');
         if !is_parity_mark(mark) {
             return err(format!(
                 "{CONTEXT}: unknown parity mark {:?} in /b {segment:?}",
@@ -986,7 +1160,7 @@ fn parse_stereo_bonds(segment: &str, layers: &mut Layers) -> Result<()> {
             ));
         }
         if let Some(previous) = layers.stereo_bonds.last() {
-            if (previous.high, previous.low) >= (high, low) {
+            if (previous.high, previous.low) >= (high - 1, low - 1) {
                 return err(format!(
                     "{CONTEXT}: /b pairs not strictly ascending in {segment:?}"
                 ));
