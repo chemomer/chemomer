@@ -953,10 +953,10 @@ pub fn reaction_from_rinchi(rinchi: &str) -> Result<RinchiReaction> {
 /// `add_auxinfo_to_components`). An empty `rauxinfo` leaves every
 /// component's aux empty.
 pub fn reaction_from_rinchi_with_auxinfo(rinchi: &str, rauxinfo: &str) -> Result<RinchiReaction> {
-    let mut line = split_groups(rinchi, RINCHI_STD_HEADER)?;
+    let (line, direction_flag, nostruct_data) = split_groups(rinchi, RINCHI_STD_HEADER)?;
     // The trailing tags ride the tail of the last output group —
-    // the third when present, else the second, else the first.
-    let (direction_flag, nostruct_data) = extract_tags(&mut line.groups[line.last])?;
+    // the third when present, else the second, else the first —
+    // extracted by the grammar walk inside `split_groups`.
 
     // The flag assigns the roles: forward/equilibrium store the
     // reactants first, backward stores the products first.
@@ -989,7 +989,7 @@ pub fn reaction_from_rinchi_with_auxinfo(rinchi: &str, rauxinfo: &str) -> Result
     let nostruct_aux = if rauxinfo.is_empty() {
         String::new()
     } else {
-        let aux_line = split_groups(rauxinfo, RINCHI_AUXINFO_HEADER)?;
+        let (aux_line, _, _) = split_groups(rauxinfo, RINCHI_AUXINFO_HEADER)?;
         add_auxinfo_to_components(
             &aux_line.groups[if direction_flag == DIRECTION_REVERSE {
                 1
@@ -1053,83 +1053,128 @@ pub fn reaction_from_rinchi_with_auxinfo(rinchi: &str, rauxinfo: &str) -> Result
 /// of the last group present — the trailing tags ride its tail.
 struct DecodedLine {
     groups: [String; 3],
-    last: usize,
 }
 
 /// Splits an identifier line into its groups after the header —
 /// rinchi_reader.cpp's group walk (the first group may be all there
 /// is; everything after the second delimiter is the third group
-/// wholesale).
-fn split_groups(line: &str, header: &str) -> Result<DecodedLine> {
-    let body = line.strip_prefix(header).ok_or_else(|| {
-        bad(&format!(
-            "invalid or incompatible header - expected {header:?}: {line:?}"
-        ))
-    })?;
-    let mut fields = body.splitn(3, DELIM_GROUP);
-    let first = fields.next().unwrap_or("").to_string();
-    let mut last = 0;
-    let mut second = String::new();
-    let mut third = String::new();
-    if let Some(field) = fields.next() {
-        second = field.to_string();
-        last = 1;
-    }
-    if let Some(field) = fields.next() {
-        third = field.to_string();
-        last = 2;
-    }
-    Ok(DecodedLine {
-        groups: [first, second, third],
-        last,
-    })
-}
+/// wholesale), now through the PARG artifact: the grammar frames the
+/// `<>` groups, the `!` components, and the trailing /u //d tags on
+/// the last group, and this walk reassembles the same `[String; 3]`
+/// plus the tag texts the rfind pass used to pull.
+fn split_groups(line: &str, header: &str) -> Result<(DecodedLine, char, Option<String>)> {
+    crate::parg::with_rinchi_capture(line, |capture| {
+        let root = capture
+            .child(capture.root(), "rinchi_line")
+            .ok_or_else(|| {
+                bad(&format!(
+                    "invalid or incompatible header - expected {header:?}: {line:?}"
+                ))
+            })?;
+        let prefix = capture
+            .array_child(&root, "prefix")
+            .map(|node| capture.text(&node))
+            .unwrap_or("");
+        let expected = header.strip_suffix('/').unwrap_or(header);
+        if prefix != expected {
+            return Err(bad(&format!(
+                "invalid or incompatible header - expected {header:?}: {line:?}"
+            )));
+        }
 
-/// Strips the trailing `/u` (No-Structure counts) and `/d` (direction)
-/// tags off the last group — rinchi_reader.cpp's tag walk, which
-/// examines the group tail twice. Returns the direction character
-/// (`+` when the line carries no tag) and the No-Structure tag when
-/// present.
-fn extract_tags(last_group: &mut String) -> Result<(char, Option<String>)> {
-    let mut no_struct_data: Option<String> = None;
-    let mut direction_data: Option<String> = None;
-    for _ in 0..2 {
-        let Some(layer_pos) = last_group.rfind(DELIM_LAYER) else {
-            break;
+        // Each group's wire text: its component bodies joined with the
+        // delimiter — identical to the raw text minus the trailing
+        // tags (which only the last group carries, per the grammar).
+        let group_text = |node: &parsanol::portable::ast::AstNode| -> String {
+            let mut bodies: Vec<String> = Vec::new();
+            if std::env::var("CHEMOMER_DEBUG").is_ok() {
+                println!(
+                    "    group node {node:?} reps {}",
+                    capture.reps(node, "text").len()
+                );
+            }
+            for comp in capture.reps(node, "text") {
+                bodies.push(capture.text(&comp).to_string());
+            }
+            bodies.join(&DELIM_COMP.to_string())
         };
-        // A trailing bare layer delimiter is not a tag.
-        if layer_pos + 1 >= last_group.len() {
-            break;
+
+        let mut groups: [String; 3] = Default::default();
+        let mut tags: Vec<(char, String)> = Vec::new();
+        if let Some(first) = capture.array_child(&root, "first_group") {
+            groups[0] = group_text(&first);
         }
-        let tag = last_group.get(layer_pos..layer_pos + 2).unwrap_or("");
-        if tag == NOSTRUCT_TAG {
-            if no_struct_data.is_some() {
-                return err(format!(
-                    "{CONTEXT}: duplicate No-Structure tag in RInChI input string"
-                ));
-            }
-            no_struct_data = Some(last_group[layer_pos..].to_string());
-            last_group.truncate(layer_pos);
-        } else if tag == DIRECTION_TAG {
-            if direction_data.is_some() {
-                return err(format!(
-                    "{CONTEXT}: duplicate direction tag in RInChI input string"
-                ));
-            }
-            direction_data = Some(last_group[layer_pos..].to_string());
-            last_group.truncate(layer_pos);
+        if let Some(second) = capture.array_child(&root, "second_group") {
+            groups[1] = group_text(&second);
+        }
+        if let Some(last_group) = capture.array_child(&root, "last_group") {
+            groups[2] = group_text(&last_group);
+        }
+        // The trailing tags, either order: u = No-Structure counts,
+        // d = the direction tail. The grammar anchors them at the end
+        // of input, so only the last-present group's slot can carry
+        // them.
+        let present = [
+            capture.array_child(&root, "first_group").is_some(),
+            capture.array_child(&root, "second_group").is_some(),
+            capture.array_child(&root, "last_group").is_some(),
+        ];
+        let tail = if present[2] {
+            capture.array_child(&root, "last_group")
+        } else if present[1] {
+            capture.array_child(&root, "second_group")
         } else {
-            break;
+            capture.array_child(&root, "first_group")
+        };
+        if let Some(tail) = tail {
+            // The tag slots in text order: u = No-Structure counts,
+            // d = the direction tail.
+            for item in capture.iterations(&tail) {
+                if let Some(utag) = capture.deep_child(&item, "utag") {
+                    let counts = capture
+                        .deep_child(&utag, "counts")
+                        .map(|n| capture.text(&n).to_string())
+                        .unwrap_or_default();
+                    tags.push(('u', counts));
+                } else if let Some(dtag) = capture.deep_child(&item, "dtag") {
+                    let rest = capture
+                        .deep_child(&dtag, "rest")
+                        .map(|n| capture.text(&n).to_string())
+                        .unwrap_or_default();
+                    tags.push(('d', rest));
+                }
+            }
         }
-    }
-    let direction_flag = match &direction_data {
-        None => DIRECTION_FORWARD,
-        Some(data) => data
-            .chars()
-            .nth(2)
-            .ok_or_else(|| bad(&format!("direction tag without a flag character: {data:?}")))?,
-    };
-    Ok((direction_flag, no_struct_data))
+
+        // Replicate the reference's two-pass tag walk: the last group's
+        // trailing /u //d tails, duplicates refused.
+        let mut no_struct_data: Option<String> = None;
+        let mut direction_data: Option<String> = None;
+        for (kind, data) in tags {
+            match kind {
+                'u' => {
+                    if no_struct_data.is_some() {
+                        return Err(bad("duplicate No-Structure tag in RInChI input string"));
+                    }
+                    no_struct_data = Some(format!("{NOSTRUCT_TAG}{data}"));
+                }
+                _ => {
+                    if direction_data.is_some() {
+                        return Err(bad("duplicate direction tag in RInChI input string"));
+                    }
+                    direction_data = Some(format!("{DIRECTION_TAG}{data}"));
+                }
+            }
+        }
+        let direction_flag = match &direction_data {
+            None => DIRECTION_FORWARD,
+            Some(data) => data
+                .chars()
+                .nth(2)
+                .ok_or_else(|| bad(&format!("direction tag without a flag character: {data:?}")))?,
+        };
+        Ok((DecodedLine { groups }, direction_flag, no_struct_data))
+    })
 }
 
 /// Parses the No-Structure counts out of the captured `/u` tag —
