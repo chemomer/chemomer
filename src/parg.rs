@@ -492,11 +492,6 @@ parg_grammar!(
     include_str!("../grammar/inchi.json"),
     "inchi"
 );
-parg_grammar!(
-    rinchi_grammar,
-    include_str!("../grammar/rinchi.json"),
-    "rinchi"
-);
 
 /// Parses the molfile contract's entry and walks the capture tree.
 pub(crate) fn with_molfile_capture<T>(
@@ -504,6 +499,14 @@ pub(crate) fn with_molfile_capture<T>(
     walk: impl FnOnce(Capture<'_>) -> crate::Result<T>,
 ) -> crate::Result<T> {
     parse_entry(molfile_grammar()?, "molfile", input, walk)
+}
+
+/// Parses the InChI contract's entry and walks the capture tree.
+pub(crate) fn with_inchi_capture<T>(
+    input: &str,
+    walk: impl FnOnce(Capture<'_>) -> crate::Result<T>,
+) -> crate::Result<T> {
+    parse_entry(inchi_grammar()?, "inchi", input, walk)
 }
 
 /// The parse root: a scanner's entry capture.

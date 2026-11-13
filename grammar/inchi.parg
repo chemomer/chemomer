@@ -1,0 +1,113 @@
+grammar ChemomerInchi version "1.0.0" {
+  ## The standard-InChI string scan — the reverse direction's input
+  ## edge: the `InChI=1S/` prefix, the Hill-order formula segment, and
+  ## the layered tail (/c /h /q /p /i /b /t /m /s, the exchanged-H
+  ## record after an empty /i), as a PARG text contract.
+  ##
+  ## The grammar is the TOKENIZER: each segment matches its layer's
+  ## token alphabet (atom numbers, the - ( ) , separators, the parity
+  ## marks) and carries its shape name, so the engine walks the
+  ## captured token stream with the reference's semantic checks (atom
+  ## ranges, ascending order, branch-stack bonds) and refuses
+  ## out-of-slice forms (multi-component `;`, `N*` multipliers, abc
+  ## compression) from the raw fallback exactly where it always did.
+  ## A segment matching no layer alphabet rides the raw fallback and
+  ## the engine reports it by its first byte, the way the reference's
+  ## segment dispatch did.
+  ##
+  ## Language notes: `until` is exclusive (the closer is restated);
+  ## [ ] is the option syntax; strict PEG — no repetition backtracking.
+
+  entry inchi: inchi_string
+
+  digit = ( %x30-39 )
+  number = ( 1*( digit ) )
+  ## One parity mark: - odd, + even, u/? unknown (ichiread.c's
+  ## parity_type).
+  mark = ( "-" / "+" / "u" / "?" )
+  ## The end-of-segment anchor: every layer shape must run its whole
+  ## segment (to the next slash or the end of input) — a partial match
+  ## falls through to the next shape, then the raw fallback.
+  eos = ( &( ( "/" ) / ( !( %x00-10FFFF ) ) ) )
+
+  inchi_string = ( ( ( until "/" ) ) as prefix [ "/" ( seg ) as first_seg ] ( 0*( ( "/" ) ( seg ) as seg ) ) as segs ) as inchi_string
+
+  ## One layer segment: the layer alphabets in dispatch order, the
+  ## raw fallback last.
+  seg = ( ( formula_seg eos ) / ( c_seg eos ) / ( exh_seg eos ) / ( h_seg eos ) / ( q_seg eos ) / ( p_seg eos ) / ( i_seg eos ) / ( b_seg eos ) / ( t_seg eos ) / ( m_seg eos ) / ( s_seg eos ) / ( f_seg eos ) / ( ( until "/" ) as raw ) ) as seg
+
+  ## The formula leads the identifier (Hill order): element tokens of
+  ## an uppercase letter, an optional lowercase second letter, an
+  ## optional count.
+  element = ( ( %x41-5A ) as upper [ ( %x61-7A ) as lower ] [ ( number ) as cnt ] ) as element
+  formula_seg = ( 1*( element ) as elements ) as formula_seg
+
+  ## /c: the branch-stack token stream — numbers chained with - and
+  ## branched with ( ) ,; the stack walk stays engine-side.
+  cnum = ( ( "-" / "(" / ")" / "," ) as sep ( number ) as num )
+  c_seg = ( "c" [ ( number ) as first ( 0*( cnum ) ) as pairs ] ) as c_seg
+
+  ## /h: the fixed-H token stream — the immobile `atomsHcount` tokens,
+  ## then the (Hcount,atoms) mobile groups. Lowercase h reads (the
+  ## FixedH subtractive form the engine refuses).
+  h_list = ( ( ( number ) as first ( 0*( ( ( "," / "-" ) as sep ( ( number ) as num ) ) as pair ) ) as pairs ) ) as h_list
+  h_token = ( ( ( h_list ) as list ) ( "H" / "h" ) as marker [ ( ( number ) as cnt ) ] ) as h_token
+  h_endpoints = ( ( number ) as first ( 0*( ( "," ) as comma ( number ) as more ) ) as rest ) as h_endpoints
+  h_group = ( ( "(" ) ( "H" ) [ ( number ) as hcnt ] [ ( "-" ) [ ( number ) as minus ] ] ( "," ) ( h_endpoints ) ( ")" ) ) as h_group
+  h_seg = ( "h" [ ( ( h_token ) as token ( 0*( ( "," ) ( h_token ) as token ) ) as rest [ ( "," ) ] ) as immobile ] ( 0*( h_group ) as h_groups ) ) as h_seg
+
+  ## The exchanged-H record after an (empty) /i: T/D counts only.
+  exh_seg = ( "h" ( 0*( ( ( "T" / "D" ) as marker [ ( number ) as cnt ] ) as mark ) ) as exh ) as exh_seg
+
+  ## /q: the component total charge.
+  q_seg = ( "q" ( ( "+" / "-" ) as sign ( number ) as digits ) ) as q_seg
+
+  ## /p: the proton shift.
+  p_seg = ( "p" ( ( ( "+" / "-" ) as sign ) ( ( number ) as digits ) ) ) as p_seg
+
+  ## /i: per-atom isotope entries — atom, optional +/-delta, repeated
+  ## T/D markers. An empty body (or the bare `_`) records no atom
+  ## isotopes; a following h-segment then carries the exchangeable-H
+  ## counts.
+  i_entry = ( ( number ) as atom [ ( ( "+" / "-" ) as sign ( number ) as digits ) as delta ] ( 0*( ( ( "T" / "D" ) as marker [ ( number ) as cnt ] ) as mark ) ) as markers ) as i_entry
+  i_seg = ( "i" [ ( ( i_entry ) as entry ( 0*( ( "," ) [ ( i_entry ) as entry ] ) ) as rest ) as entries / ( [ ( "_" ) as empty ] ) ] ) as i_seg
+
+  ## /b: double-bond stereo — hi-lo pairs with one parity mark each.
+  b_entry = ( ( number ) as hi ( "-" ) as dash ( number ) as lo ( mark ) as mark ) as b_entry
+  b_seg = ( "b" ( ( b_entry ) as entry ( 0*( ( "," ) ( b_entry ) as entry ) ) as rest ) ) as b_seg
+
+  ## /t: stereocenters — canonical atom plus one parity mark each.
+  t_entry = ( ( number ) as atom ( mark ) as mark ) as t_entry
+  t_seg = ( "t" ( ( t_entry ) as entry ( 0*( ( "," ) ( t_entry ) as entry ) ) as rest ) ) as t_seg
+
+  ## /m: the inversion digit (0 even, 1 odd).
+  m_seg = ( "m" ( ( "0" / "1" ) as digit ) ) as m_seg
+
+  ## /s: the stereo-type digit (1 absolute, 2 relative, 3 racemic).
+  s_seg = ( "s" ( ( ( "1" / "2" / "3" ) as digit ) ) ) as s_seg
+
+  ## /f: the Fixed-H layer — captured raw, refused engine-side.
+  f_seg = ( "f" ( ( until "/" ) ) as rest ) as f_seg
+
+  test inchi {
+    accept "InChI=1S/H2O/h1H2"
+    accept "InChI=1S/C2H6O/c1-2-3/h3H,2H2,1H3"
+    accept "InChI=1S/C4H5N/c1-2-4-5-3-1/h1-5H"
+    accept "InChI=1S/C10H8/c1-2-6-10-8-4-3-7-9(10)5-1/h1-8H"
+    accept "InChI=1S/C2H4O2/c1-2(3)4/h1H3,(H,3,4)"
+    accept "InChI=1S/C2H4O2/c1-2(3)4/h1H3,(H,3,4)/p-1"
+    accept "InChI=1S/H3N/h1H3/p+1"
+    accept "InChI=1S/CH2O3/c2-1(3)4/h(H2,2,3,4)/p-2"
+    accept "InChI=1S/NO3/c2-1(3)4/q-1"
+    accept "InChI=1S/CH4/h1H4/i1+1"
+    accept "InChI=1S/H2O/h1H2/i/hD2"
+    accept "InChI=1S/H2O/h1H2/i1+1/i/hD2"
+    accept "InChI=1S/C16H36N/c1-5-9-13-17(14-10-6-2,15-11-7-3)16-12-8-4/h5-16H2,1-4H3/q+1"
+    accept "InChI=1S/C3H7NO2/c1-2(4)3(5)6/h2H,4H2,1H3,(H,5,6)/t2-/m1/s1"
+    accept "InChI=1S/C4H8/c1-3-4-2/h3-4H,1-2H3/b4-3+"
+    accept "InChI=1S/C2H5NO2/c3-1-2(4)5/h1,3H2,(H,4,5)"
+    accept "InChI=1S/"
+    accept "InChI=1S/C4H8O/c1-3-4(2)5-3/h3-4H,1-2H3/t3-,4?/m0/s1"
+    accept "garbage without a slash"
+  }
+}
