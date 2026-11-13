@@ -2799,10 +2799,7 @@ impl Gate {
                 return false;
             }
         }
-        if self.pt39_element_gate && (all_neighbors.oxygen != 1 || all_neighbors.nitrogen >= 2) {
-            return false;
-        }
-        true
+        !(self.pt39_element_gate && (all_neighbors.oxygen != 1 || all_neighbors.nitrogen >= 2))
     }
 }
 
