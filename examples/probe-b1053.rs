@@ -28,8 +28,7 @@ fn main() {
             println!("  bond {}-{} o{}", f + 1, t + 1, o);
         }
     }
-    for i in 16..23 {
-        let a = &s.atoms[i];
+    for (i, a) in s.atoms.iter().enumerate().take(23).skip(16) {
         println!("  atom{} {} q{} h{}", i + 1, a.element, a.charge, a.h_count);
     }
 }
