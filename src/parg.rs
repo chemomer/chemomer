@@ -14,9 +14,16 @@
 //! The walk is zero-copy: the parse result's AST stores the matched
 //! text as (offset, length) references into the input, and the
 //! segment streams keep those spans — no capture text is
-//! materialized. The packrat memo cache is thread-local and reused
-//! across parses (a fresh cache per parse dominated the identity
-//! pipeline's parse cost by an order of magnitude).
+//! materialized. Every parse gets a fresh packrat memo cache and a
+//! fresh AST arena: the cache's entries are keyed by input position
+//! alone and their node data references live-arena pool state, so
+//! anything carried across parses replays either a foreign input's
+//! match or a dead arena's indices (probed in parsanol 0.18.9,
+//! parsanol-rs#493). The reset-reuse alternative — one thread-local
+//! arena and cache, `reset` plus `clear` per parse — measured neutral
+//! on the identity bench (the setup it would amortize is a few
+//! percent of a scan), so fresh-per-parse ships;
+//! tests/parg_stress.rs pins the isolation the shape relies on.
 
 use parsanol::portable::ast::AstNode;
 use parsanol::portable::cache::DenseCache;
@@ -437,11 +444,14 @@ fn parse_entry<'input, T>(
     input: &'input str,
     walk: impl FnOnce(Capture<'input>) -> crate::Result<T>,
 ) -> crate::Result<T> {
-    // A fresh packrat memo cache per parse: the cache's memo entries
-    // reference arena pool state, so reuse across parses (fresh
-    // arenas) hands the next parse stale nodes — probed in parsanol
-    // 0.18.9, where a hit walks a dead arena. The estimate keeps the
-    // table one allocation for the scanners' line-shaped inputs.
+    // A fresh packrat memo cache and a fresh arena per parse: the
+    // cache's memo entries are keyed by input position and reference
+    // arena pool state, so reuse across parses hands the next parse
+    // either foreign matches or dead-arena nodes (probed in
+    // parsanol 0.18.9, parsanol-rs#493). Reset-based reuse (same
+    // allocations, `reset` + `clear` per parse) measured neutral on
+    // the identity bench, so the fresh shape ships; the sizing keeps
+    // the table one allocation for the scanners' line-shaped inputs.
     let cache = DenseCache::new(1 << 12);
     let mut arena = AstArena::for_input(input.len());
     let mut parser = PortableParser::new_with_cache(grammar, input, &mut arena, cache);
