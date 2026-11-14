@@ -25,11 +25,23 @@ zero (every dated disagreement retired with a decoded mechanism).
 
 - **Library** — `Engine::from_molfile(molfile)` → `segments()`,
   `inchi_string()`, `aux_string()`, `inchikey()`. Zero runtime
-  dependencies.
+  dependencies. The reaction-identity layer (`rinchi`) reads
+  RXNfiles/RDfiles (`parse_rxnfile`, `parse_rdfile`), assembles the
+  five oracle lines per reaction (`rinchi_string`, `rinchi_auxinfo`,
+  `rinchi_short_key`, `rinchi_long_key`, `rinchi_web_key`), and
+  decodes RInChI strings back into their components
+  (`reaction_from_rinchi[_with_auxinfo]`).
 - **C ABI** — the crate builds a `cdylib`: `chemomer_from_molfile`,
   `chemomer_aux_from_molfile`, `chemomer_inchikey`,
   `chemomer_string_free`, `chemomer_last_error` — drivable from Ruby
-  FFI, Python ctypes, Node ffi-napi, Swift.
+  FFI, Python ctypes, Node ffi-napi, Swift. The reaction-identity
+  exports mirror the same shape: `chemomer_rinchi_from_rxn`,
+  `chemomer_rinchi_aux_from_rxn`, `chemomer_rinchi_short_key_from_rxn`,
+  `chemomer_rinchi_long_key_from_rxn`, `chemomer_rinchi_web_key_from_rxn`
+  (RXNfile → one line each), `chemomer_rinchi_from_rd` (RDfile → the
+  identifier line), and `chemomer_rinchi_decode(rinchi, rauxinfo)` →
+  the component table (the flag line, TAB-separated
+  `inchi<TAB>aux<TAB>key` triples, bare `<>` role separators).
 - **Feature-gated bindings** — `wasm` (wasm-bindgen exports); npm
   `chemomer` is the universal wasm build from
   [chemomer/chemomer-ts](https://github.com/chemomer/chemomer-ts), the
