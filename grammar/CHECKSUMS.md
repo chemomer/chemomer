@@ -12,8 +12,8 @@ hashes below whenever a contract changes.
 
 | File | sha256 |
 |---|---|
-| `molfile.parg` (the MDL V2000 molfile scan) | `13cc4b98561144259772da5555470b95adf1c44306377b6d00f651e0f8e1ee3c` |
-| `molfile.json` (the compiled artifact) | `40325ac8ad9e852b4d6eab7294f8cc80fc991acf35be87de55d03b246a513407` |
+| `molfile.parg` (the MDL V2000 molfile scan) | `e29c7524d9df824a3c4e7cafd96a35cd368461c31a2390a389df6460627e02cf` |
+| `molfile.json` (the compiled artifact) | `7bda293addd6d3cba4d27356f19ecbc5f4f8c26d08fe4f7100f44d91086be565` |
 | `inchi.parg` (the standard-InChI layer scan) | `c1d0a68c6b888b086e75fe559174f5e22b7d35f88a49a2166f53c28b95c888c8` |
 | `inchi.json` (the compiled artifact) | `e5121fbea692c8a0e7be2cab468026c798caff0ce17566eb29fc780d836ea2ed` |
 | `rinchi.parg` (the RInChI string scan) | `e38f0d9dc65f5d8a43265a16436cffaf051e954eca8e7f4867a43124a21cbc7d` |
