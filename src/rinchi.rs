@@ -144,6 +144,21 @@ impl RinchiComponent {
         Ok(self.identity()?.inchi)
     }
 
+    /// The component's AuxInfo line — computed through the engine for
+    /// drawn components, distributed from the RAuxInfo companion on a
+    /// two-line decode (empty after a bare decode), and the fixed
+    /// No-Structure line for No-Structures.
+    pub fn aux_string(&self) -> Result<String> {
+        Ok(self.identity()?.aux)
+    }
+
+    /// The component's InChIKey — computed through the native key
+    /// machinery for drawn and identifier-decoded components, the
+    /// fixed No-Structure key for No-Structures.
+    pub fn inchikey(&self) -> Result<String> {
+        Ok(self.identity()?.key)
+    }
+
     /// A No-Structure: the block holds no atoms, or a single
     /// placeholder atom (`A`, `X`, `R#`, `R`, `*`) — both are the
     /// reference's "unknown structure" (mdl_molfile_reader.cpp's
@@ -263,6 +278,53 @@ impl RinchiReaction {
     /// of the whole reaction, role-independent.
     pub fn rinchi_web_key(&self) -> Result<String> {
         rinchi_web_key_of(&self.groups()?)
+    }
+
+    /// The component table — the decode direction's wire form for the
+    /// string-boundary transports (the C ABI and the wasm module,
+    /// whose exports carry strings only):
+    ///
+    /// ```text
+    /// <flag>                                  '+' directional, '=' equilibrium
+    /// <inchi><TAB><aux><TAB><inchikey>        one line per reactant
+    /// <>                                      role separator (bare)
+    /// <inchi><TAB><aux><TAB><inchikey>        one line per product
+    /// <>
+    /// <inchi><TAB><aux><TAB><inchikey>        one line per agent
+    /// ```
+    ///
+    /// InChI, AuxInfo, and InChIKey strings carry no tab and no
+    /// newline (the identifier grammars exclude them), so the table
+    /// splits unambiguously: the first line is the flag, the bare
+    /// `<>` lines separate the three roles, every other line is one
+    /// component's identity triple. The roles are already resolved —
+    /// a backward-flag identifier arrives decoded into its real roles —
+    /// so the table never carries the `-` direction.
+    pub fn component_table(&self) -> Result<String> {
+        let mut table = String::new();
+        table.push(match self.directionality {
+            Directionality::Directional => '+',
+            Directionality::Equilibrium => '=',
+        });
+        table.push('\n');
+        for (position, role) in [&self.reactants, &self.products, &self.agents]
+            .into_iter()
+            .enumerate()
+        {
+            if position > 0 {
+                table.push_str(DELIM_GROUP);
+                table.push('\n');
+            }
+            for component in role {
+                table.push_str(&component.inchi_string()?);
+                table.push('\t');
+                table.push_str(&component.aux_string()?);
+                table.push('\t');
+                table.push_str(&component.inchikey()?);
+                table.push('\n');
+            }
+        }
+        Ok(table)
     }
 
     /// The per-role assembly cache — rinchi_reaction.cpp's
@@ -1538,6 +1600,46 @@ mod tests {
             paired.reactants()[1].molfile().is_empty(),
             "decoded components carry identifiers, not drawings"
         );
+    }
+
+    /// The component table — the string-boundary transports' decode
+    /// wire — pins the flag line, the TAB triples, and the bare `<>`
+    /// role separators, with the aux fields empty on a bare decode and
+    /// filled from the RAuxInfo companion on the two-line decode.
+    #[test]
+    fn the_component_table_splits_the_decoded_roles() {
+        let paired = reaction_from_rinchi_with_auxinfo(
+            "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d+",
+            "RAuxInfo=1.00.1/0/N:1/rA:1nO/rB:/rC:12,12,0;<>0/N:1/rA:1nO/rB:/rC:12,12,0;",
+        )
+        .expect("decodes");
+        let water = "InChI=1S/H2O/h1H2\tAuxInfo=1/0/N:1/rA:1nO/rB:/rC:12,12,0;\t\
+                     XLYOFNOQVPJJNP-UHFFFAOYSA-N\n";
+        assert_eq!(
+            paired.component_table().expect("table"),
+            format!("+\n{water}<>\n{water}<>\n")
+        );
+
+        // A bare decode leaves the aux field empty; a reversed input
+        // reads into its real roles but reports directional (`+`): the
+        // table's roles are resolved, never the wire's output order.
+        let bare = reaction_from_rinchi("RInChI=1.00.1S/<>ClH/h1H!H3N/h1H3/d-").expect("decodes");
+        assert_eq!(
+            bare.component_table().expect("table"),
+            "+\n\
+             InChI=1S/ClH/h1H\t\tVEXZGXHMUGYJMC-UHFFFAOYSA-N\n\
+             InChI=1S/H3N/h1H3\t\tQGZKDVFQNNGYKY-UHFFFAOYSA-N\n\
+             <>\n\
+             <>\n"
+        );
+
+        // Equilibrium reads the `=` flag line.
+        let equilibrium =
+            reaction_from_rinchi("RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d=").expect("decodes");
+        assert!(equilibrium
+            .component_table()
+            .expect("table")
+            .starts_with("=\n"));
     }
 
     /// The forward flag stores the reactants group first; the
