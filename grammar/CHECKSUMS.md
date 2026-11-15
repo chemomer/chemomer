@@ -12,12 +12,24 @@ hashes below whenever a contract changes.
 
 | File | sha256 |
 |---|---|
-| `molfile.parg` (the MDL V2000 molfile scan) | `e29c7524d9df824a3c4e7cafd96a35cd368461c31a2390a389df6460627e02cf` |
-| `molfile.json` (the compiled artifact) | `7bda293addd6d3cba4d27356f19ecbc5f4f8c26d08fe4f7100f44d91086be565` |
+| `molfile.parg` (the MDL V2000 molfile scan, v1.1.0) | `77755b0dc1fb38c16aeb32638b4d1184b588419125f3aea6c55088108a595132` |
+| `molfile.json` (the compiled artifact) | `9af4ca187dccbe617bc5d022180ad93581a3cb20f008114ba4a57bf61d697cf9` |
 | `inchi.parg` (the standard-InChI layer scan) | `c1d0a68c6b888b086e75fe559174f5e22b7d35f88a49a2166f53c28b95c888c8` |
 | `inchi.json` (the compiled artifact) | `e5121fbea692c8a0e7be2cab468026c798caff0ce17566eb29fc780d836ea2ed` |
 | `rinchi.parg` (the RInChI string scan) | `e38f0d9dc65f5d8a43265a16436cffaf051e954eca8e7f4867a43124a21cbc7d` |
 | `rinchi.json` (the compiled artifact) | `bca7d7290d61e5deac6ecac6a4273cf1c97d0f4008e0ee6773c2b67a99487d76` |
+
+**molfile v1.1.0 (rs#110 round 2)** — the capture surface shrank to
+what the engine reads: the header lines, the line-shape wrappers
+(`as line` / `as body_line` / the per-shape names), the unread counts
+granules (k6/k9/k15/k33/krest), the unread atom granules
+(k20/k30/k34/k40/k51), the u0/u1 unit wrappers, and the per-character
+`ch` captures are all gone. The consumed surface (molfile/counts/body,
+the read granules, units/kt) is byte-identical; the grammar still
+consumes every column verbatim (the inline suite is unchanged and
+passes). The sample profile that drove this: malloc/free dominated the
+water bench (~55%), the arena Hash stores per named capture and the
+flatten walk's String keys were the bulk of it.
 
 ## Compiling
 
