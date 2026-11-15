@@ -1,4 +1,4 @@
-grammar ChemomerMolfile version "1.0.0" {
+grammar ChemomerMolfile version "1.1.0" {
   ## The MDL V2000 molfile scan — counts line, atom block, bond block,
   ## property tail (the alias, M CHG / M ISO and M Sgroup families) —
   ## as a PARG text contract. The V3000 CTAB flavor and the SDfile
@@ -41,18 +41,18 @@ grammar ChemomerMolfile version "1.0.0" {
   ## token.
   token = ( 1*( !%x0A !ws_ch %x00-10FFFF ) )
   
-  ## A whitespace run, one captured character at a time (the run
-  ## concatenates back to its exact source text).
-  ws_run = 1*( ( ws_ch ) as ch )
+  ## A whitespace run, uncaptured (the parent kt capture spans it;
+  ## nothing reads per-character whitespace captures).
+  ws_run = 1*( ws_ch )
   
   ## One text line: the content up to the newline (exclusive), then
   ## the newline when present.
-  text_line = ( ( ( until "\n" ) ) as text [ "\n" ] )
+  text_line = ( ( until "\n" ) [ "\n" ] )
   
-  molfile = ( ( header ) as header ( counts_line ) as counts ( 0*( ( "\n" ) [ ( body_line ) as line ] ) ) as body ) as molfile
+  molfile = ( ( header ) ( counts_line ) as counts ( 0*( ( "\n" ) [ ( body_line ) ] ) ) as body ) as molfile
   
   ## The three free-text header lines (title, program, comment).
-  header = ( ( text_line ) as h0 ( text_line ) as h1 ( text_line ) as h2 ) as header
+  header = ( text_line text_line text_line )
   
   ## The counts line. The eleven ignored fields and the version word
   ## ride the column-named granules: k0/k3 = the atom/bond counts the
@@ -64,18 +64,18 @@ grammar ChemomerMolfile version "1.0.0" {
   ## line too short for the k3 bond count is the degenerate shape:
   ## the raw text rides k0 alone and the engine reports the
   ## malformed counts line from it.
-  counts_line = ( ( counts_full / counts_degenerate ) ) as counts
+  counts_line = ( counts_full / counts_degenerate ) as counts
   
   counts_full = ( ( 3( !"\n" %x00-10FFFF ) ) as k0 ( 3( !"\n" %x00-10FFFF ) ) as k3 ( ( ( 3( !"\n" %x00-10FFFF ) ) as k6 ( 3( !"\n" %x00-10FFFF ) ) as k9 ( 3( !"\n" %x00-10FFFF ) ) as k12 ( ( ( 18( !"\n" %x00-10FFFF ) ) as k15 [ ( ( ( until "\n" ) ) as k33 ) ] ) / ( ( ( until "\n" ) ) as krest ) ) ) / ( ( ( until "\n" ) ) as krest ) ) ) as counts_full
   
-  counts_degenerate = ( ( ( ( until "\n" ) ) as k0 ) ) as counts_degenerate
+  counts_degenerate = ( ( ( until "\n" ) ) as k0 )
   
   ## One body line: the newline rides the repetition; the shape
   ## alternatives classify the line by its leading form. The
   ## classification never changes the engine's reads — every shape
   ## covers every column of its line, so the column arithmetic is
   ## shape-independent.
-  body_line = ( ( m_line / a_line / atom_line / bond_line / other_line ) ) as body_line
+  body_line = ( m_line / a_line / atom_line / bond_line / other_line )
   
   ## The `M  ` property-line family: the three-character tag (CHG,
   ## ISO, STY, SST, SCN, SLB, SAL, SBL, SMT, SDI, END, ...) then
@@ -83,12 +83,12 @@ grammar ChemomerMolfile version "1.0.0" {
   ## run (u0) and token (u1); a trailing whitespace run rides kt.
   ## Unit concatenation is the line verbatim — the polymer cascade
   ## messages quote failing lines exactly.
-  m_line = ( ( "M  " ) as k0 ( 3( !"\n" %x00-10FFFF ) ) as k3 [ ( ( 1*( ( ( ws_run ) as u0 ( token ) as u1 ) ) ) as units ) ] [ ( ( ws_run ) as kt ) ] ) as m_line
+  m_line = ( ( "M  " ) as k0 ( 3( !"\n" %x00-10FFFF ) ) as k3 [ ( ( 1*( ( ( ws_run ) ( token ) ) ) ) as units ) ] [ ( ( ws_run ) as kt ) ] )
   
   ## The `A  ` alias line: the two-space prefix, then the rest of the
   ## line (the alias index text). The alias SYMBOL rides the NEXT
   ## body line; the engine pairs them from the ordered body list.
-  a_line = ( ( ( "A  " ) as k0 ( ( ( until "\n" ) ) as k3 ) ) ) as a_line
+  a_line = ( ( "A  " ) as k0 ( ( until "\n" ) ) as k3 )
   
   ## The atom line granules: x (k0), y (k10), z (k20), the column-30
   ## separator, the element (k31), the mass-difference columns (k34),
@@ -103,7 +103,7 @@ grammar ChemomerMolfile version "1.0.0" {
   bond_line = ( ( ( 3( !"\n" %x00-10FFFF ) ) as k0 ( 3( !"\n" %x00-10FFFF ) ) as k3 ( 3( !"\n" %x00-10FFFF ) ) as k6 ( ( ( 3( !"\n" %x00-10FFFF ) ) as k9 [ ( ( ( until "\n" ) ) as k12 ) ] ) / ( ( ( until "\n" ) ) as k12 ) ) ) ) as bond_line
   
   ## Any other line, raw.
-  other_line = ( ( ( 1*( !"\n" %x00-10FFFF ) ) as k0 ) ) as other_line
+  other_line = ( ( 1*( !"\n" %x00-10FFFF ) ) as k0 )
   
   test mol {
     accept "water\n  AsciiChem\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n"
