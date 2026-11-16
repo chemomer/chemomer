@@ -1,9 +1,11 @@
-grammar ChemomerMolfile version "1.1.0" {
-  ## The MDL V2000 molfile scan — counts line, atom block, bond block,
-  ## property tail (the alias, M CHG / M ISO and M Sgroup families) —
-  ## as a PARG text contract. The V3000 CTAB flavor and the SDfile
-  ## record framing stay engine-side (the V3000 free-form logical-line
-  ## reader is not part of this contract's phase).
+grammar ChemomerMolfile version "1.2.0" {
+  ## The MDL molfile scan — the V2000 counts line, atom block, bond
+  ## block, property tail (the alias, M CHG / M ISO and M Sgroup
+  ## families), the V3000 CTAB line framing, and the SDfile record
+  ## framing — as a PARG text contract. The V3000 block semantics
+  ## (the `-` continuation joins, the COUNTS/atom/bond block walk)
+  ## and the empty-record filter stay engine-side: the framing lives
+  ## here, the semantics live there.
   ##
   ## Column model: every line is captured as ORDERED positional
   ## segments whose concatenation is the line verbatim (the fixed
@@ -20,6 +22,7 @@ grammar ChemomerMolfile version "1.1.0" {
   ## strict PEG — no repetition backtracking.
   
   entry mol: molfile
+  entry sdf: sdf_file
   
   ## One Rust whitespace character minus the newline (the line framing
   ## owns %x0A): the char::is_whitespace set — the same set
@@ -75,7 +78,16 @@ grammar ChemomerMolfile version "1.1.0" {
   ## classification never changes the engine's reads — every shape
   ## covers every column of its line, so the column arithmetic is
   ## shape-independent.
-  body_line = ( m_line / a_line / atom_line / bond_line / other_line )
+  body_line = ( v30_line / m_line / a_line / atom_line / bond_line / other_line )
+
+  ## The `M  V30 ` CTAB line: the seven-character prefix frames it
+  ## structurally (a block line lacking it falls to m_line or
+  ## other_line, where the engine's prefix check reports it). The
+  ## content rides k7; the engine joins `-` continuations and
+  ## tokenizes the joined logical line itself — the join is text,
+  ## not tokens, so a value split across a continuation rejoins
+  ## byte-for-byte.
+  v30_line = ( ( "M  V30 " ) as k0 ( ( until "\n" ) ) as k7 ) as v30_line
   
   ## The `M  ` property-line family: the three-character tag (CHG,
   ## ISO, STY, SST, SCN, SLB, SAL, SBL, SMT, SDI, END, ...) then
@@ -104,7 +116,26 @@ grammar ChemomerMolfile version "1.1.0" {
   
   ## Any other line, raw.
   other_line = ( ( 1*( !"\n" %x00-10FFFF ) ) as k0 )
-  
+
+  ## The SDfile container: records separated by `$$$$` terminator
+  ## lines. A terminator is `$$$$`, optionally trailed by whitespace,
+  ## then the line end (newline or end of input) — the engine's
+  ## `trim_end() == "$$$$"` read, framed structurally. Record content
+  ## rides the ordered line captures (one k0 per line); the record's
+  ## text is its lines joined and the empty-record filter stays
+  ## engine-side.
+  sdf_file = ( 0*( sdf_line ) ) as sdf_file
+
+  sdf_line = ( sdf_terminator / sdf_content )
+
+  sdf_terminator = ( ( "$$$$" 0*( ws_ch ) ( "\n" / ( !( %x00-10FFFF ) ) ) ) as term )
+
+  ## One non-terminator record line: the guard rejects a line whose
+  ## whole extent is `$$$$` plus whitespace (the `!`-guard against
+  ## any character is the end-of-input anchor); the content up to
+  ## the newline rides k0, the newline itself rides the line.
+  sdf_content = ( ( ( !( "$$$$" 0*( ws_ch ) ( "\n" / ( !( %x00-10FFFF ) ) ) ) ( ( until "\n" ) ) as k0 ) [ "\n" ] ) )
+
   test mol {
     accept "water\n  AsciiChem\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n"
     accept "d2o\n  InChIV10\n\n  1  0  0  0  0  0  0  0  0  3 V2000\n    0.0000    0.0000    0.0000 O   0  0  0     0  0  0  0  0  0\nA  1\nOD2\nM  END\n$$$$\n"
@@ -112,6 +143,20 @@ grammar ChemomerMolfile version "1.1.0" {
     accept "sru\n  t\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n    1.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0  0  0  0\nM  STY  1   1 SRU\nM  SAL   1  2   1   2\nM  END\n"
     accept "ethane\n  t\n\n  2  1  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n   72.0000   12.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0  0\n  1  2  1  0  0  0  0  0  0  0  0\nM  END"
     accept "short\n"
+    accept ""
+    accept "v3000\n  t\n\n  1  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 1 0\nM  V30 BEGIN ATOM\nM  V30 1 C 0 0 0 0\nM  V30 END ATOM\nM  V30 END CTAB\nM  END\n"
+    accept "v3000tail\n  t\n\n  1  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 1 0\nM  V30 BEGIN ATOM\nM  V30 1 Cl 0 0 0 0 CHG=1\nM  V30 END ATOM\nM  V30 BEGIN SGROUP\nM  V30 1 SUP 1 -\nM  V30 1 1 1\nM  V30 END SGROUP\nM  V30 END CTAB\nM  CHG  1   1   1\nM  END\n"
+    accept "v3000cont\n  t\n\n  2  1  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 2 1\nM  V30 BEGIN ATOM\nM  V30 1 C 0.5 -\nM  V30 0 0 0 Cl\nM  V30 2 O 1 0 0 0\nM  V30 END ATOM\nM  V30 BEGIN BOND\nM  V30 1 1 1 2 CFG=2\nM  V30 END BOND\nM  V30 END CTAB\nM  END\n"
+  }
+
+  test sdf {
+    accept "water\n  AsciiChem\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n$$$$\n"
+    accept "a\n  t\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n$$$$\nb\n  t\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 N   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n$$$$\n"
+    accept "rec\n  t\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END"
+    accept "rec\n  t\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n   12.0000   12.0000    0.0000 O   0  0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n$$$$"
+    accept "> <TAG>\nvalue\n\n$$$$\n"
+    accept "$$$$\n$$$$\n"
+    accept "$$$$   \n"
     accept ""
   }
 }
