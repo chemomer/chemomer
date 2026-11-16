@@ -12,8 +12,8 @@ hashes below whenever a contract changes.
 
 | File | sha256 |
 |---|---|
-| `molfile.parg` (the MDL V2000 molfile scan, v1.1.0) | `77755b0dc1fb38c16aeb32638b4d1184b588419125f3aea6c55088108a595132` |
-| `molfile.json` (the compiled artifact) | `9af4ca187dccbe617bc5d022180ad93581a3cb20f008114ba4a57bf61d697cf9` |
+| `molfile.parg` (the MDL molfile scan: V2000 + V3000 framing + SDfile records, v1.2.0) | `ea3b621f639cf7cde6829c0c7691edebc8193ea8076393edc3baec6f59cea48b` |
+| `molfile.json` (the compiled artifact) | `accc25a5cd835c94d2d859bd9dc605f9ef7019c8fb63a0d03f987ed2a9a8fa64` |
 | `inchi.parg` (the standard-InChI layer scan) | `c1d0a68c6b888b086e75fe559174f5e22b7d35f88a49a2166f53c28b95c888c8` |
 | `inchi.json` (the compiled artifact) | `e5121fbea692c8a0e7be2cab468026c798caff0ce17566eb29fc780d836ea2ed` |
 | `rinchi.parg` (the RInChI string scan) | `e38f0d9dc65f5d8a43265a16436cffaf051e954eca8e7f4867a43124a21cbc7d` |
@@ -46,6 +46,22 @@ InChIs byte-for-byte** (tests/smiles_gate.rs); 6 recorded skips — the
 the fixture smiles carry two S=O where the recorded molfile carries
 one — the recording pipeline owns the fixture fix).
 
+**molfile v1.2.0 (chemomer#122)** — the V3000 CTAB line framing and
+the SDfile record framing join the contract. `v30_line` frames the
+`M  V30 ` prefix structurally (a block line lacking it falls to
+m_line / other_line, where the engine's prefix check reports it); the
+`sdf` entry frames the `$$$$` terminators (`$$$$` + optional
+whitespace + line end — the `trim_end() == "$$$$"` read — and the
+`!`-guard against any character is the end-of-input anchor) with
+record lines riding ordered k0 captures. The semantics stay
+engine-side: the `-` continuation joins and tokenization of the
+joined logical line, the COUNTS/atom/bond block walk, and the
+empty-record filter. Both flavors' bodies are consumed through the
+one `mol` entry's body shapes; the version dispatch reads the counts
+capture's k33 granule. The order-dependence lints are unchanged from
+v1.1.0's baseline (the body_line classification is ordered choice by
+design).
+
 ## Compiling
 
 The artifacts are produced by the `Parsanol::PARG` compiler
@@ -74,7 +90,7 @@ through the new artifact).
 
 | Contract | Scans | Stays engine-side |
 |---|---|---|
-| `molfile.parg` | the V2000 counts line, atom block, bond block, property tail (the alias, M CHG/M ISO and M Sgroup families) | the V3000 CTAB flavor, the SDfile record framing, the charge-code table, the polymer semantics |
+| `molfile.parg` | the V2000 counts line, atom block, bond block, property tail (the alias, M CHG/M ISO and M Sgroup families); the V3000 `M  V30 ` line framing; the SDfile `$$$$` record framing | the V3000 continuation joins, the COUNTS/atom/bond block walk and the CTAB tail blocks, the empty-record filter, the charge-code table, the polymer semantics |
 | `inchi.parg` | the InChI=1S/ prefix, the Hill-order formula, the /c /h /q /p /i /b /t /m /s token streams, the exchanged-H record | the branch-stack bond walk, the atom-range/order checks, the element table, the reconstruct stage |
 | `rinchi.parg` | the RInChI/RAuxInfo headers, the `<>` role groups, the `!` components, the /u //d trailing tags | the identifier validation (the key machinery), the reaction framing (RXN/RD files), every emitter |
 

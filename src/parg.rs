@@ -25,7 +25,7 @@
 //! percent of a scan), so fresh-per-parse ships;
 //! tests/parg_stress.rs pins the isolation the shape relies on.
 
-use parsanol::portable::ast::AstNode;
+pub(crate) use parsanol::portable::ast::AstNode;
 use parsanol::portable::cache::DenseCache;
 use parsanol::portable::grammar::Grammar;
 use parsanol::{AstArena, PargArtifact, PortableParser};
@@ -80,6 +80,24 @@ impl<'input> Segments<'input> {
             }
         }
         None
+    }
+
+    /// The text from a column to the line's end — `line.get(start..)`
+    /// over the parsed line. `None` when the line ends before the
+    /// column.
+    pub(crate) fn column_from(&self, start: usize) -> Option<&'input str> {
+        self.items
+            .iter()
+            .rev()
+            .find_map(|&(column, offset, length)| {
+                let finish = column + length;
+                if column <= start && finish >= start {
+                    self.input
+                        .get(offset + start - column..offset + finish - column)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Builds the segment stream from a line-shaped capture node. The
@@ -502,6 +520,7 @@ parg_grammar!(
     include_str!("../grammar/molfile.json"),
     "mol"
 );
+parg_grammar!(sdf_grammar, include_str!("../grammar/molfile.json"), "sdf");
 parg_grammar!(
     inchi_grammar,
     include_str!("../grammar/inchi.json"),
@@ -524,6 +543,14 @@ pub(crate) fn with_molfile_capture<T>(
     walk: impl FnOnce(Capture<'_>) -> crate::Result<T>,
 ) -> crate::Result<T> {
     parse_entry(molfile_grammar()?, "molfile", input, walk)
+}
+
+/// Parses the SDfile contract's entry and walks the capture tree.
+pub(crate) fn with_sdf_capture<T>(
+    input: &str,
+    walk: impl FnOnce(Capture<'_>) -> crate::Result<T>,
+) -> crate::Result<T> {
+    parse_entry(sdf_grammar()?, "sdf", input, walk)
 }
 
 /// Parses the InChI contract's entry and walks the capture tree.
