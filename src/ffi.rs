@@ -112,11 +112,20 @@ pub unsafe extern "C" fn chemomer_inchikey(molfile: *const c_char) -> *mut c_cha
     }
 }
 
-/// The ABI version: 1.
+/// The ABI version: 2 (v1 exports unchanged; v2 adds
+/// [`chemomer_rinchi_record_from_rxn2`]).
 #[no_mangle]
 pub extern "C" fn chemomer_ffi_version() -> u32 {
-    1
+    2
 }
+
+/// v2 derive options for [`chemomer_rinchi_record_from_rxn2`]. Bit 0
+/// forces the equilibrium reading — the reference CLI's
+/// `/force-equilibrium`: the identifier emits the `/d` form (no `+`
+/// direction assignment) and the key shapes take the equilibrium
+/// prefixes, exactly as the oracle corpus's `forceEquilibrium` cases
+/// record them.
+pub const CHEMOMER_RINCHI_FORCE_EQUILIBRIUM: u32 = 0x1;
 
 // -- the reaction-identity surface (the RInChI layer) -------------------
 // The RXNfile and RDfile input edges derive the five oracle lines
@@ -186,6 +195,71 @@ pub unsafe extern "C" fn chemomer_rinchi_web_key_from_rxn(rxnfile: *const c_char
         reaction.rinchi_web_key()
     });
     exported(value, "web key")
+}
+
+/// v2: derives the five-line identity record from a V2000 RXNfile in
+/// one call. The return is one newline-separated string in
+/// oracle-fixture order — `rinchi`, `rauxinfo`, `rinchikey`,
+/// `longKey`, `webKey` — so a single crossing carries the record the
+/// v1 exports needed five calls for. (RInChI lines are single-line by
+/// construction, so the separator is unambiguous; a NUL separator
+/// would truncate at the C-string boundary.) `options` carries the
+/// [`CHEMOMER_RINCHI_FORCE_EQUILIBRIUM`] bit; unknown bits are
+/// rejected so a silent option drift can't derive differently than the
+/// caller believes. Null on error.
+///
+/// # Safety
+/// `rxnfile` must be a NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn chemomer_rinchi_record_from_rxn2(
+    rxnfile: *const c_char,
+    options: u32,
+) -> *mut c_char {
+    if options & !CHEMOMER_RINCHI_FORCE_EQUILIBRIUM != 0 {
+        let value = crate::error::err(format!("unknown rinchi record options: {options:#x}"));
+        return exported(value, "rinchi record");
+    }
+    // The option mutates the parsed reaction, so this edge owns the
+    // parse instead of routing through derive_reaction's borrow.
+    let value = (|| -> crate::Result<String> {
+        if rxnfile.is_null() {
+            return crate::error::err("reaction input pointer is null");
+        }
+        let text = CStr::from_ptr(rxnfile)
+            .to_str()
+            .map_err(|_| crate::error::Error::new("reaction input is not valid UTF-8"))?;
+        let mut reaction = crate::parse_rxnfile(text)?;
+        if options & CHEMOMER_RINCHI_FORCE_EQUILIBRIUM != 0 {
+            reaction.set_directionality(crate::rinchi::Directionality::Equilibrium);
+        }
+        let parts = [
+            reaction.rinchi_string()?,
+            reaction.rinchi_auxinfo()?,
+            reaction.rinchi_short_key()?,
+            reaction.rinchi_long_key()?,
+            reaction.rinchi_web_key()?,
+        ];
+        Ok(parts.join("\n"))
+    })();
+    let pointer = value.map(|record| {
+        CString::new(record)
+            .expect("newline separator, no NULs")
+            .into_raw()
+    });
+    exported_raw(pointer, "rinchi record")
+}
+
+/// The unchecked-CString counterpart of [`exported`]: materializes an
+/// assembled byte buffer (interior NULs allowed) under the same
+/// contract — null on error, the message on the thread-local slot.
+fn exported_raw(value: crate::Result<*mut c_char>, what: &str) -> *mut c_char {
+    match value {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            set_error(format!("{what}: {}", error.message()));
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Derives the RInChI identifier from an MDL RDfile — the second
@@ -379,6 +453,86 @@ mod tests {
                 "Web-RInChIKey=XLYOFNOQVPJJNPIXP-NUHFFFADPSCTJSA"
             );
         }
+    }
+
+    #[test]
+    fn the_v2_record_carries_the_five_lines_nul_separated() {
+        let rxnfile = CString::new(WATER_RXN).unwrap();
+        unsafe {
+            let pointer = chemomer_rinchi_record_from_rxn2(rxnfile.as_ptr(), 0);
+            assert!(!pointer.is_null());
+            // A real consumer walks the allocation past the interior
+            // NULs (the contract documents the shape); CStr::from_ptr
+            // would stop at the first one by definition.
+            let text = CStr::from_ptr(pointer).to_string_lossy().into_owned();
+            chemomer_string_free(pointer);
+            let lines: Vec<&str> = text.split('\n').collect();
+            assert_eq!(lines.len(), 5, "five lines: {lines:?}");
+            assert_eq!(lines[0], "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d+");
+            assert_eq!(
+                lines[1],
+                format!("RAuxInfo=1.00.1/{WATER_RAUXINFO_GROUP}<>{WATER_RAUXINFO_GROUP}")
+            );
+            assert_eq!(
+                lines[2],
+                "Short-RInChIKey=SA-FUHFF-XLYOFNOQVP-XLYOFNOQVP-UHFFFADPSC-NUHFF-NUHFF-NUHFF-ZZZ"
+            );
+            assert_eq!(
+                lines[3],
+                "Long-RInChIKey=SA-FUHFF-XLYOFNOQVPJJNP-UHFFFAOYSA-N--XLYOFNOQVPJJNP-UHFFFAOYSA-N"
+            );
+            assert_eq!(lines[4], "Web-RInChIKey=XLYOFNOQVPJJNPIXP-NUHFFFADPSCTJSA");
+        }
+    }
+
+    #[test]
+    fn the_v2_record_forces_the_equilibrium_reading() {
+        // The equil-water-is-water oracle: /d= (no direction
+        // assignment) and the equilibrium key prefixes — the recorded
+        // fixture bytes, verbatim.
+        let rxnfile = CString::new(WATER_RXN).unwrap();
+        unsafe {
+            let pointer = chemomer_rinchi_record_from_rxn2(
+                rxnfile.as_ptr(),
+                CHEMOMER_RINCHI_FORCE_EQUILIBRIUM,
+            );
+            assert!(!pointer.is_null());
+            let text = CStr::from_ptr(pointer).to_string_lossy().into_owned();
+            chemomer_string_free(pointer);
+            let lines: Vec<&str> = text.split('\n').collect();
+            assert_eq!(lines.len(), 5, "five lines: {lines:?}");
+            assert_eq!(lines[0], "RInChI=1.00.1S/H2O/h1H2<>H2O/h1H2/d=");
+            assert_eq!(
+                lines[2],
+                "Short-RInChIKey=SA-EUHFF-XLYOFNOQVP-XLYOFNOQVP-UHFFFADPSC-NUHFF-NUHFF-NUHFF-ZZZ"
+            );
+            assert_eq!(
+                lines[3],
+                "Long-RInChIKey=SA-EUHFF-XLYOFNOQVPJJNP-UHFFFAOYSA-N--XLYOFNOQVPJJNP-UHFFFAOYSA-N"
+            );
+            assert_eq!(lines[4], "Web-RInChIKey=XLYOFNOQVPJJNPIXP-NUHFFFADPSCTJSA");
+        }
+    }
+
+    #[test]
+    fn the_v2_record_rejects_unknown_option_bits() {
+        let rxnfile = CString::new(WATER_RXN).unwrap();
+        unsafe {
+            let pointer = chemomer_rinchi_record_from_rxn2(rxnfile.as_ptr(), 0x2);
+            assert!(pointer.is_null());
+            let message = CStr::from_ptr(chemomer_last_error())
+                .to_string_lossy()
+                .into_owned();
+            assert!(
+                message.contains("unknown rinchi record options"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_abi_reports_version_2() {
+        assert_eq!(chemomer_ffi_version(), 2);
     }
 
     #[test]
