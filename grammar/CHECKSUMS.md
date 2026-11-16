@@ -18,6 +18,8 @@ hashes below whenever a contract changes.
 | `inchi.json` (the compiled artifact) | `e5121fbea692c8a0e7be2cab468026c798caff0ce17566eb29fc780d836ea2ed` |
 | `rinchi.parg` (the RInChI string scan) | `e38f0d9dc65f5d8a43265a16436cffaf051e954eca8e7f4867a43124a21cbc7d` |
 | `rinchi.json` (the compiled artifact) | `bca7d7290d61e5deac6ecac6a4273cf1c97d0f4008e0ee6773c2b67a99487d76` |
+| `smiles.parg` (the day-1 SMILES scan, v1.0.0) | `522e868047f4460faadf319e4f3e53b9e803a8ce0d1b9c33960b9c5abcafabf0` |
+| `smiles.json` (the compiled artifact) | `ad5fb4709277895560033d101e55747aa3de1aa9972332594f08f0e1027431bf` |
 
 **molfile v1.1.0 (rs#110 round 2)** — the capture surface shrank to
 what the engine reads: the header lines, the line-shape wrappers
@@ -30,6 +32,19 @@ consumes every column verbatim (the inline suite is unchanged and
 passes). The sample profile that drove this: malloc/free dominated the
 water bench (~55%), the arena Hash stores per named capture and the
 flatten walk's String keys were the bulk of it.
+
+**smiles v1.0.0 (chemomer#121)** — the day-1 SMILES reader: chains,
+branches, single-digit ring closures, organic + bracket atoms,
+charges, isotopes (`as iso`), explicit H counts, aromatic markers.
+The reader walks the capture tree into the same `graph::Structure`
+the molfile path produces (isotopic H folded onto carriers at parse,
+the pipeline shared verbatim through `Engine::from_read`). The gate:
+**1,537 identity-fixture SMILES derive the recorded 1.07.5-oracle
+InChIs byte-for-byte** (tests/smiles_gate.rs); 6 recorded skips — the
+4 tetrahedral cases + 2 directional-bond cases (the contract's phase
+2) and the 2 transcription disagreements (sulfuric-acid/sulfate-2:
+the fixture smiles carry two S=O where the recorded molfile carries
+one — the recording pipeline owns the fixture fix).
 
 ## Compiling
 

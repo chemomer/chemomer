@@ -136,6 +136,25 @@ pub const CHEMOMER_RINCHI_FORCE_EQUILIBRIUM: u32 = 0x1;
 // [`chemomer_last_error`], returned strings released with
 // [`chemomer_string_free`].
 
+/// Derives the identifier from a day-1 SMILES string (the
+/// `smiles.parg` contract; see `crate::smiles::read`). Null on error.
+///
+/// # Safety
+/// `smiles` must be a NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn chemomer_from_smiles(smiles: *const c_char) -> *mut c_char {
+    let value = (|| -> crate::Result<String> {
+        if smiles.is_null() {
+            return crate::error::err("smiles input pointer is null");
+        }
+        let text = CStr::from_ptr(smiles)
+            .to_str()
+            .map_err(|_| crate::error::Error::new("smiles input is not valid UTF-8"))?;
+        crate::Engine::from_smiles(text)?.inchi_string()
+    })();
+    exported(value, "smiles identifier")
+}
+
 /// Derives the RInChI identifier from a V2000 RXNfile. Null on error.
 ///
 /// # Safety
