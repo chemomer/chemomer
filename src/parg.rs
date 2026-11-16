@@ -173,6 +173,11 @@ pub(crate) struct Capture<'input> {
 }
 
 impl<'input> Capture<'input> {
+    /// The input the capture tree was parsed from.
+    pub(crate) fn input(&self) -> &'input str {
+        self.input
+    }
+
     /// The named children of a capture hash.
     pub(crate) fn hash_items(&self, node: &AstNode) -> Vec<(String, AstNode)> {
         match *node {
@@ -188,7 +193,7 @@ impl<'input> Capture<'input> {
     /// nothing) are skipped — a repetition's iteration arrays carry
     /// them as leading elements, and their (0, 0) would poison the
     /// minimum otherwise.
-    fn span(&self, node: &AstNode) -> (usize, usize) {
+    pub(crate) fn span(&self, node: &AstNode) -> (usize, usize) {
         match *node {
             AstNode::InputRef { offset, length } if length > 0 => {
                 (offset as usize, offset as usize + length as usize)
@@ -507,6 +512,11 @@ parg_grammar!(
     include_str!("../grammar/rinchi.json"),
     "rinchi"
 );
+parg_grammar!(
+    smiles_grammar,
+    include_str!("../grammar/smiles.json"),
+    "smiles"
+);
 
 /// Parses the molfile contract's entry and walks the capture tree.
 pub(crate) fn with_molfile_capture<T>(
@@ -530,6 +540,14 @@ pub(crate) fn with_rinchi_capture<T>(
     walk: impl FnOnce(Capture<'_>) -> crate::Result<T>,
 ) -> crate::Result<T> {
     parse_entry(rinchi_grammar()?, "rinchi", input, walk)
+}
+
+/// Parses the SMILES contract's entry and walks the capture tree.
+pub(crate) fn with_smiles_capture<T>(
+    input: &str,
+    walk: impl FnOnce(Capture<'_>) -> crate::Result<T>,
+) -> crate::Result<T> {
+    parse_entry(smiles_grammar()?, "smiles", input, walk)
 }
 
 /// The parse root: a scanner's entry capture.

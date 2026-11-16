@@ -30,6 +30,7 @@ pub mod options;
 mod parg;
 pub mod reverse;
 pub mod rinchi;
+pub mod smiles;
 
 pub use engine::Engine;
 pub use error::{Error, Result};
@@ -56,6 +57,13 @@ pub fn parse_sdf(input: &str) -> Vec<String> {
 /// reverse direction (see [`reverse::structure_from_inchi`]).
 pub fn structure_from_inchi(inchi: &str) -> Result<Structure> {
     reverse::structure_from_inchi(inchi)
+}
+
+/// Reads a day-1 SMILES string into a [`Structure`] — the local
+/// SMILES ingest edge (the `smiles.parg` contract; see
+/// [`smiles::read`]).
+pub fn parse_smiles(input: &str) -> Result<Structure> {
+    smiles::read(input)
 }
 
 /// Parses an MDL V2000 RXNfile into a [`RinchiReaction`] — the

@@ -90,6 +90,24 @@ impl Engine {
         } else {
             molfile::parse_with_polymers(input)?
         };
+        Self::from_read(original, options)
+    }
+
+    /// Reads a day-1 SMILES string and derives the identity — the
+    /// local SMILES ingest edge (the `smiles.parg` contract). The
+    /// pipeline after the read is the molfile path's, shared verbatim;
+    /// the input carries no polymer frame, so the polymer treatment
+    /// sees none.
+    pub fn from_smiles(input: &str) -> Result<Self> {
+        Self::from_read(crate::smiles::read(input)?, Options::default())
+    }
+
+    /// The pipeline over a READ structure: everything
+    /// [`Self::with_options`] does after the molfile parse — the
+    /// whole-structure preprocessing, the transforms, the component
+    /// split, the assembly. [`Self::from_smiles`] shares it verbatim.
+    fn from_read(original: Structure, options: Options) -> Result<Self> {
+        // The whole-structure preprocessing (the reference's read +
         // The whole-structure preprocessing (the reference's read +
         // PreprocessOneStructure, runichi3.c:540-720): the ion-pair
         // normalization and the explicit-H fold run over the WHOLE
