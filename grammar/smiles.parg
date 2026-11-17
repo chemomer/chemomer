@@ -6,11 +6,13 @@ grammar ChemomerSmiles version "1.0.0" {
   ## identity fixtures (all 1,543 carry SMILES + the recorded 1.07.5
   ## InChI) gate it byte-for-byte through the existing canonicalization.
   ##
-  ## Phase 2 (not this contract): tetrahedral @/@@ parity (captured,
-  ## rejected by the walk with the phase note), directional / \ bonds
-  ## (captured), %nn ring ids (captured), dot-disconnected components
-  ## (rejected — the corpus carries none), SMILES writing (engine-side,
-  ## algorithmic).
+  ## Phase 2 (carried — chemomer#128): tetrahedral @/@@ parity and
+  ## directional / \ bonds ride into drawn geometry (the synthesis
+  ## lays the parity ligands out and wedges the hand; the directional
+  ## substituents lift to their drawn sides), so the /t and /b layers
+  ## derive like a drawn molfile. %nn ring ids are captured. Still
+  ## outside: dot-disconnected components (rejected — the corpus
+  ## carries none) and SMILES writing (engine-side, algorithmic).
   ##
   ## Language notes: strict PEG, no repetition backtracking; the
   ## implicit bond between two aromatic atoms reads aromatic (the

@@ -1551,6 +1551,8 @@ fn reconstruct(layers: Layers) -> Result<Structure> {
         fold_source: Vec::new(),
         chiral_flag: false,
         polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
     };
     if has_stereo {
         synthesize_stereo(

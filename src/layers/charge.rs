@@ -66,6 +66,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(ChargeLayer.emit(&s).unwrap(), Some("q+1".to_string()));
     }
@@ -87,6 +89,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(ChargeLayer.emit(&s).unwrap(), Some("q-1".to_string()));
 
@@ -102,6 +106,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(ChargeLayer.emit(&s).unwrap(), Some("q-1".to_string()));
     }
@@ -127,6 +133,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         standardization::normalize_internal_salts(&mut s);
         assert!(s.atoms.iter().all(|atom| atom.charge == 0));
@@ -161,6 +169,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         standardization::normalize_internal_salts(&mut s);
         assert_eq!(s.atoms[0].charge, 1);

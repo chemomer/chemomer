@@ -74,6 +74,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -96,6 +98,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -125,6 +129,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
     }
@@ -153,6 +159,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
 
@@ -174,6 +182,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(ProtonLayer::default().emit(&s).unwrap(), None);
     }
@@ -199,6 +209,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -222,6 +234,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         assert_eq!(
             ProtonLayer::default().emit(&s).unwrap(),
@@ -251,6 +265,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         };
         let hydrogens = s.hydrogens();
         assert_eq!(hydrogens[2], 0);
