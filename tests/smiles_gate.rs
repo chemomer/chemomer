@@ -138,8 +138,7 @@ fn the_smiles_reader_rejects_the_documented_edges() {
     // The phase-2 chirality spellings outside the contract's two
     // markers fail cleanly; dots: the grammar rejects (no component
     // separator).
-    let error = chemomer::parse_smiles("[C@TH5](N)(C)C(=O)O")
-        .expect_err("@TH5 should not read");
+    let error = chemomer::parse_smiles("[C@TH5](N)(C)C(=O)O").expect_err("@TH5 should not read");
     assert!(
         error.message().contains("phase-2 contract"),
         "{error} lacks the note"
