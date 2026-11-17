@@ -1001,6 +1001,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
         }
     }
 

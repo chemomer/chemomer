@@ -88,6 +88,14 @@ pub struct Structure {
     /// the structures align index-for-index) — the aux numbering's
     /// exact original-atom map, hydrogen-bearing originals included.
     pub fold_source: Vec<usize>,
+    /// SMILES stereo markers pending geometry synthesis — the SMILES
+    /// reader's parse state (the molfile reader never sets these):
+    /// atom index → 1 (`@`/`@TH1`) | 2 (`@@`/`@TH2`), bond index →
+    /// 1 (`/`) | 2 (`\`). The reader's synthesis consumes both into
+    /// `stereo_bonds` + `positions` and clears them, so the wedge
+    /// perception reads the SMILES parity like any drawn molfile.
+    pub smiles_parities: std::collections::BTreeMap<usize, u8>,
+    pub bond_directions: std::collections::BTreeMap<usize, u8>,
 }
 
 /// The experimental tautomerism extension flags (ichiparm.c
@@ -279,6 +287,22 @@ impl Structure {
                 chiral_flag: self.chiral_flag,
                 fold_source: members.iter().map(|&a| source(a)).collect(),
                 polymer: None,
+                smiles_parities: self
+                    .smiles_parities
+                    .iter()
+                    .filter_map(|(old, &mark)| {
+                        let position = members.iter().position(|&a| a == *old)?;
+                        Some((position, mark))
+                    })
+                    .collect(),
+                bond_directions: self
+                    .bond_directions
+                    .iter()
+                    .filter_map(|(old, &dir)| {
+                        let position = bond_order.iter().position(|&b| b == *old)?;
+                        Some((position, dir))
+                    })
+                    .collect(),
             });
         }
         fragments

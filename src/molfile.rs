@@ -341,6 +341,8 @@ fn parse_v2000_capture(
         fold_source: Vec::new(),
         chiral_flag: chiral_flag != 0,
         polymer,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
     })
 }
 
@@ -473,6 +475,8 @@ fn parse_v3000(lines: &[&str]) -> Result<Structure> {
         fold_source: Vec::new(),
         chiral_flag: chiral_flag != 0,
         polymer: None,
+        smiles_parities: Default::default(),
+        bond_directions: Default::default(),
     })
 }
 

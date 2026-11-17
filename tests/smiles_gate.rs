@@ -40,9 +40,14 @@ fn the_smiles_reader_derives_the_recorded_identities() {
         let Some(smiles) = case["smiles"].as_str() else {
             continue;
         };
-        if smiles.contains('@') || smiles.contains('/') || smiles.contains('\\') {
-            // The tetrahedral/directional phase-2 exclusions, recorded
-            // in the gate output so a later phase closes them.
+        if matches!(id, "identity/e-2-butene" | "identity/z-2-butene") {
+            // The fixtures' molfile legs were recorded without
+            // coordinates, so the 1.07.5 oracle dropped the E/Z layer —
+            // the recorded identities are stereo-less (both butenes
+            // record the same string). The reader now derives the /b
+            // signs (verified against the oracle over coordinate
+            // drawings: trans → +, cis → −), so un-skipping these two
+            // needs a corpus re-record from coordinate-bearing molfiles.
             skipped_phase2.push(id.to_string());
             continue;
         }
@@ -97,24 +102,47 @@ fn the_smiles_reader_derives_the_recorded_identities() {
 }
 
 #[test]
-fn the_smiles_reader_rejects_the_documented_edges() {
-    // The phase-2 rejection carries the note; the day-1 edges fail
-    // cleanly.
-    for (input, note) in [
-        ("[C@H](N)(C)C(=O)O", "phase 2"),
-        ("F/C=C/F", "phase 2"),
-        ("C.", ""), // dots: the grammar rejects (no component separator)
+fn the_smiles_reader_derives_the_stereo_markers() {
+    // The phase-2 markers ride through: the alanine enantiomers match
+    // the oracle bytes (the corpus gate runs them now), and the E/Z
+    // spellings split the /b signs the coordinate drawings record.
+    for (input, oracle) in [
+        (
+            "N[C@@H](C)C(=O)O",
+            "InChI=1S/C3H7NO2/c1-2(4)3(5)6/h2H,4H2,1H3,(H,5,6)/t2-/m1/s1",
+        ),
+        (
+            "N[C@H](C)C(=O)O",
+            "InChI=1S/C3H7NO2/c1-2(4)3(5)6/h2H,4H2,1H3,(H,5,6)/t2-/m0/s1",
+        ),
     ] {
-        match chemomer::parse_smiles(input) {
-            Ok(_) => panic!("{input:?} should not read"),
-            Err(error) => {
-                if !note.is_empty() {
-                    assert!(
-                        error.message().contains(note),
-                        "{input:?}: {error} lacks {note:?}"
-                    );
-                }
-            }
-        }
+        let engine = chemomer::Engine::from_smiles(input).expect("reads");
+        let derived = engine.inchi_string().expect("derives");
+        assert_eq!(derived, oracle, "{input:?}");
     }
+    let e = chemomer::Engine::from_smiles("C/C=C/C")
+        .expect("reads")
+        .inchi_string()
+        .expect("derives");
+    let z = chemomer::Engine::from_smiles("C/C=C\\C")
+        .expect("reads")
+        .inchi_string()
+        .expect("derives");
+    assert!(e.ends_with("/b4-3+"), "{e:?}");
+    assert!(z.ends_with("/b4-3-"), "{z:?}");
+}
+
+#[test]
+fn the_smiles_reader_rejects_the_documented_edges() {
+    // The phase-2 chirality spellings outside the contract's two
+    // markers fail cleanly; dots: the grammar rejects (no component
+    // separator).
+    let error = chemomer::parse_smiles("[C@TH5](N)(C)C(=O)O")
+        .err()
+        .expect("@TH5 should not read");
+    assert!(
+        error.message().contains("phase-2 contract"),
+        "{error} lacks the note"
+    );
+    assert!(chemomer::parse_smiles("C.").is_err());
 }
