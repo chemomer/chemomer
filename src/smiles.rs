@@ -503,8 +503,7 @@ fn synthesize_stereo(structure: &mut Structure) -> crate::Result<()> {
         let angles = [90.0f64, 210.0, 330.0];
         for (slot, &neighbor) in neighbors.iter().take(3).enumerate() {
             let radians = angles[slot].to_radians();
-            structure.positions[neighbor] =
-                (cx + radians.cos(), radians.sin());
+            structure.positions[neighbor] = (cx + radians.cos(), radians.sin());
         }
         let down: u8 = if *mark == 1 { 6 } else { 1 };
         // The wedge code: 1 = up (solid), 6 = dash. The hand flips
@@ -527,8 +526,7 @@ fn synthesize_stereo(structure: &mut Structure) -> crate::Result<()> {
 fn double_bond_endpoint(structure: &Structure, a: usize, b: usize) -> Option<(usize, usize)> {
     let is_double_partner = |atom: usize, other: usize| {
         structure.bonds.iter().any(|&(from, to, kind)| {
-            kind == 2
-                && ((from == atom && to != other) || (to == atom && from != other))
+            kind == 2 && ((from == atom && to != other) || (to == atom && from != other))
         })
     };
     if is_double_partner(a, b) {

@@ -313,8 +313,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
-        smiles_parities: Default::default(),
-        bond_directions: Default::default(),
+            smiles_parities: Default::default(),
+            bond_directions: Default::default(),
         };
         assert!(segments(
             &structure,
@@ -351,8 +351,8 @@ mod tests {
             taut_ext: Default::default(),
             chiral_flag: false,
             polymer: None,
-        smiles_parities: Default::default(),
-        bond_directions: Default::default(),
+            smiles_parities: Default::default(),
+            bond_directions: Default::default(),
         };
         assert!(segments(
             &structure,
