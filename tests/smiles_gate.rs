@@ -1,9 +1,10 @@
-//! The SMILES reader gate (chemomer#121): every identity fixture's
-//! `smiles` field reads through the day-1 contract and derives the
-//! recorded 1.07.5-oracle InChI byte-for-byte — 1,543 cases, no new
-//! oracle, no fixture edits. The recorded exclusions: the four
-//! tetrahedral cases (the contract's phase 2 — the reader rejects the
-//! markers with the phase note) and the directional-bond pair.
+//! The SMILES reader gate (chemomer#121, phase 2 in chemomer#128):
+//! every identity fixture's `smiles` field reads through the contract
+//! and derives the recorded 1.07.5-oracle InChI byte-for-byte — no
+//! new oracle, no fixture edits. The alanine enantiomers run with the
+//! carried stereo; the recorded exclusions: the two butene cases
+//! (coordinate-free recordings, see the skip note) and the two
+//! transcription disagreements.
 
 use std::fs;
 use std::path::PathBuf;
@@ -138,8 +139,7 @@ fn the_smiles_reader_rejects_the_documented_edges() {
     // markers fail cleanly; dots: the grammar rejects (no component
     // separator).
     let error = chemomer::parse_smiles("[C@TH5](N)(C)C(=O)O")
-        .err()
-        .expect("@TH5 should not read");
+        .expect_err("@TH5 should not read");
     assert!(
         error.message().contains("phase-2 contract"),
         "{error} lacks the note"
