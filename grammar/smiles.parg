@@ -67,7 +67,11 @@ grammar ChemomerSmiles version "1.0.0" {
 
   hcount = ( "H" [ ( digit ) / ( %x3F ) ] )
 
-  charge = ( ( ( "+" / "-" ) [ 0*2( digit ) ] ) )
+  ## The charge: a sign with an optional 0-2 digit magnitude, or the
+  ## repeated-sign spelling (`++` / `--`) where each repeat adds one
+  ## (chemomer#126 — real-world writers spell ferric `[Fe++]`; the
+  ## walk's parse_charge already folds the repeats).
+  charge = ( ( ( "++" / "--" ) / ( ( "+" / "-" ) [ 0*2( digit ) ] ) ) )
 
   ## The bond symbols. `/` and `\` are directional (phase 2 semantics);
   ## `:` reads aromatic; absence means implicit (aromatic between two
@@ -90,6 +94,8 @@ grammar ChemomerSmiles version "1.0.0" {
     accept "[13CH4]"
     accept "[2H]C([2H])([2H])[2H]"
     accept "[Fe+2]"
+    accept "[Fe++]"
+    accept "[O--]"
     accept "[O-]C(=O)C"
     accept "n1ccccc1"
     accept "c1ccsc1"

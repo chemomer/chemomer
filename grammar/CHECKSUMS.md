@@ -18,8 +18,8 @@ hashes below whenever a contract changes.
 | `inchi.json` (the compiled artifact) | `e5121fbea692c8a0e7be2cab468026c798caff0ce17566eb29fc780d836ea2ed` |
 | `rinchi.parg` (the RInChI string scan) | `e38f0d9dc65f5d8a43265a16436cffaf051e954eca8e7f4867a43124a21cbc7d` |
 | `rinchi.json` (the compiled artifact) | `bca7d7290d61e5deac6ecac6a4273cf1c97d0f4008e0ee6773c2b67a99487d76` |
-| `smiles.parg` (the day-1 SMILES scan, v1.0.0) | `522e868047f4460faadf319e4f3e53b9e803a8ce0d1b9c33960b9c5abcafabf0` |
-| `smiles.json` (the compiled artifact) | `ad5fb4709277895560033d101e55747aa3de1aa9972332594f08f0e1027431bf` |
+| `smiles.parg` (the day-1 SMILES scan, v1.0.0) | `fb2cfce953eab0b5b52a92413a1a2b967b348c5379217fc1ac355a5d1b91082a` |
+| `smiles.json` (the compiled artifact) | `35c4540ba849de98c7822cbe0784e93958da67d6510c5ecd7af6d8843336c690` |
 
 **molfile v1.1.0 (rs#110 round 2)** — the capture surface shrank to
 what the engine reads: the header lines, the line-shape wrappers
@@ -61,6 +61,14 @@ one `mol` entry's body shapes; the version dispatch reads the counts
 capture's k33 granule. The order-dependence lints are unchanged from
 v1.1.0's baseline (the body_line classification is ordered choice by
 design).
+
+**smiles v1.0.0, the repeated-sign charge spelling (chemomer#126)** —
+the charge rule gains the `++` / `--` alternative (each repeat adds
+one): real-world writers spell ferric `[Fe++]`, the walk's
+parse_charge already folded the repeats, only the grammar rejected
+them. The inline suite carries the accepts; the asciichem corpus's
+`structure/smiles/ferric-plusplus-alt` joins the recorded identity
+intersection on the next recording run.
 
 ## Compiling
 
