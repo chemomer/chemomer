@@ -1,10 +1,11 @@
 //! The SMILES reader gate (chemomer#121, phase 2 in chemomer#128):
 //! every identity fixture's `smiles` field reads through the contract
 //! and derives the recorded 1.07.5-oracle InChI byte-for-byte — no
-//! new oracle, no fixture edits. The alanine enantiomers run with the
-//! carried stereo; the recorded exclusions: the two butene cases
-//! (coordinate-free recordings, see the skip note) and the two
-//! transcription disagreements.
+//! new oracle, no fixture edits. The stereo cases all run (the
+//! alanine enantiomers through the carried @/@@; the butene pair
+//! through the corpus's drawn-coordinate re-record, inchi-tests
+//! v0.3.42); the recorded exclusions: the two transcription
+//! disagreements (sulfuric-acid/sulfate-2).
 
 use std::fs;
 use std::path::PathBuf;
@@ -41,17 +42,6 @@ fn the_smiles_reader_derives_the_recorded_identities() {
         let Some(smiles) = case["smiles"].as_str() else {
             continue;
         };
-        if matches!(id, "identity/e-2-butene" | "identity/z-2-butene") {
-            // The fixtures' molfile legs were recorded without
-            // coordinates, so the 1.07.5 oracle dropped the E/Z layer —
-            // the recorded identities are stereo-less (both butenes
-            // record the same string). The reader now derives the /b
-            // signs (verified against the oracle over coordinate
-            // drawings: trans → +, cis → −), so un-skipping these two
-            // needs a corpus re-record from coordinate-bearing molfiles.
-            skipped_phase2.push(id.to_string());
-            continue;
-        }
         if matches!(id, "identity/sulfuric-acid" | "identity/sulfate-2") {
             // The fixture's smiles transcription disagrees with its
             // recorded molfile (two S=O where the molfile carries one,
