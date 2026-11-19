@@ -12,8 +12,14 @@ grammar ChemomerSmiles version "1.1.0" {
   ## substituents lift to their drawn sides), so the /t and /b layers
   ## derive like a drawn molfile. %nn ring ids are captured. The
   ## component dot landed (chemomer#131): [Na+].[Cl-] reads as two
-  ## components in one structure. Still outside: SMILES writing
-  ## (engine-side, algorithmic).
+  ## components in one structure.
+  ##
+  ## Writing (engine-side, algorithmic — chemomer#135): the
+  ## canonical writer (`chemomer::write_smiles`) emits over the same
+  ## contract — canonical numbering, ring digits with kind carriers,
+  ## bond symbols only off-default, isotopic carriers re-expanded —
+  ## gated by the identity corpus's stability + InChI agreement. The
+  ## @/@@ and /\ carriers on the write side are the next phase.
   ##
   ## Language notes: strict PEG, no repetition backtracking; the
   ## implicit bond between two aromatic atoms reads aromatic (the
