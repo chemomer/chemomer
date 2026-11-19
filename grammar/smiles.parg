@@ -1,4 +1,4 @@
-grammar ChemomerSmiles version "1.0.0" {
+grammar ChemomerSmiles version "1.1.0" {
   ## The day-1 SMILES reader — atoms, bonds, branches, ring closures,
   ## bracket charges/isotopes/H-counts, aromatic markers — as a PARG
   ## text contract (chemomer#121). The reader builds the same
@@ -10,16 +10,26 @@ grammar ChemomerSmiles version "1.0.0" {
   ## directional / \ bonds ride into drawn geometry (the synthesis
   ## lays the parity ligands out and wedges the hand; the directional
   ## substituents lift to their drawn sides), so the /t and /b layers
-  ## derive like a drawn molfile. %nn ring ids are captured. Still
-  ## outside: dot-disconnected components (rejected — the corpus
-  ## carries none) and SMILES writing (engine-side, algorithmic).
+  ## derive like a drawn molfile. %nn ring ids are captured. The
+  ## component dot landed (chemomer#131): [Na+].[Cl-] reads as two
+  ## components in one structure. Still outside: SMILES writing
+  ## (engine-side, algorithmic).
   ##
   ## Language notes: strict PEG, no repetition backtracking; the
   ## implicit bond between two aromatic atoms reads aromatic (the
   ## molfile's bond code 4), everything else implicit-single; the
   ## walk owns the ring-digit pairing and the branch stack.
 
-  entry smiles: chain
+  entry smiles: formula
+
+  ## One (possibly disconnected) formula: chains separated by the
+  ## component dot (chemomer#131). The dot starts a NEW component —
+  ## the reader resets its current atom so the next chain's first
+  ## atom bonds to nothing (the molfile multi-fragment semantics);
+  ## the identity layer's connected-component analysis derives
+  ## per-component and recombines. A trailing dot (a dot with no
+  ## following chain) rejects at parse.
+  formula = ( chain 0*( ( ( "." ) as dot chain ) as component ) ) as formula
 
   ## One connected component: an atom, then any number of
   ## continuations — a branch, a bonded atom, a bare atom (implicit
@@ -103,6 +113,8 @@ grammar ChemomerSmiles version "1.0.0" {
     accept "c1ccsc1"
     accept "CC(=O)Nc1ccc(O)cc1"
     accept "OC(=O)[C@@H](N)Cc1ccccc1"
+    accept "[Na+].[Cl-]"
+    accept "CC.O"
     accept "C1C"
     accept "[Xx]"
     reject "C."

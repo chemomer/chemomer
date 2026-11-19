@@ -18,8 +18,10 @@
 //! and the cis/trans side product read a SMILES structure exactly
 //! like a drawn molfile. The alanine enantiomers derive the oracle
 //! bytes; the /b signs were verified against the oracle over
-//! coordinate drawings. Dot-disconnected components still reject (the
-//! corpus carries none; the contract phase owns them).
+//! coordinate drawings. The component dot landed (chemomer#131):
+//! dot-disconnected components read as one structure the way the
+//! molfile's multi-fragment path does; the identity-multicomponent
+//! tranche rides the SMILES gate.
 
 use crate::error::{err, Error, Result};
 use crate::graph::{AtomRecord, Structure};
@@ -43,7 +45,7 @@ pub fn read(input: &str) -> Result<Structure> {
             rings: std::collections::HashMap::new(),
             aromatic_markers: Vec::new(),
         };
-        walk.chain(capture.root())?;
+        walk.formula(capture.root())?;
         if let Some(digit) = walk.rings.keys().next() {
             return err(format!("smiles: ring bond {digit} never closed"));
         }
@@ -169,6 +171,71 @@ impl<'a> Walk<'a> {
 
     fn chain(&mut self, node: &parsanol::portable::ast::AstNode) -> crate::Result<()> {
         self.dispatch(node)
+    }
+
+    /// The formula walk (grammar v1.1.0, chemomer#131): the first
+    /// chain, then each dot-separated component — the component
+    /// boundary resets the current atom so the next chain's first
+    /// atom bonds to nothing (the molfile multi-fragment semantics;
+    /// the identity layer's connected-component analysis derives
+    /// per-component).
+    fn formula(&mut self, node: &parsanol::portable::ast::AstNode) -> crate::Result<()> {
+        // The formula walk (grammar v1.1.0, chemomer#131): descend
+        // the unnamed sequence/repetition wrappers to each `chain`
+        // capture — exactly one per top-level component (branch
+        // interiors nest their chains under the distinct `group`
+        // key, so they never surface here). The component boundary
+        // resets the current atom so the next chain's first atom
+        // bonds to nothing (the molfile multi-fragment semantics;
+        // the identity layer's connected-component analysis derives
+        // per-component).
+        let mut first = true;
+        self.walk_formula_element(node, &mut first)
+    }
+
+    fn walk_formula_element(
+        &mut self,
+        node: &parsanol::portable::ast::AstNode,
+        first: &mut bool,
+    ) -> crate::Result<()> {
+        match node {
+            parsanol::portable::ast::AstNode::Array { .. } => {
+                for item in self.capture.array_items(node) {
+                    self.walk_formula_element(&item, first)?;
+                }
+            }
+            parsanol::portable::ast::AstNode::Hash { .. } => {
+                let items = self.capture.hash_items(node);
+                if items.len() == 1 && items[0].0 == "chain" {
+                    // A chain capture itself: one top-level component.
+                    if !*first {
+                        self.current = None;
+                    }
+                    *first = false;
+                    return self.chain(&items[0].1);
+                }
+                for (_, value) in items {
+                    self.walk_formula_element(&value, first)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The chain(s) inside a component capture — direct children
+    /// only (the dot literal carries no semantics).
+    fn component_chains(
+        &self,
+        node: &parsanol::portable::ast::AstNode,
+    ) -> Vec<parsanol::portable::ast::AstNode> {
+        let mut chains = Vec::new();
+        for (key, value) in self.capture.hash_items(node) {
+            if key == "chain" {
+                chains.push(value);
+            }
+        }
+        chains
     }
 
     /// Every named descendant of a capture node, in source order —

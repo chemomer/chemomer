@@ -18,8 +18,8 @@ hashes below whenever a contract changes.
 | `inchi.json` (the compiled artifact) | `e5121fbea692c8a0e7be2cab468026c798caff0ce17566eb29fc780d836ea2ed` |
 | `rinchi.parg` (the RInChI string scan) | `e38f0d9dc65f5d8a43265a16436cffaf051e954eca8e7f4867a43124a21cbc7d` |
 | `rinchi.json` (the compiled artifact) | `bca7d7290d61e5deac6ecac6a4273cf1c97d0f4008e0ee6773c2b67a99487d76` |
-| `smiles.parg` (the day-1 SMILES scan, v1.0.0) | `606dbd8f8b2910b163731b3f6c0e6dffdc98b231eb1bfd10a5df4b398fcdd84a` |
-| `smiles.json` (the compiled artifact) | `38b6a3e21dfbd5ec607462a42a24d4926b5fcf52f25b38df9a786e590c3908a3` |
+| `smiles.parg` (the SMILES scan, v1.1.0) | `abc377bdeba856c93a7460092e090a18333b7355a03f37821d9315ccbf82ef26` |
+| `smiles.json` (the compiled artifact) | `1c270d3f1ada1900b15c93678cd22e0f2a516f726484b5732c75a1308242a152` |
 
 **molfile v1.1.0 (rs#110 round 2)** — the capture surface shrank to
 what the engine reads: the header lines, the line-shape wrappers
@@ -32,6 +32,18 @@ consumes every column verbatim (the inline suite is unchanged and
 passes). The sample profile that drove this: malloc/free dominated the
 water bench (~55%), the arena Hash stores per named capture and the
 flatten walk's String keys were the bulk of it.
+
+**smiles v1.1.0 (chemomer#131)** — the component dot: `entry smiles:
+formula` wraps the chains — `chain 0*(("." as dot chain) as
+component)` — and the reader resets its current atom at each
+component boundary, so the next chain's first atom bonds to nothing
+(the molfile multi-fragment semantics). The identity layer's
+connected-component analysis needed ZERO new code: the 34
+identity-multicomponent fixtures (mixtures, salts: `[Na+].[Cl-]`)
+derive the recorded 1.07.5-oracle InChIs byte-for-byte through the
+SMILES leg (tests/smiles_gate.rs rides the tranche). A trailing dot
+and a leading dot still reject at parse. Recompiled with the pinned
+1.3.94 compiler.
 
 **smiles v1.0.0 (chemomer#121)** — the day-1 SMILES reader: chains,
 branches, single-digit ring closures, organic + bracket atoms,
