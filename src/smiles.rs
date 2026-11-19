@@ -626,3 +626,579 @@ fn element_of(symbol: &str) -> crate::Result<(String, bool)> {
     };
     Ok((element.to_string(), aromatic))
 }
+
+// -- writing (chemomer#130) ----------------------------------------------
+
+/// The organic-subset elements written bare (no bracket) and the
+/// aromatic markers written lowercase.
+const ORGANIC_UPPER: [&str; 10] = ["B", "C", "N", "O", "P", "S", "F", "Cl", "Br", "I"];
+const AROMATIC_LOWER: [&str; 8] = ["b", "c", "n", "o", "p", "s", "se", "as"];
+const CLOSURE_DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+/// Writes a [`Structure`] as a deterministic canonical SMILES: the
+/// atoms rank by a Morgan-style refinement (element, charge, isotope,
+/// explicit-H count, degree — neighbours' ranks folded in until
+/// stable), the DFS spanning tree visits children in rank order, ring
+/// bonds carry digits with kind carriers, and bond symbols appear
+/// only where the bond departs from its default. Stability is the
+/// contract: `write(read(s))` re-reads to itself, and the written
+/// form derives the recorded identity.
+pub fn write(structure: &Structure) -> Result<String> {
+    let expanded = expand_isotopic_h(structure);
+    let mut written = String::new();
+    for (index, component) in expanded.split_components().iter().enumerate() {
+        if index > 0 {
+            written.push('.');
+        }
+        written.push_str(&write_component(component)?);
+    }
+    Ok(written)
+}
+
+/// The inverse of the reader's isotopic-hydrogen fold: carriers'
+/// recorded D/T counts re-materialize as explicit `[2H]`/`[3H]`
+/// atoms bonded to the carrier, so the written form re-reads to the
+/// same folded structure. The plain-H accounting is untouched (the
+/// /h layer is isotope-blind; valence carries the gap).
+fn expand_isotopic_h(structure: &Structure) -> Structure {
+    if structure.isotopic_h.is_empty() {
+        return structure.clone();
+    }
+    let mut expanded = structure.clone();
+    let additions: Vec<(usize, u16)> = structure
+        .isotopic_h
+        .iter()
+        .flat_map(|(&carrier, &(d_count, t_count))| {
+            std::iter::repeat_n((carrier, 2u16), d_count as usize)
+                .chain(std::iter::repeat_n((carrier, 3u16), t_count as usize))
+        })
+        .collect();
+    for &(carrier, isotope) in &additions {
+        let index = expanded.atoms.len();
+        expanded.atoms.push(AtomRecord {
+            element: "H".to_string(),
+            h_count: 0,
+            charge: 0,
+            valence_code: 0,
+            h_pinned: false,
+            isotope,
+        });
+        expanded.bonds.push((carrier, index, 1));
+        expanded.ride_marks.push(0);
+        expanded.positions.push((0.0, 0.0));
+    }
+    expanded
+}
+
+struct Writer<'a> {
+    component: &'a Structure,
+    adjacency: Vec<Vec<(usize, usize)>>,
+    tree_children: Vec<Vec<usize>>,
+    digit_for_bond: Vec<Option<&'static str>>,
+}
+
+/// The atom-index tie-breaks cannot see which ring bond carries the
+/// double (Kekulé-rotation patterns ride the canonicalizer's
+/// symmetry ties), so the spanning-tree walk ENUMERATES: at every
+/// node the minimum-rank tied children are tried as the first
+/// branch, each alternative carrying a cloned state, and the
+/// lexicographically smallest complete spelling wins. The minimum is
+/// a function of the unordered structure alone — the stability the
+/// contract asks for. The budget bounds the alternatives; past it
+/// the rank order stands (deterministic, index-based).
+const ENUMERATION_CAP: i64 = 32;
+
+#[derive(Clone)]
+struct SearchState {
+    visited: Vec<bool>,
+    parent: Vec<usize>,
+    tree_children: Vec<Vec<usize>>,
+    /// The ring bonds in discovery order — the digit table's order.
+    ring_bonds: Vec<usize>,
+    ring_seen: std::collections::BTreeSet<usize>,
+}
+
+impl SearchState {
+    fn fresh(root: usize, atom_count: usize) -> Self {
+        let mut visited = vec![false; atom_count];
+        visited[root] = true;
+        SearchState {
+            visited,
+            parent: vec![usize::MAX; atom_count],
+            tree_children: vec![Vec::new(); atom_count],
+            ring_bonds: Vec::new(),
+            ring_seen: std::collections::BTreeSet::new(),
+        }
+    }
+
+    fn digit_for_bond(&self, bond_count: usize) -> Result<Vec<Option<&'static str>>> {
+        let mut table: Vec<Option<&'static str>> = vec![None; bond_count];
+        for (slot, &bond) in self.ring_bonds.iter().enumerate() {
+            let Some(digit) = CLOSURE_DIGITS.get(slot) else {
+                return err("smiles: more than nine ring bonds in one component");
+            };
+            table[bond] = Some(digit);
+        }
+        Ok(table)
+    }
+}
+
+fn write_component(component: &Structure) -> Result<String> {
+    let mut adjacency: Vec<Vec<(usize, usize)>> = vec![Vec::new(); component.atoms.len()];
+    for (bond_index, &(from, to, _)) in component.bonds.iter().enumerate() {
+        adjacency[from].push((to, bond_index));
+        adjacency[to].push((from, bond_index));
+    }
+
+    let ranks = crate::layers::hydrogen::canonical_ranks_for(component);
+    if component.atoms.is_empty() {
+        return err("smiles: empty component");
+    }
+    let top_rank = ranks.iter().copied().min().unwrap_or(0);
+    let mut best: Option<(String, SearchState)> = None;
+    for root in (0..component.atoms.len()).filter(|&i| ranks[i] == top_rank) {
+        let state = SearchState::fresh(root, component.atoms.len());
+        let candidate = best_subtree(component, &adjacency, &ranks, root, state, ENUMERATION_CAP)?;
+        if best
+            .as_ref()
+            .is_none_or(|(current, _)| candidate.0 < *current)
+        {
+            best = Some(candidate);
+        }
+    }
+    let Some((_, final_state)) = best else {
+        return err("smiles: empty component");
+    };
+    let root = final_state
+        .parent
+        .iter()
+        .position(|&p| p == usize::MAX)
+        .ok_or_else(|| crate::Error::new("smiles: no root".to_string()))?;
+    let digit_for_bond = final_state.digit_for_bond(component.bonds.len())?;
+    let mut writer = Writer {
+        component,
+        adjacency,
+        tree_children: final_state.tree_children,
+        digit_for_bond,
+    };
+    let mut out = String::new();
+    writer.emit(root, &mut out)?;
+    Ok(out)
+}
+
+/// The enumerating tree search: returns the subtree's spelling (with
+/// the subtree's own ring digits) and the completed state. Children
+/// record in walk order — tree branches recurse, ring bonds join the
+/// discovery order that numbers the digits.
+fn best_subtree(
+    component: &Structure,
+    adjacency: &[Vec<(usize, usize)>],
+    ranks: &[u32],
+    atom: usize,
+    state: SearchState,
+    budget: i64,
+) -> Result<(String, SearchState)> {
+    let mut children: Vec<usize> = adjacency[atom]
+        .iter()
+        .map(|&(n, _)| n)
+        .filter(|&n| n != state.parent[atom])
+        .collect();
+    children.sort_by_key(|&n| (ranks[n], n));
+    children.dedup();
+
+    // The minimum-rank tied children are the alternatives' variable
+    // (each tried as the first branch); the rest follow rank order.
+    let mut alternatives: Vec<Vec<usize>> = Vec::new();
+    if children.len() >= 2 && budget > 0 {
+        let min_rank = ranks[children[0]];
+        let tied: Vec<usize> = children
+            .iter()
+            .copied()
+            .take_while(|&n| ranks[n] == min_rank)
+            .collect();
+        // Only ties whose children carry DIFFERENT bond signatures to
+        // this atom can change ring closure assignments — the ring
+        // entry walking into a kekulized ring. Equal-signature ties
+        // (symmetric substituents, aromaticized rings) spell
+        // identically whichever way they order, and enumerating them
+        // multiplies the search without effect.
+        let signature = |child: usize| -> String {
+            let bond = adjacency[atom]
+                .iter()
+                .find(|&&(n, _)| n == child)
+                .map(|&(_, b)| b)
+                .expect("adjacent bond");
+            let (_, _, kind) = component.bonds[bond];
+            format!("{kind}")
+        };
+        if tied.len() >= 2 && tied.len() <= 3 {
+            let signatures: std::collections::BTreeSet<String> =
+                tied.iter().map(|&child| signature(child)).collect();
+            if signatures.len() > 1 {
+                for &first in &tied {
+                    let mut ordered: Vec<usize> = vec![first];
+                    ordered.extend(children.iter().copied().filter(|&n| n != first));
+                    alternatives.push(ordered);
+                }
+            }
+        }
+    }
+    if alternatives.is_empty() {
+        alternatives.push(children);
+    }
+
+    let mut best: Option<(String, SearchState)> = None;
+    for (attempt, order) in alternatives.iter().enumerate() {
+        let budget_left = if alternatives.len() > 1 {
+            budget - 1
+        } else {
+            budget
+        };
+        let mut branch = state.clone();
+        let mut pieces: Vec<(usize, String)> = Vec::new();
+        for &child in order {
+            let symbol = bond_symbol_between(component, adjacency, atom, child);
+            let mut child_state = branch.clone();
+            match record_child(&mut child_state, adjacency, atom, child) {
+                None => {
+                    // Ring closure discovered at this child: the digit
+                    // joins this atom's token; no subtree piece.
+                    branch = child_state;
+                }
+                Some(tree_child) => {
+                    let (piece, done) = best_subtree(
+                        component,
+                        adjacency,
+                        ranks,
+                        tree_child,
+                        child_state,
+                        budget_left,
+                    )?;
+                    pieces.push((child, format!("{symbol}{piece}")));
+                    branch = done;
+                }
+            }
+        }
+        let token = atom_token_with(component, adjacency, &branch, atom)?;
+        let mut assembled = token;
+        let recorded = branch.tree_children[atom].clone();
+        let last = recorded.len().saturating_sub(1);
+        for (position, &child) in recorded.iter().enumerate() {
+            let symbol = bond_symbol_between(component, adjacency, atom, child);
+            let piece = child_results_lookup(&pieces, child);
+            if position == last {
+                assembled.push_str(&symbol);
+                assembled.push_str(&piece);
+            } else {
+                assembled.push('(');
+                assembled.push_str(&symbol);
+                assembled.push_str(&piece);
+                assembled.push(')');
+            }
+        }
+        let _ = attempt;
+        let candidate = (assembled, branch);
+        if best
+            .as_ref()
+            .is_none_or(|(current, _)| candidate.0 < *current)
+        {
+            best = Some(candidate);
+        }
+    }
+    best.ok_or_else(|| crate::Error::new("smiles: no walk".to_string()))
+}
+
+fn child_results_lookup(pieces: &[(usize, String)], child: usize) -> String {
+    pieces
+        .iter()
+        .find(|(c, _)| *c == child)
+        .map(|(_, p)| p.clone())
+        .unwrap_or_default()
+}
+
+fn record_child(
+    state: &mut SearchState,
+    adjacency: &[Vec<(usize, usize)>],
+    atom: usize,
+    child: usize,
+) -> Option<usize> {
+    if state.visited[child] {
+        let bond = adjacency[atom]
+            .iter()
+            .find(|&&(n, _)| n == child)
+            .map(|&(_, b)| b)
+            .expect("adjacent bond");
+        if state.ring_seen.insert(bond) {
+            state.ring_bonds.push(bond);
+        }
+        None
+    } else {
+        state.visited[child] = true;
+        state.parent[child] = atom;
+        state.tree_children[atom].push(child);
+        Some(child)
+    }
+}
+
+fn bond_symbol_between(
+    component: &Structure,
+    adjacency: &[Vec<(usize, usize)>],
+    from: usize,
+    to: usize,
+) -> String {
+    let bond_index = adjacency[from]
+        .iter()
+        .find(|&&(n, _)| n == to)
+        .map(|&(_, b)| b)
+        .expect("adjacent bond");
+    let (_, _, kind) = component.bonds[bond_index];
+    match kind {
+        1 => {
+            if is_aromatic_at(component, adjacency, from)
+                || is_aromatic_at(component, adjacency, to)
+            {
+                "-".to_string()
+            } else {
+                String::new()
+            }
+        }
+        2 => "=".to_string(),
+        3 => "#".to_string(),
+        4 => {
+            if is_aromatic_at(component, adjacency, from)
+                && is_aromatic_at(component, adjacency, to)
+            {
+                String::new()
+            } else {
+                "-".to_string()
+            }
+        }
+        _ => "-".to_string(),
+    }
+}
+
+fn is_aromatic_at(component: &Structure, adjacency: &[Vec<(usize, usize)>], atom: usize) -> bool {
+    adjacency[atom].iter().any(|&(_, bond_index)| {
+        let (_, _, kind) = component.bonds[bond_index];
+        kind == 4
+    })
+}
+
+/// The atom token, reading ring digits off the state's discovery
+/// order. A closure discovered HERE (this atom is the second
+/// endpoint) and an closure whose opener sits elsewhere both carry
+/// the digit at this token; kind carriers ride non-default bonds.
+fn atom_token_with(
+    component: &Structure,
+    adjacency: &[Vec<(usize, usize)>],
+    state: &SearchState,
+    atom: usize,
+) -> Result<String> {
+    let record = &component.atoms[atom];
+    let aromatic = is_aromatic_at(component, adjacency, atom);
+    let organic = ORGANIC_UPPER.contains(&record.element.as_str())
+        || (aromatic && AROMATIC_LOWER.contains(&record.element.to_lowercase().as_str()));
+    let bracket_needed = !organic
+        || record.charge != 0
+        || record.isotope != 0
+        || record.h_count > 0
+        || (record.h_count == 0 && record.h_pinned);
+
+    let mut token = String::new();
+    if bracket_needed {
+        token.push('[');
+        if record.isotope != 0 {
+            token.push_str(&record.isotope.to_string());
+        }
+        token.push_str(&record.element);
+        if record.h_count > 0 {
+            token.push('H');
+            if record.h_count > 1 {
+                token.push_str(&record.h_count.to_string());
+            }
+        } else if record.h_pinned {
+            token.push_str("H0");
+        }
+        if record.charge != 0 {
+            let magnitude = record.charge.abs();
+            token.push(if record.charge > 0 { '+' } else { '-' });
+            if magnitude > 1 {
+                token.push_str(&magnitude.to_string());
+            }
+        }
+        token.push(']');
+    } else if aromatic {
+        token.push_str(&record.element.to_lowercase());
+    } else {
+        token.push_str(&record.element);
+    }
+
+    let digit_table = state.digit_for_bond(component.bonds.len())?;
+    let mut carried: Vec<usize> = adjacency[atom]
+        .iter()
+        .map(|&(_, bond_index)| bond_index)
+        .filter(|&bond_index| digit_table[bond_index].is_some())
+        .collect();
+    carried.sort_by_key(|&bond_index| {
+        state
+            .ring_bonds
+            .iter()
+            .position(|&b| b == bond_index)
+            .unwrap_or(usize::MAX)
+    });
+    for bond_index in carried {
+        let digit = digit_table[bond_index].unwrap_or("");
+        let (from, to, kind) = component.bonds[bond_index];
+        let other = if from == atom { to } else { from };
+        let both_aromatic = is_aromatic_at(component, adjacency, atom)
+            && is_aromatic_at(component, adjacency, other);
+        match kind {
+            2 => token.push('='),
+            3 => token.push('#'),
+            1 => {
+                if is_aromatic_at(component, adjacency, atom)
+                    || is_aromatic_at(component, adjacency, other)
+                {
+                    token.push('-');
+                }
+            }
+            4 => {
+                if !both_aromatic {
+                    token.push('-');
+                }
+            }
+            _ => token.push('-'),
+        }
+        token.push_str(digit);
+    }
+    Ok(token)
+}
+
+impl<'a> Writer<'a> {
+    /// Depth-first emission: the atom token, then all children but
+    /// the last as branches (rank order), then the last as the
+    /// continuation.
+    fn emit(&mut self, atom: usize, out: &mut String) -> Result<()> {
+        out.push_str(&self.atom_token(atom)?);
+        let children = self.tree_children[atom].clone();
+        let last_child = children.len().saturating_sub(1);
+        for (position, &child) in children.iter().enumerate() {
+            let bond_index = self.adjacency[atom]
+                .iter()
+                .find(|&&(n, _)| n == child)
+                .map(|&(_, b)| b)
+                .expect("tree bond");
+            let symbol = self.bond_symbol(bond_index);
+            if position == last_child {
+                out.push_str(&symbol);
+                self.emit(child, out)?;
+            } else {
+                out.push('(');
+                out.push_str(&symbol);
+                self.emit(child, out)?;
+                out.push(')');
+            }
+        }
+        Ok(())
+    }
+
+    /// The bond symbol between tree parent and child — omitted for
+    /// the defaults (single between non-aromatic atoms, aromatic
+    /// between two aromatic atoms).
+    fn bond_symbol(&self, bond_index: usize) -> String {
+        let (from, to, kind) = self.component.bonds[bond_index];
+        match kind {
+            1 => {
+                if self.is_aromatic(from) || self.is_aromatic(to) {
+                    "-".to_string()
+                } else {
+                    String::new()
+                }
+            }
+            2 => "=".to_string(),
+            3 => "#".to_string(),
+            4 => {
+                if self.is_aromatic(from) && self.is_aromatic(to) {
+                    String::new()
+                } else {
+                    "-".to_string()
+                }
+            }
+            _ => "-".to_string(),
+        }
+    }
+
+    fn is_aromatic(&self, atom: usize) -> bool {
+        self.adjacency[atom].iter().any(|&(_, bond_index)| {
+            let (_, _, kind) = self.component.bonds[bond_index];
+            kind == 4
+        })
+    }
+
+    fn atom_token(&self, atom: usize) -> Result<String> {
+        let record = &self.component.atoms[atom];
+        let aromatic = self.is_aromatic(atom);
+        let organic = ORGANIC_UPPER.contains(&record.element.as_str())
+            || (aromatic && AROMATIC_LOWER.contains(&record.element.to_lowercase().as_str()));
+        let bracket_needed = !organic
+            || record.charge != 0
+            || record.isotope != 0
+            || record.h_count > 0
+            || (record.h_count == 0 && record.h_pinned);
+
+        let mut token = String::new();
+        if bracket_needed {
+            token.push('[');
+            if record.isotope != 0 {
+                token.push_str(&record.isotope.to_string());
+            }
+            token.push_str(&record.element);
+            if record.h_count > 0 {
+                token.push('H');
+                if record.h_count > 1 {
+                    token.push_str(&record.h_count.to_string());
+                }
+            } else if record.h_pinned {
+                token.push_str("H0");
+            }
+            if record.charge != 0 {
+                let magnitude = record.charge.abs();
+                token.push(if record.charge > 0 { '+' } else { '-' });
+                if magnitude > 1 {
+                    token.push_str(&magnitude.to_string());
+                }
+            }
+            token.push(']');
+        } else if aromatic {
+            token.push_str(&record.element.to_lowercase());
+        } else {
+            token.push_str(&record.element);
+        }
+
+        // Ring-closure digits at this atom, with kind carriers for
+        // non-default closure bonds.
+        for &(_, bond_index) in &self.adjacency[atom] {
+            let Some(digit) = self.digit_for_bond[bond_index] else {
+                continue;
+            };
+            let (from, to, kind) = self.component.bonds[bond_index];
+            let other = if from == atom { to } else { from };
+            let (atom_aromatic, other_aromatic) = (self.is_aromatic(atom), self.is_aromatic(other));
+            let carrier = match kind {
+                2 => Some('='),
+                3 => Some('#'),
+                // Single-or-aromatic closures carry a dash whenever
+                // they depart from their default (aromatic only
+                // between two aromatic atoms).
+                1 => (!other_aromatic || atom_aromatic).then_some('-'),
+                4 => (!(atom_aromatic && other_aromatic)).then_some('-'),
+                _ => Some('-'),
+            };
+            if let Some(symbol) = carrier {
+                token.push(symbol);
+            }
+            token.push_str(digit);
+        }
+        Ok(token)
+    }
+}
