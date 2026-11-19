@@ -66,6 +66,14 @@ pub fn parse_smiles(input: &str) -> Result<Structure> {
     smiles::read(input)
 }
 
+/// Writes a [`Structure`] as a deterministic canonical SMILES — the
+/// engine-side writer (chemomer#130; see [`smiles::write`]). The
+/// stability contract: `write(read(s))` re-reads to itself and
+/// derives the same identity.
+pub fn write_smiles(structure: &Structure) -> Result<String> {
+    smiles::write(structure)
+}
+
 /// Parses an MDL V2000 RXNfile into a [`RinchiReaction`] — the
 /// reaction-identity layer's input edge.
 pub fn parse_rxnfile(input: &str) -> Result<RinchiReaction> {
