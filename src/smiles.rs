@@ -223,21 +223,6 @@ impl<'a> Walk<'a> {
         Ok(())
     }
 
-    /// The chain(s) inside a component capture — direct children
-    /// only (the dot literal carries no semantics).
-    fn component_chains(
-        &self,
-        node: &parsanol::portable::ast::AstNode,
-    ) -> Vec<parsanol::portable::ast::AstNode> {
-        let mut chains = Vec::new();
-        for (key, value) in self.capture.hash_items(node) {
-            if key == "chain" {
-                chains.push(value);
-            }
-        }
-        chains
-    }
-
     /// Every named descendant of a capture node, in source order —
     /// the atom capture's value is a Hash or the bracket's unnamed
     /// sequence array, and the inner parts ride at various depths.
