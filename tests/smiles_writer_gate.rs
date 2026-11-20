@@ -52,15 +52,6 @@ fn the_smiles_writer_stabilises_and_preserves_the_recorded_identities() {
         "identity/multi-alum-dodecahydrate",
         "identity/multi-sodium-sulfate-decahydrate",
     ];
-    // The writer's @/@@ and /\ carriers are phase 2 of chemomer#130;
-    // these rows' identities are stereo-carried and stay excluded
-    // until the carrier lands.
-    const STEREO_CARRIED: [&str; 4] = [
-        "identity/l-alanine",
-        "identity/d-alanine",
-        "identity/e-2-butene",
-        "identity/z-2-butene",
-    ];
     // The documented residual: the /c canonical numbering ties the
     // Kekulé-rotation patterns of substituted rings (per-atom
     // bond-order sums cannot see which ring bond carries the
@@ -106,10 +97,7 @@ fn the_smiles_writer_stabilises_and_preserves_the_recorded_identities() {
         let Some(smiles) = case["smiles"].as_str() else {
             continue;
         };
-        if TRANSCRIPTION_DISAGREEMENTS.contains(&id)
-            || STEREO_CARRIED.contains(&id)
-            || KEKULE_RESIDUAL.contains(&id)
-        {
+        if TRANSCRIPTION_DISAGREEMENTS.contains(&id) || KEKULE_RESIDUAL.contains(&id) {
             skipped.push(id.to_string());
             continue;
         }

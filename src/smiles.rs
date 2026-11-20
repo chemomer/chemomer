@@ -693,8 +693,11 @@ fn expand_isotopic_h(structure: &Structure) -> Structure {
 struct Writer<'a> {
     component: &'a Structure,
     adjacency: Vec<Vec<(usize, usize)>>,
+    parent: Vec<usize>,
+    ring_bonds: Vec<usize>,
     tree_children: Vec<Vec<usize>>,
     digit_for_bond: Vec<Option<&'static str>>,
+    stereo: StereoCenters,
 }
 
 /// The atom-index tie-breaks cannot see which ring bond carries the
@@ -707,6 +710,148 @@ struct Writer<'a> {
 /// contract asks for. The budget bounds the alternatives; past it
 /// the rank order stands (deterministic, index-based).
 const ENUMERATION_CAP: i64 = 32;
+
+/// The tetrahedral carriers the reader synthesized: center atom →
+/// (wedge bond index, wedge code 1|6). The raw read structure's
+/// `stereo_bonds` are center-first (the synthesis rewrote them).
+type StereoCenters = std::collections::HashMap<usize, (usize, u8)>;
+
+fn stereo_centers(component: &Structure) -> StereoCenters {
+    let mut centers: StereoCenters = std::collections::HashMap::new();
+    for (&bond_index, &code) in &component.stereo_bonds {
+        let Some(&(from, _, _)) = component.bonds.get(bond_index) else {
+            continue;
+        };
+        // The synthesis writes the wedge center-first; the visible
+        // codes are 1 (up) and 6 (dash).
+        centers.entry(from).or_insert((bond_index, code));
+    }
+    centers
+}
+
+/// The written ligand order at a center: parent first, then the
+/// ring-closure neighbours in digit-discovery order, then the tree
+/// children in emission order — the order the re-read's synthesis
+/// will see as creation order.
+#[allow(clippy::too_many_arguments)]
+fn written_ligand_order(
+    atom: usize,
+    parent: &[usize],
+    tree_children: &[Vec<usize>],
+    ring_bonds: &[usize],
+    digit_table: &[Option<&'static str>],
+    adjacency: &[Vec<(usize, usize)>],
+    component: &Structure,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = Vec::new();
+    if parent[atom] != usize::MAX {
+        order.push(parent[atom]);
+    }
+    let mut closures: Vec<usize> = adjacency[atom]
+        .iter()
+        .map(|&(_, bond_index)| bond_index)
+        .filter(|&bond_index| digit_table.get(bond_index).is_some_and(Option::is_some))
+        .collect();
+    closures.sort_by_key(|&bond_index| {
+        ring_bonds
+            .iter()
+            .position(|&b| b == bond_index)
+            .unwrap_or(usize::MAX)
+    });
+    for bond_index in closures {
+        let (from, to, _) = component.bonds[bond_index];
+        order.push(if from == atom { to } else { from });
+    }
+    order.extend(tree_children[atom].iter().copied());
+    order
+}
+
+/// The reference ligand order at a center: heavy neighbours in bond
+/// order — the creation order the original synthesis laid out.
+fn reference_ligand_order(component: &Structure, atom: usize) -> Vec<usize> {
+    let mut order = Vec::new();
+    for &(from, to, _) in &component.bonds {
+        if from == atom {
+            order.push(to);
+        } else if to == atom {
+            order.push(from);
+        }
+    }
+    order
+}
+
+/// The chirality sign the synthesis template produces, in its
+/// algebraic form: the trio laid counter-clockwise in `trio` order
+/// with the wedge lifted by the code (1 up, 6 down) is — up to a
+/// sign — the tetrahedral det whose value is the inversion parity of
+/// the written ligand list's trio slots (the implicit hydrogen is
+/// the last slot), multiplied by the wedge side. Both the original
+/// geometry and the candidate re-synthesis run the same template, so
+/// matching signs guarantee matching geometry.
+fn tetra_hand(trio: &[usize], wedge: usize, code: u8, order: &[usize]) -> i32 {
+    let slot_of =
+        |ligand: usize| -> Option<usize> { trio.iter().position(|&candidate| candidate == ligand) };
+    let mut slots: Vec<usize> = Vec::with_capacity(order.len() + 1);
+    for &ligand in order {
+        slots.push(slot_of(ligand).unwrap_or(trio.len()));
+    }
+    slots.push(trio.len()); // the implicit hydrogen
+    let mut inversions = 0usize;
+    for i in 0..slots.len() {
+        for later in (i + 1)..slots.len() {
+            if slots[i] > slots[later] {
+                inversions += 1;
+            }
+        }
+    }
+    let parity = if inversions.is_multiple_of(2) { 1 } else { -1 };
+    let wedge_side = if code == 1 { 1 } else { -1 };
+    let _ = wedge; // the lifted ligand's identity rides the trio slot
+    parity * wedge_side
+}
+
+/// The parity token for a center: pick @ or @@ so the RE-READ's
+/// synthesis reproduces the drawn hand. The re-read lays the trio in
+/// the written (creation) order and wedges the first non-parent
+/// ligand; its code comes from the token (6 for @, 1 for @@).
+#[allow(clippy::too_many_arguments)]
+fn chirality_token_for(
+    component: &Structure,
+    adjacency: &[Vec<(usize, usize)>],
+    parent: &[usize],
+    tree_children: &[Vec<usize>],
+    ring_bonds: &[usize],
+    digit_table: &[Option<&'static str>],
+    atom: usize,
+    wedge_bond: usize,
+    code: u8,
+) -> &'static str {
+    let written = written_ligand_order(
+        atom,
+        parent,
+        tree_children,
+        ring_bonds,
+        digit_table,
+        adjacency,
+        component,
+    );
+    let reference = reference_ligand_order(component, atom);
+    let (from, to, _) = component.bonds[wedge_bond];
+    let wedge_original = if from == atom { to } else { from };
+    let target = tetra_hand(&reference, wedge_original, code, &written);
+    let wedge_reread = written
+        .iter()
+        .copied()
+        .find(|&ligand| Some(ligand) != Some(parent[atom]) && ligand != atom)
+        .unwrap_or(wedge_original);
+    for (token, token_code) in [("@", 6u8), ("@@", 1u8)] {
+        let hand = tetra_hand(&written, wedge_reread, token_code, &written);
+        if hand == target {
+            return token;
+        }
+    }
+    "@"
+}
 
 #[derive(Clone)]
 struct SearchState {
@@ -729,6 +874,10 @@ impl SearchState {
             ring_bonds: Vec::new(),
             ring_seen: std::collections::BTreeSet::new(),
         }
+    }
+
+    fn digit_table(&self, bond_count: usize) -> Result<Vec<Option<&'static str>>> {
+        self.digit_for_bond(bond_count)
     }
 
     fn digit_for_bond(&self, bond_count: usize) -> Result<Vec<Option<&'static str>>> {
@@ -756,9 +905,18 @@ fn write_component(component: &Structure) -> Result<String> {
     }
     let top_rank = ranks.iter().copied().min().unwrap_or(0);
     let mut best: Option<(String, SearchState)> = None;
+    let stereo = stereo_centers(component);
     for root in (0..component.atoms.len()).filter(|&i| ranks[i] == top_rank) {
         let state = SearchState::fresh(root, component.atoms.len());
-        let candidate = best_subtree(component, &adjacency, &ranks, root, state, ENUMERATION_CAP)?;
+        let candidate = best_subtree(
+            component,
+            &adjacency,
+            &ranks,
+            root,
+            state,
+            ENUMERATION_CAP,
+            &stereo,
+        )?;
         if best
             .as_ref()
             .is_none_or(|(current, _)| candidate.0 < *current)
@@ -778,8 +936,11 @@ fn write_component(component: &Structure) -> Result<String> {
     let mut writer = Writer {
         component,
         adjacency,
+        parent: final_state.parent,
+        ring_bonds: final_state.ring_bonds,
         tree_children: final_state.tree_children,
         digit_for_bond,
+        stereo,
     };
     let mut out = String::new();
     writer.emit(root, &mut out)?;
@@ -790,6 +951,7 @@ fn write_component(component: &Structure) -> Result<String> {
 /// the subtree's own ring digits) and the completed state. Children
 /// record in walk order — tree branches recurse, ring bonds join the
 /// discovery order that numbers the digits.
+#[allow(clippy::too_many_arguments)]
 fn best_subtree(
     component: &Structure,
     adjacency: &[Vec<(usize, usize)>],
@@ -797,6 +959,7 @@ fn best_subtree(
     atom: usize,
     state: SearchState,
     budget: i64,
+    stereo: &StereoCenters,
 ) -> Result<(String, SearchState)> {
     let mut children: Vec<usize> = adjacency[atom]
         .iter()
@@ -873,13 +1036,23 @@ fn best_subtree(
                         tree_child,
                         child_state,
                         budget_left,
+                        stereo,
                     )?;
                     pieces.push((child, format!("{symbol}{piece}")));
                     branch = done;
                 }
             }
         }
-        let token = atom_token_with(component, adjacency, &branch, atom)?;
+        let token = atom_token_with(
+            component,
+            adjacency,
+            &branch.parent,
+            &branch.tree_children,
+            &branch.ring_bonds,
+            &branch.digit_table(component.bonds.len())?,
+            atom,
+            stereo,
+        )?;
         let mut assembled = token;
         let recorded = branch.tree_children[atom].clone();
         let last = recorded.len().saturating_sub(1);
@@ -940,6 +1113,40 @@ fn record_child(
     }
 }
 
+/// The drawn E/Z carrier for a single bond bordering a double bond:
+/// the synthesis lifted the substituent perpendicular to the axis
+/// (`y = rise * order` — `/` rises left-to-right in string order, so
+/// the substituent sits below when it precedes the double-bond
+/// endpoint and above when it follows; `\` mirrors both). The writer
+/// reads the drawn side back onto the spelling.
+fn directional_symbol(component: &Structure, from: usize, to: usize) -> Option<&'static str> {
+    if component.positions.len() <= from || component.positions.len() <= to {
+        return None;
+    }
+    let is_double_partner = |atom: usize, other: usize| -> bool {
+        component.bonds.iter().any(|&(a, b, kind)| {
+            kind == 2 && ((a == atom && b != other) || (b == atom && a != other))
+        })
+    };
+    let (axis, substituent) = if is_double_partner(from, to) {
+        (from, to)
+    } else if is_double_partner(to, from) {
+        (to, from)
+    } else {
+        return None;
+    };
+    let y = component.positions[substituent].1;
+    if y == 0.0 {
+        return None;
+    }
+    // In the emitted bond the axis is one endpoint; the substituent
+    // precedes the axis when it is the parent and follows when it is
+    // the child.
+    let follows = axis == from;
+    let above = y > 0.0;
+    Some(if above == follows { "/" } else { "\\" })
+}
+
 fn bond_symbol_between(
     component: &Structure,
     adjacency: &[Vec<(usize, usize)>],
@@ -952,6 +1159,11 @@ fn bond_symbol_between(
         .map(|&(_, b)| b)
         .expect("adjacent bond");
     let (_, _, kind) = component.bonds[bond_index];
+    if kind == 1 {
+        if let Some(direction) = directional_symbol(component, from, to) {
+            return direction.to_string();
+        }
+    }
     match kind {
         1 => {
             if is_aromatic_at(component, adjacency, from)
@@ -988,17 +1200,24 @@ fn is_aromatic_at(component: &Structure, adjacency: &[Vec<(usize, usize)>], atom
 /// order. A closure discovered HERE (this atom is the second
 /// endpoint) and an closure whose opener sits elsewhere both carry
 /// the digit at this token; kind carriers ride non-default bonds.
+#[allow(clippy::too_many_arguments)]
 fn atom_token_with(
     component: &Structure,
     adjacency: &[Vec<(usize, usize)>],
-    state: &SearchState,
+    parent: &[usize],
+    tree_children: &[Vec<usize>],
+    ring_bonds: &[usize],
+    digit_table: &[Option<&'static str>],
     atom: usize,
+    stereo: &StereoCenters,
 ) -> Result<String> {
     let record = &component.atoms[atom];
     let aromatic = is_aromatic_at(component, adjacency, atom);
     let organic = ORGANIC_UPPER.contains(&record.element.as_str())
         || (aromatic && AROMATIC_LOWER.contains(&record.element.to_lowercase().as_str()));
-    let bracket_needed = !organic
+    let chirality = stereo.get(&atom);
+    let bracket_needed = chirality.is_some()
+        || !organic
         || record.charge != 0
         || record.isotope != 0
         || record.h_count > 0
@@ -1011,6 +1230,21 @@ fn atom_token_with(
             token.push_str(&record.isotope.to_string());
         }
         token.push_str(&record.element);
+        if let Some(&(wedge_bond, code)) = chirality {
+            // The parity mark rides right after the element (before
+            // the stated H) — the SMILES spelling the reader walks.
+            token.push_str(chirality_token_for(
+                component,
+                adjacency,
+                parent,
+                tree_children,
+                ring_bonds,
+                digit_table,
+                atom,
+                wedge_bond,
+                code,
+            ));
+        }
         if record.h_count > 0 {
             token.push('H');
             if record.h_count > 1 {
@@ -1033,15 +1267,13 @@ fn atom_token_with(
         token.push_str(&record.element);
     }
 
-    let digit_table = state.digit_for_bond(component.bonds.len())?;
     let mut carried: Vec<usize> = adjacency[atom]
         .iter()
         .map(|&(_, bond_index)| bond_index)
         .filter(|&bond_index| digit_table[bond_index].is_some())
         .collect();
     carried.sort_by_key(|&bond_index| {
-        state
-            .ring_bonds
+        ring_bonds
             .iter()
             .position(|&b| b == bond_index)
             .unwrap_or(usize::MAX)
@@ -1107,6 +1339,11 @@ impl<'a> Writer<'a> {
     /// between two aromatic atoms).
     fn bond_symbol(&self, bond_index: usize) -> String {
         let (from, to, kind) = self.component.bonds[bond_index];
+        if kind == 1 {
+            if let Some(direction) = directional_symbol(self.component, from, to) {
+                return direction.to_string();
+            }
+        }
         match kind {
             1 => {
                 if self.is_aromatic(from) || self.is_aromatic(to) {
@@ -1140,7 +1377,9 @@ impl<'a> Writer<'a> {
         let aromatic = self.is_aromatic(atom);
         let organic = ORGANIC_UPPER.contains(&record.element.as_str())
             || (aromatic && AROMATIC_LOWER.contains(&record.element.to_lowercase().as_str()));
-        let bracket_needed = !organic
+        let chirality = self.stereo.get(&atom);
+        let bracket_needed = chirality.is_some()
+            || !organic
             || record.charge != 0
             || record.isotope != 0
             || record.h_count > 0
@@ -1153,6 +1392,22 @@ impl<'a> Writer<'a> {
                 token.push_str(&record.isotope.to_string());
             }
             token.push_str(&record.element);
+            if let Some(&(wedge_bond, code)) = chirality {
+                // The parity mark rides right after the element
+                // (before the stated H) — the SMILES spelling the
+                // reader walks.
+                token.push_str(chirality_token_for(
+                    self.component,
+                    &self.adjacency,
+                    &self.parent,
+                    &self.tree_children,
+                    &self.ring_bonds,
+                    &self.digit_for_bond,
+                    atom,
+                    wedge_bond,
+                    code,
+                ));
+            }
             if record.h_count > 0 {
                 token.push('H');
                 if record.h_count > 1 {
