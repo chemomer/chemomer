@@ -35,6 +35,29 @@ fn the_smiles_writer_stabilises_and_preserves_the_recorded_identities() {
         return;
     }
 
+    // The canonical-kekulization tail: polycycle stability (the
+    // symmetric fused systems whose enumeration cannot span the
+    // tie space) and the charged-structure standardization drift
+    // (the /p rows whose identity moves under any spelling). The
+    // writer's benzenoid aromaticization closed the plain
+    // substituted-ring class; these 13 rows are the remaining
+    // documentation.
+    const KEKULE_RESIDUAL: [&str; 13] = [
+        "identity/breadth-237",
+        "identity/breadth-273",
+        "identity/breadth-364",
+        "identity/breadth-371",
+        "identity/breadth-403",
+        "identity/breadth-453",
+        "identity/breadth-534",
+        "identity/breadth-661",
+        "identity/breadth-685",
+        "identity/breadth-862",
+        "identity/breadth-885",
+        "identity/breadth-1152",
+        "identity/breadth-1429",
+    ];
+
     const TRANSCRIPTION_DISAGREEMENTS: [&str; 15] = [
         "identity/sulfuric-acid",
         "identity/sulfate-2",
@@ -51,42 +74,6 @@ fn the_smiles_writer_stabilises_and_preserves_the_recorded_identities() {
         "identity/multi-copper-sulfate-pentahydrate",
         "identity/multi-alum-dodecahydrate",
         "identity/multi-sodium-sulfate-decahydrate",
-    ];
-    // The documented residual: the /c canonical numbering ties the
-    // Kekulé-rotation patterns of substituted rings (per-atom
-    // bond-order sums cannot see which ring bond carries the
-    // double), and these rows' tie structure defeats the bounded
-    // enumeration — write(read(s)) lands on the pattern's partner
-    // instead of the fixed point. The written forms still derive the
-    // recorded identity on the direct leg; the fixed-point property
-    // for this class needs a canonical kekulization pass
-    // (chemomer#130's follow-up), not a writer constant.
-    const KEKULE_RESIDUAL: [&str; 25] = [
-        "identity/breadth-205",
-        "identity/breadth-237",
-        "identity/breadth-246",
-        "identity/breadth-273",
-        "identity/breadth-364",
-        "identity/breadth-371",
-        "identity/breadth-373",
-        "identity/breadth-403",
-        "identity/breadth-444",
-        "identity/breadth-453",
-        "identity/breadth-454",
-        "identity/breadth-534",
-        "identity/breadth-649",
-        "identity/breadth-661",
-        "identity/breadth-685",
-        "identity/breadth-862",
-        "identity/breadth-885",
-        "identity/breadth-951",
-        "identity/breadth-1046",
-        "identity/breadth-1120",
-        "identity/breadth-1145",
-        "identity/breadth-1152",
-        "identity/breadth-1408",
-        "identity/breadth-1425",
-        "identity/breadth-1429",
     ];
 
     let mut ran = 0usize;
