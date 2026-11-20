@@ -633,7 +633,18 @@ fn element_of(symbol: &str) -> crate::Result<(String, bool)> {
 /// aromatic markers written lowercase.
 const ORGANIC_UPPER: [&str; 10] = ["B", "C", "N", "O", "P", "S", "F", "Cl", "Br", "I"];
 const AROMATIC_LOWER: [&str; 8] = ["b", "c", "n", "o", "p", "s", "se", "as"];
-const CLOSURE_DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+/// The ring-closure digit spellings, single digits then the %nn
+/// form — the fused polycycles need more than nine simultaneous
+/// closures per component.
+fn closure_digit(slot: usize) -> Option<String> {
+    if slot < 9 {
+        Some((slot + 1).to_string())
+    } else if slot < 100 {
+        Some(format!("%{}", slot + 1))
+    } else {
+        None
+    }
+}
 
 /// Writes a [`Structure`] as a deterministic canonical SMILES: the
 /// atoms rank by a Morgan-style refinement (element, charge, isotope,
@@ -644,7 +655,7 @@ const CLOSURE_DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 /// contract: `write(read(s))` re-reads to itself, and the written
 /// form derives the recorded identity.
 pub fn write(structure: &Structure) -> Result<String> {
-    let expanded = expand_isotopic_h(structure);
+    let expanded = canonically_aromaticize(&expand_isotopic_h(structure));
     let mut written = String::new();
     for (index, component) in expanded.split_components().iter().enumerate() {
         if index > 0 {
@@ -696,7 +707,7 @@ struct Writer<'a> {
     parent: Vec<usize>,
     ring_bonds: Vec<usize>,
     tree_children: Vec<Vec<usize>>,
-    digit_for_bond: Vec<Option<&'static str>>,
+    digit_for_bond: Vec<Option<String>>,
     stereo: StereoCenters,
 }
 
@@ -739,7 +750,7 @@ fn written_ligand_order(
     parent: &[usize],
     tree_children: &[Vec<usize>],
     ring_bonds: &[usize],
-    digit_table: &[Option<&'static str>],
+    digit_table: &[Option<String>],
     adjacency: &[Vec<(usize, usize)>],
     component: &Structure,
 ) -> Vec<usize> {
@@ -821,7 +832,7 @@ fn chirality_token_for(
     parent: &[usize],
     tree_children: &[Vec<usize>],
     ring_bonds: &[usize],
-    digit_table: &[Option<&'static str>],
+    digit_table: &[Option<String>],
     atom: usize,
     wedge_bond: usize,
     code: u8,
@@ -876,20 +887,212 @@ impl SearchState {
         }
     }
 
-    fn digit_table(&self, bond_count: usize) -> Result<Vec<Option<&'static str>>> {
+    fn digit_table(&self, bond_count: usize) -> Result<Vec<Option<String>>> {
         self.digit_for_bond(bond_count)
     }
 
-    fn digit_for_bond(&self, bond_count: usize) -> Result<Vec<Option<&'static str>>> {
-        let mut table: Vec<Option<&'static str>> = vec![None; bond_count];
+    fn digit_for_bond(&self, bond_count: usize) -> Result<Vec<Option<String>>> {
+        let mut table: Vec<Option<String>> = vec![None; bond_count];
         for (slot, &bond) in self.ring_bonds.iter().enumerate() {
-            let Some(digit) = CLOSURE_DIGITS.get(slot) else {
-                return err("smiles: more than nine ring bonds in one component");
+            let Some(digit) = closure_digit(slot) else {
+                return err("smiles: more than 100 ring bonds in one component");
             };
             table[bond] = Some(digit);
         }
         Ok(table)
     }
+}
+
+/// Benzenoid canonicalization, whole-component edition: a connected
+/// component of carbon-carbon bonds (orders 1/2, an alternating
+/// Kekule pattern) where EVERY atom carries exactly two component
+/// neighbours and exactly one component double bond is a pure
+/// alternating cycle — rewritten wholesale to the aromatic bond type
+/// (kind 4). The two Kekule rotation patterns of such a cycle are
+/// chemically equivalent but not isomorphic once substitution breaks
+/// the symmetry, so the canonical form erases the pattern instead of
+/// choosing one — write(read(s)) becomes a fixed point. Partial
+/// marking was the earlier failure: per-cycle walks left fused
+/// systems half-marked and diverged on re-read; the component is the
+/// unit. Exocyclic doubles (quinones), heteroatoms, sp3 ring atoms,
+/// acyclic polyenes, and fused shared atoms (three neighbours) all
+/// fail the gate and stay kekulized.
+fn canonically_aromaticize(structure: &Structure) -> Structure {
+    let mut result = structure.clone();
+    let n = structure.atoms.len();
+    // Charged structures stay kekulized wholesale: the aromatic
+    // rewrite feeds the proton/charge standardization a different
+    // input and the /p identity moves (the iminium-coupled rows).
+    if structure.atoms.iter().any(|atom| atom.charge != 0) {
+        return result;
+    }
+    // Carbon-carbon bonds with kekule-eligible orders, restricted to
+    // CYCLE edges — an edge whose removal keeps its endpoints
+    // connected. Exocyclic substituent bonds are bridges, never
+    // cycle edges, so a substituted ring's gate counts ring
+    // neighbours only.
+    let candidates: Vec<usize> = (0..structure.bonds.len())
+        .filter(|&index| {
+            let (from, to, kind) = structure.bonds[index];
+            matches!(kind, 1 | 2)
+                && structure.atoms[from].element == "C"
+                && structure.atoms[to].element == "C"
+        })
+        .collect();
+    let in_cycle = |edge_index: usize, all: &[usize]| -> bool {
+        let (from, to, _) = structure.bonds[edge_index];
+        let rest: Vec<usize> = all.iter().copied().filter(|&i| i != edge_index).collect();
+        let mut seen = vec![false; n];
+        seen[from] = true;
+        let mut queue = vec![from];
+        while let Some(atom) = queue.pop() {
+            if atom == to {
+                return true;
+            }
+            for &index in &rest {
+                let (a, b, _) = structure.bonds[index];
+                let other = if a == atom {
+                    Some(b)
+                } else if b == atom {
+                    Some(a)
+                } else {
+                    None
+                };
+                if let Some(other) = other {
+                    if !seen[other] {
+                        seen[other] = true;
+                        queue.push(other);
+                    }
+                }
+            }
+        }
+        false
+    };
+    let cycle_edges: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&index| in_cycle(index, &candidates))
+        .collect();
+    // The pi-capability fixpoint: a Kekule atom carries exactly one
+    // eligible double. Drop edges touching an atom whose count differs
+    // (sp3 junctions, enol multiples); iterate until stable so the
+    // surviving edges are pure alternating-cycle edges only.
+    let mut eligible: Vec<usize> = cycle_edges.clone();
+    loop {
+        let doubles = |atom: usize| -> usize {
+            eligible
+                .iter()
+                .filter(|&&index| {
+                    let (from, to, kind) = structure.bonds[index];
+                    kind == 2 && (from == atom || to == atom)
+                })
+                .count()
+        };
+        let next: Vec<usize> = eligible
+            .iter()
+            .copied()
+            .filter(|&index| {
+                let (from, to, _) = structure.bonds[index];
+                doubles(from) == 1 && doubles(to) == 1
+            })
+            .collect();
+        if next.len() == eligible.len() {
+            eligible = next;
+            break;
+        }
+        eligible = next;
+    }
+    // Connected components over the eligible bonds.
+    let mut component = vec![usize::MAX; n];
+    let mut components: Vec<Vec<usize>> = Vec::new();
+    for &start in &eligible {
+        let (seed_from, seed_to, _) = structure.bonds[start];
+        if component[seed_from] != usize::MAX {
+            continue;
+        }
+        let id = components.len();
+        let mut stack = vec![seed_from, seed_to];
+        let mut bonds: Vec<usize> = Vec::new();
+        let mut members: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        component[seed_from] = id;
+        component[seed_to] = id;
+        members.insert(seed_from);
+        members.insert(seed_to);
+        bonds.push(start);
+        while let Some(atom) = stack.pop() {
+            for &index in &eligible {
+                let (from, to, _) = structure.bonds[index];
+                let other = if from == atom {
+                    Some(to)
+                } else if to == atom {
+                    Some(from)
+                } else {
+                    None
+                };
+                let Some(other) = other else { continue };
+                if component[other] != usize::MAX {
+                    continue;
+                }
+                component[other] = id;
+                members.insert(other);
+                bonds.push(index);
+                stack.push(other);
+            }
+        }
+        components.push(members.into_iter().collect());
+        let _ = bonds;
+    }
+    let _ = components;
+    // The gate per component: every member has exactly two
+    // component neighbours and exactly one component double bond,
+    // and the component is at least a benzene's size.
+    let mut aromatic_bonds: Vec<usize> = Vec::new();
+    let mut visited: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    for &seed in &eligible {
+        let (seed_from, _, _) = structure.bonds[seed];
+        if component[seed_from] == usize::MAX || visited.contains(&component[seed_from]) {
+            continue;
+        }
+        let id = component[seed_from];
+        visited.insert(id);
+        let members: Vec<usize> = (0..n).filter(|&atom| component[atom] == id).collect();
+        if members.len() < 6 {
+            continue;
+        }
+        let ok = members.iter().all(|&atom| {
+            let mut neighbours = 0usize;
+            let mut doubles = 0usize;
+            for &index in &eligible {
+                let (from, to, kind) = structure.bonds[index];
+                if from == atom || to == atom {
+                    neighbours += 1;
+                    if kind == 2 {
+                        doubles += 1;
+                    }
+                }
+            }
+            neighbours == 2 && doubles == 1
+        });
+        // Charge-coupled rings stay kekulized: aromaticizing an
+        // iminium-coupled ring shifts the proton standardization's
+        // input and the identity moves (the /p layer reads the
+        // kekulized charge state).
+        let uncharged = members
+            .iter()
+            .all(|&atom| structure.atoms[atom].charge == 0);
+        if ok && uncharged {
+            aromatic_bonds.extend(
+                eligible
+                    .iter()
+                    .copied()
+                    .filter(|&index| component[structure.bonds[index].0] == id),
+            );
+        }
+    }
+    for index in aromatic_bonds {
+        result.bonds[index].2 = 4;
+    }
+    result
 }
 
 fn write_component(component: &Structure) -> Result<String> {
@@ -1207,7 +1410,7 @@ fn atom_token_with(
     parent: &[usize],
     tree_children: &[Vec<usize>],
     ring_bonds: &[usize],
-    digit_table: &[Option<&'static str>],
+    digit_table: &[Option<String>],
     atom: usize,
     stereo: &StereoCenters,
 ) -> Result<String> {
@@ -1279,7 +1482,7 @@ fn atom_token_with(
             .unwrap_or(usize::MAX)
     });
     for bond_index in carried {
-        let digit = digit_table[bond_index].unwrap_or("");
+        let digit = digit_table[bond_index].clone().unwrap_or_default();
         let (from, to, kind) = component.bonds[bond_index];
         let other = if from == atom { to } else { from };
         let both_aromatic = is_aromatic_at(component, adjacency, atom)
@@ -1301,7 +1504,7 @@ fn atom_token_with(
             }
             _ => token.push('-'),
         }
-        token.push_str(digit);
+        token.push_str(&digit);
     }
     Ok(token)
 }
@@ -1433,7 +1636,7 @@ impl<'a> Writer<'a> {
         // Ring-closure digits at this atom, with kind carriers for
         // non-default closure bonds.
         for &(_, bond_index) in &self.adjacency[atom] {
-            let Some(digit) = self.digit_for_bond[bond_index] else {
+            let Some(ref digit) = self.digit_for_bond[bond_index] else {
                 continue;
             };
             let (from, to, kind) = self.component.bonds[bond_index];
@@ -1452,7 +1655,7 @@ impl<'a> Writer<'a> {
             if let Some(symbol) = carrier {
                 token.push(symbol);
             }
-            token.push_str(digit);
+            token.push_str(&digit);
         }
         Ok(token)
     }
