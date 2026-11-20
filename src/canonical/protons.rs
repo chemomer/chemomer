@@ -1247,7 +1247,13 @@ fn hard_remove_hplus_np(context: &mut ProtonContext) -> (u32, Vec<(usize, usize,
                 ride.route, ride.tg, ride.cg, ride.bonds
             );
         }
-        if !ride.route {
+        // The pass moves PROTONS off the H-star onto the (+) group: a
+        // route that changed no H and no charge (an internal flow
+        // cycle over the skeleton's pi bonds) is not a removal — the
+        // reference's while ends when nothing moves. Without this the
+        // augmentation re-finds the same skeleton cycle forever (the
+        // iminium-aryl form, chemomer#134).
+        if !ride.route || (ride.tg.is_empty() && ride.cg.is_empty()) {
             break;
         }
         // Apply: the H ride onto the t-group members, the charge ride
