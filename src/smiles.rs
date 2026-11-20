@@ -1655,7 +1655,7 @@ impl<'a> Writer<'a> {
             if let Some(symbol) = carrier {
                 token.push(symbol);
             }
-            token.push_str(&digit);
+            token.push_str(digit);
         }
         Ok(token)
     }
