@@ -678,7 +678,9 @@ pub fn write(structure: &Structure) -> Result<String> {
     let mut seen: Vec<String> = vec![write_once(structure)?];
     let mut stable_from = usize::MAX;
     for _ in 0..WRITE_FIXED_POINT_CAP {
-        let current = seen.last().expect("the seen list opens with the first write");
+        let current = seen
+            .last()
+            .expect("the seen list opens with the first write");
         let Ok(re_read) = read(current) else {
             // The writer's own output must re-read (the reader gate
             // owns that contract); the walk ends unproven.
@@ -780,7 +782,9 @@ fn write_component_index_order(component: &Structure) -> Result<String> {
     if component.atoms.is_empty() {
         return err("smiles: empty component");
     }
-    let ranks: Vec<u32> = (0..component.atoms.len()).map(|index| index as u32).collect();
+    let ranks: Vec<u32> = (0..component.atoms.len())
+        .map(|index| index as u32)
+        .collect();
     let root = 0usize;
     let stereo = stereo_centers(component);
     let state = SearchState::fresh(root, component.atoms.len());
@@ -1237,9 +1241,7 @@ fn canonically_aromaticize(structure: &Structure) -> Structure {
                 };
                 if let Some(other) = other {
                     let record = &structure.atoms[other];
-                    if matches!(record.element.as_str(), "N" | "O" | "S")
-                        && record.h_count > 0
-                    {
+                    if matches!(record.element.as_str(), "N" | "O" | "S") && record.h_count > 0 {
                         return false;
                     }
                 }
