@@ -8,9 +8,8 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("../inchi-tests"));
     let mut cases: Vec<serde_json::Value> = Vec::new();
-    let text =
-        fs::read_to_string(dir.join("corpus/fixtures/identity-breadth.json"))
-            .expect("identity-breadth");
+    let text = fs::read_to_string(dir.join("corpus/fixtures/identity-breadth.json"))
+        .expect("identity-breadth");
     cases.extend(serde_json::from_str::<Vec<serde_json::Value>>(&text).expect("fixtures"));
     for case in &cases {
         let id = case["id"].as_str().unwrap_or("");

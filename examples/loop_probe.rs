@@ -28,7 +28,9 @@ fn main() {
         if !LOOPS.contains(&id) {
             continue;
         }
-        let Some(smiles) = case["smiles"].as_str() else { continue };
+        let Some(smiles) = case["smiles"].as_str() else {
+            continue;
+        };
         let structure = chemomer::parse_smiles(smiles).expect(id);
         let Ok(w1) = chemomer::write_smiles(&structure) else {
             println!("{id}: WRITE-DECLINED");
