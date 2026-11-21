@@ -106,7 +106,7 @@ impl Engine {
     /// [`Self::with_options`] does after the molfile parse — the
     /// whole-structure preprocessing, the transforms, the component
     /// split, the assembly. [`Self::from_smiles`] shares it verbatim.
-    fn from_read(original: Structure, options: Options) -> Result<Self> {
+    pub(crate) fn from_read(original: Structure, options: Options) -> Result<Self> {
         // The whole-structure preprocessing (the reference's read +
         // The whole-structure preprocessing (the reference's read +
         // PreprocessOneStructure, runichi3.c:540-720): the ion-pair
