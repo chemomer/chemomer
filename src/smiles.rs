@@ -646,6 +646,10 @@ fn closure_digit(slot: usize) -> Option<String> {
     }
 }
 
+/// The bounded fixed-point search: eight write∘read rounds bound the
+/// iteration (corpus rows converge in one or two).
+const WRITE_FIXED_POINT_CAP: usize = 8;
+
 /// Writes a [`Structure`] as a deterministic canonical SMILES: the
 /// atoms rank by a Morgan-style refinement (element, charge, isotope,
 /// explicit-H count, degree — neighbours' ranks folded in until
@@ -654,7 +658,90 @@ fn closure_digit(slot: usize) -> Option<String> {
 /// only where the bond departs from its default. Stability is the
 /// contract: `write(read(s))` re-reads to itself, and the written
 /// form derives the recorded identity.
+///
+/// The mobile-H standardization is atom-order sensitive (the
+/// 1.07.5-faithful pipeline speaks the input's creation order), so
+/// two spellings of one molecule can standardize differently and the
+/// written form can drift off the recorded identity (the MOVED
+/// rows). The write therefore walks write∘read to its fixed point —
+/// or to a cycle's entry, when the enumeration cap truncates a
+/// symmetric polycycle's tie space and the kekule pattern rotates —
+/// and returns the earliest cycle member whose ENGINE identity
+/// equals the input structure's own: a cycle member re-enters
+/// itself (stable), and the input's identity is the recorded
+/// oracle's (the reader gate), so the surviving form is both stable
+/// and identity-preserving.
 pub fn write(structure: &Structure) -> Result<String> {
+    let target = crate::Engine::from_read(structure.clone(), crate::options::Options::default())
+        .and_then(|engine| engine.inchi_string())
+        .ok();
+    let mut seen: Vec<String> = vec![write_once(structure)?];
+    let mut stable_from = usize::MAX;
+    for _ in 0..WRITE_FIXED_POINT_CAP {
+        let current = seen.last().expect("the seen list opens with the first write");
+        let Ok(re_read) = read(current) else {
+            // The writer's own output must re-read (the reader gate
+            // owns that contract); the walk ends unproven.
+            break;
+        };
+        let next = write_once(&re_read)?;
+        if next == *current {
+            stable_from = seen.len() - 1;
+            break;
+        }
+        if let Some(entry) = seen.iter().position(|form| *form == next) {
+            stable_from = entry;
+            break;
+        }
+        seen.push(next);
+    }
+    let mut identities: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let identity_of = |form: &str, map: &mut std::collections::HashMap<String, Option<String>>| {
+        map.entry(form.to_string())
+            .or_insert_with(|| {
+                crate::Engine::from_smiles(form)
+                    .and_then(|engine| engine.inchi_string())
+                    .ok()
+            })
+            .clone()
+    };
+    // A stable form that preserves the identity, earliest in the
+    // walk; the corpus's fast path lands on the first write.
+    if target.is_some() {
+        for (index, form) in seen.iter().enumerate() {
+            if index < stable_from {
+                continue;
+            }
+            if identity_of(form, &mut identities).as_deref() == target.as_deref() {
+                return Ok(form.clone());
+            }
+        }
+    }
+    // No stable form matched: try the creation-order spelling —
+    // DFS from atom 0, children in creation-index order, no
+    // aromaticization. The emission is its own re-read order (the
+    // walk reproduces itself), and for the order-sensitive
+    // standardization class it speaks the input's own numbering, so
+    // the identity rides where the canonical spelling's cycle
+    // carried none (the MOVED rows).
+    if target.is_some() {
+        if let Ok(fallback) = write_once_index_order(structure) {
+            if identity_of(&fallback, &mut identities).as_deref() == target.as_deref() {
+                return Ok(fallback);
+            }
+        }
+        for form in &seen {
+            if identity_of(form, &mut identities).as_deref() == target.as_deref() {
+                return Ok(form.clone());
+            }
+        }
+    }
+    Ok(seen[stable_from.min(seen.len() - 1)].clone())
+}
+
+/// One write pass — the fixed-point search in [`write`] drives this.
+fn write_once(structure: &Structure) -> Result<String> {
     let expanded = canonically_aromaticize(&expand_isotopic_h(structure));
     let mut written = String::new();
     for (index, component) in expanded.split_components().iter().enumerate() {
@@ -664,6 +751,61 @@ pub fn write(structure: &Structure) -> Result<String> {
         written.push_str(&write_component(component)?);
     }
     Ok(written)
+}
+
+/// The identity-fallback pass: the creation-order spelling (index
+/// ranks, root 0, no aromaticization) — the walk whose re-read order
+/// reproduces its own emission.
+fn write_once_index_order(structure: &Structure) -> Result<String> {
+    let expanded = expand_isotopic_h(structure);
+    let mut written = String::new();
+    for (index, component) in expanded.split_components().iter().enumerate() {
+        if index > 0 {
+            written.push('.');
+        }
+        written.push_str(&write_component_index_order(component)?);
+    }
+    Ok(written)
+}
+
+/// [`write_component`] over creation order: the ranks are the atom
+/// indices, the root is atom 0, and children walk in index order —
+/// the spelling whose re-read creation order equals its emission.
+fn write_component_index_order(component: &Structure) -> Result<String> {
+    let mut adjacency: Vec<Vec<(usize, usize)>> = vec![Vec::new(); component.atoms.len()];
+    for (bond_index, &(from, to, _)) in component.bonds.iter().enumerate() {
+        adjacency[from].push((to, bond_index));
+        adjacency[to].push((from, bond_index));
+    }
+    if component.atoms.is_empty() {
+        return err("smiles: empty component");
+    }
+    let ranks: Vec<u32> = (0..component.atoms.len()).map(|index| index as u32).collect();
+    let root = 0usize;
+    let stereo = stereo_centers(component);
+    let state = SearchState::fresh(root, component.atoms.len());
+    let (_, final_state) = best_subtree(
+        component,
+        &adjacency,
+        &ranks,
+        root,
+        state,
+        ENUMERATION_CAP,
+        &stereo,
+    )?;
+    let digit_for_bond = final_state.digit_for_bond(component.bonds.len())?;
+    let mut writer = Writer {
+        component,
+        adjacency,
+        parent: final_state.parent,
+        ring_bonds: final_state.ring_bonds,
+        tree_children: final_state.tree_children,
+        digit_for_bond,
+        stereo,
+    };
+    let mut out = String::new();
+    writer.emit(root, &mut out)?;
+    Ok(out)
 }
 
 /// The inverse of the reader's isotopic-hydrogen fold: carriers'
@@ -903,40 +1045,41 @@ impl SearchState {
     }
 }
 
-/// Benzenoid canonicalization, whole-component edition: a connected
-/// component of carbon-carbon bonds (orders 1/2, an alternating
-/// Kekule pattern) where EVERY atom carries exactly two component
-/// neighbours and exactly one component double bond is a pure
-/// alternating cycle — rewritten wholesale to the aromatic bond type
-/// (kind 4). The two Kekule rotation patterns of such a cycle are
-/// chemically equivalent but not isomorphic once substitution breaks
-/// the symmetry, so the canonical form erases the pattern instead of
-/// choosing one — write(read(s)) becomes a fixed point. Partial
-/// marking was the earlier failure: per-cycle walks left fused
-/// systems half-marked and diverged on re-read; the component is the
-/// unit. Exocyclic doubles (quinones), heteroatoms, sp3 ring atoms,
-/// acyclic polyenes, and fused shared atoms (three neighbours) all
-/// fail the gate and stay kekulized.
+/// Benzenoid/heteroaromatic canonicalization, whole-component
+/// edition: a connected component of C/N ring bonds (orders 1/2, an
+/// alternating Kekule pattern) where EVERY atom carries exactly two
+/// component neighbours and exactly one component double bond is a
+/// pure alternating cycle — rewritten wholesale to the aromatic bond
+/// type (kind 4). The two Kekule rotation patterns of such a cycle
+/// are chemically equivalent but not isomorphic once substitution
+/// breaks the symmetry, so the canonical form erases the pattern
+/// instead of choosing one — write(read(s)) becomes a fixed point.
+/// Partial marking was the earlier failure: per-cycle walks left
+/// fused systems half-marked and diverged on re-read; the component
+/// is the unit. Pyridine-type ring nitrogen (neutral, one component
+/// double) joins carbon in the cycle membership; pyrrole-type N
+/// (no component double) drops out in the pi fixpoint. Exocyclic
+/// doubles (quinones), charged ring atoms (pyridinium, iminium),
+/// sp3 ring atoms, acyclic polyenes, and fused shared atoms (three
+/// neighbours) all fail the gate and stay kekulized — as do rings
+/// carrying an exocyclic donor heteroatom (N/O/S bearing H): the
+/// donor couples its mobile H to the ring's pi system and the
+/// aromatic spelling shifts the mobile-H accounting off the recorded
+/// kekule forms.
 fn canonically_aromaticize(structure: &Structure) -> Structure {
     let mut result = structure.clone();
     let n = structure.atoms.len();
-    // Charged structures stay kekulized wholesale: the aromatic
-    // rewrite feeds the proton/charge standardization a different
-    // input and the /p identity moves (the iminium-coupled rows).
-    if structure.atoms.iter().any(|atom| atom.charge != 0) {
-        return result;
-    }
-    // Carbon-carbon bonds with kekule-eligible orders, restricted to
-    // CYCLE edges — an edge whose removal keeps its endpoints
-    // connected. Exocyclic substituent bonds are bridges, never
-    // cycle edges, so a substituted ring's gate counts ring
-    // neighbours only.
+    // Carbon/nitrogen ring bonds with kekule-eligible orders,
+    // restricted to CYCLE edges — an edge whose removal keeps its
+    // endpoints connected. Exocyclic substituent bonds (nitro's
+    // C-N, carbonyl bridges) are never cycle edges, so a
+    // substituted ring's gate counts ring neighbours only.
     let candidates: Vec<usize> = (0..structure.bonds.len())
         .filter(|&index| {
             let (from, to, kind) = structure.bonds[index];
             matches!(kind, 1 | 2)
-                && structure.atoms[from].element == "C"
-                && structure.atoms[to].element == "C"
+                && matches!(structure.atoms[from].element.as_str(), "C" | "N")
+                && matches!(structure.atoms[to].element.as_str(), "C" | "N")
         })
         .collect();
     let in_cycle = |edge_index: usize, all: &[usize]| -> bool {
@@ -1071,7 +1214,37 @@ fn canonically_aromaticize(structure: &Structure) -> Structure {
                     }
                 }
             }
-            neighbours == 2 && doubles == 1
+            if neighbours != 2 || doubles != 1 {
+                return false;
+            }
+            // The tautomer-coupled class stays kekulized: an exocyclic
+            // donor heteroatom (N/O/S bearing H) couples its mobile H
+            // to the ring's pi system, and the aromatic spelling
+            // shifts the mobile-H accounting off the recorded kekule
+            // forms (the amine-on-azine rows moved identity on the
+            // oracle gate). Donor-free substituents (nitro's N+
+            // O-/O=, bridging phenoxy-O) read the same both ways.
+            for (index, &(from, to, _)) in structure.bonds.iter().enumerate() {
+                if eligible.contains(&index) {
+                    continue;
+                }
+                let other = if from == atom {
+                    Some(to)
+                } else if to == atom {
+                    Some(from)
+                } else {
+                    None
+                };
+                if let Some(other) = other {
+                    let record = &structure.atoms[other];
+                    if matches!(record.element.as_str(), "N" | "O" | "S")
+                        && record.h_count > 0
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
         });
         // Charge-coupled rings stay kekulized: aromaticizing an
         // iminium-coupled ring shifts the proton standardization's

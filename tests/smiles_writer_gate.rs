@@ -35,28 +35,7 @@ fn the_smiles_writer_stabilises_and_preserves_the_recorded_identities() {
         return;
     }
 
-    // The canonical-kekulization tail: polycycle stability (the
-    // symmetric fused systems whose enumeration cannot span the
-    // tie space) and the charged-structure standardization drift
-    // (the /p rows whose identity moves under any spelling). The
-    // writer's benzenoid aromaticization closed the plain
-    // substituted-ring class; these 13 rows are the remaining
-    // documentation.
-    const KEKULE_RESIDUAL: [&str; 13] = [
-        "identity/breadth-237",
-        "identity/breadth-273",
-        "identity/breadth-364",
-        "identity/breadth-371",
-        "identity/breadth-403",
-        "identity/breadth-453",
-        "identity/breadth-534",
-        "identity/breadth-661",
-        "identity/breadth-685",
-        "identity/breadth-862",
-        "identity/breadth-885",
-        "identity/breadth-1152",
-        "identity/breadth-1429",
-    ];
+    const KEKULE_RESIDUAL: [&str; 0] = [];
 
     const TRANSCRIPTION_DISAGREEMENTS: [&str; 15] = [
         "identity/sulfuric-acid",
