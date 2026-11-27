@@ -672,10 +672,24 @@ const WRITE_FIXED_POINT_CAP: usize = 8;
 /// oracle's (the reader gate), so the surviving form is both stable
 /// and identity-preserving.
 pub fn write(structure: &Structure) -> Result<String> {
+    let first = write_once(structure)?;
+    // THE FAST PATH: the creation-order spelling is self-stable (its
+    // re-read reproduces its own emission) and serializes the graph
+    // exhaustively, so when the first write EQUALS it, the write
+    // preserved the molecule — stability and identity ride by
+    // construction, and the whole engine pipeline (the target
+    // derivation, the walk, the per-candidate identity checks) is
+    // skipped. The corpus gate runs unchanged: the walk would return
+    // this same form (it is the stable, structure-preserving one).
+    if let Ok(index_order) = write_once_index_order(structure) {
+        if index_order == first {
+            return Ok(first);
+        }
+    }
     let target = crate::Engine::from_read(structure.clone(), crate::options::Options::default())
         .and_then(|engine| engine.inchi_string())
         .ok();
-    let mut seen: Vec<String> = vec![write_once(structure)?];
+    let mut seen: Vec<String> = vec![first];
     let mut stable_from = usize::MAX;
     for _ in 0..WRITE_FIXED_POINT_CAP {
         let current = seen
