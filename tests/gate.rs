@@ -1343,6 +1343,23 @@ fn the_v3000_input_matches_the_oracle() {
     check_identity_tranche(&dir, "v3000-molfiles.json", "v3000");
 }
 
+/// The stereo-groups gate: the corpus's stereo-groups tranche records
+/// V3000 enhanced-stereochemistry probes (CFG wedges over ABS/AND/OR
+/// collection blocks, multi-group, split groups, an empty group), each
+/// with the oracle's identifier. The pinned law the recording enforces
+/// (and this gate re-proves through the engine): the CFG codes carry
+/// the tetrahedral layer and the COLLECTION blocks are identity-inert —
+/// every grouped variant derives the same InChI as its no-collection
+/// twin. The reader skips the collections (the reference reads them
+/// only to ignore them, mol_fmt3.c:1602-1727), so the same
+/// `Engine::from_molfile` path reproduces the recordings
+/// byte-for-byte.
+#[test]
+fn the_stereo_groups_match_the_oracle() {
+    let dir = suite_dir();
+    check_identity_tranche(&dir, "stereo-groups.json", "stereo-groups");
+}
+
 /// The LargeMolecules gate: the corpus's large-molecules tranche
 /// records alkane chains past the reference's normally-allowed input
 /// size (ichisize.h:51, the 1024-atom cap its reader enforces without
