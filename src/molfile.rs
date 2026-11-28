@@ -1399,6 +1399,35 @@ mod tests {
     }
 
     #[test]
+    fn v3000_stereo_group_collections_are_read_inert() {
+        // The enhanced-stereo collection forms the corpus's
+        // stereo-groups tranche pins (chemomer#144): MDL_ABS/AND/OR
+        // member lists, multiple collection blocks, and the empty
+        // group — the reference reads every one of them only to
+        // ignore it (mol_fmt3.c:1602-1727), so the reader accepts
+        // each form and drops it; the CFG wedges carry the layer.
+        let forms = [
+            "M  V30 MDL_ABS 2",
+            "M  V30 MDL_AND 2 3",
+            "M  V30 MDL_OR 2 3",
+            "M  V30 MDL_ABS",
+            "M  V30 MDLV30/STEABS ATOMS=(1 1)",
+        ];
+        for block in forms {
+            let molfile = format!(
+                "collected\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 2 1 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 C 12 12 0 0\nM  V30 2 C 20 12 0 0\nM  V30 END ATOM\nM  V30 BEGIN BOND\nM  V30 1 1 1 2\nM  V30 END BOND\nM  V30 BEGIN COLLECTION\n{block}\nM  V30 END COLLECTION\nM  V30 END CTAB\nM  END\n"
+            );
+            let structure = parse(&molfile).expect("collection form parses");
+            assert_eq!(structure.atoms.len(), 2, "{block}");
+            assert_eq!(structure.bonds, vec![(0, 1, 1)], "{block}");
+        }
+        // Multiple collection blocks in one file.
+        let multi = "collected\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 2 1 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 C 12 12 0 0\nM  V30 2 C 20 12 0 0\nM  V30 END ATOM\nM  V30 BEGIN BOND\nM  V30 1 1 1 2\nM  V30 END BOND\nM  V30 BEGIN COLLECTION\nM  V30 MDL_ABS 1\nM  V30 END COLLECTION\nM  V30 BEGIN COLLECTION\nM  V30 MDL_AND 2\nM  V30 END COLLECTION\nM  V30 END CTAB\nM  END\n";
+        let structure = parse(multi).expect("multi-collection parses");
+        assert_eq!(structure.atoms.len(), 2);
+    }
+
+    #[test]
     fn v3000_unsupported_constructs_report_rather_than_guess() {
         let unknown = "odd\n  AsciiChem\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 1 0 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 C 12 12 0 0 FOO=3\nM  V30 END ATOM\nM  V30 END CTAB\nM  END\n";
         assert!(parse(unknown).is_err(), "unknown atom attribute");
