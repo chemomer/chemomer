@@ -4,8 +4,10 @@
 //! new oracle, no fixture edits. The stereo cases all run (the
 //! alanine enantiomers through the carried @/@@; the butene pair
 //! through the corpus's drawn-coordinate re-record, inchi-tests
-//! v0.3.42); the recorded exclusions: the two transcription
-//! disagreements (sulfuric-acid/sulfate-2).
+//! v0.3.42); the transcription disagreements emptied when the corpus
+//! re-recorded the fifteen broken molfiles from their own SMILES
+//! (inchi-tests v0.3.44) — the recorded exclusions are the oxyanion
+//! normalization slice (chemomer#150).
 
 use std::fs;
 use std::path::PathBuf;
@@ -43,24 +45,39 @@ fn the_smiles_reader_derives_the_recorded_identities() {
         let Some(smiles) = case["smiles"].as_str() else {
             continue;
         };
-        const TRANSCRIPTION_DISAGREEMENTS: [&str; 15] = [
-            "identity/sulfuric-acid",
-            "identity/sulfate-2",
-            "identity/multi-sodium-hydrogen-sulfate",
-            "identity/multi-magnesium-sulfate",
+        // The transcription-disagreement skips emptied: the corpus's
+        // re-record (inchi-tests, the re-record-transcription.rb
+        // script) regenerated the fifteen rows' molfiles from their
+        // own SMILES through the reference gem — the molfiles had
+        // carried a systemic bond-order transcription error (every
+        // S=O double after the first spelled single), and the oracle
+        // had faithfully recorded the broken drawings. The gate is
+        // the agreement proof now.
+        // The transcription skips emptied by the corpus's re-record
+        // (inchi-tests, re-record-transcription.rb): the fifteen
+        // molfiles regenerated from their own SMILES through the
+        // reference gem. The remaining skips are the OXYANION
+        // NORMALIZATION slice (chemomer#150): the oracle keeps an
+        // explicit [O-]'s charge fixed and protonates it under the
+        // default hydrogen-add mode; the reader delocalizes the acid
+        // hydrogen over the oxygens instead. The oracle bytes on the
+        // (now correct) molfiles are that slice's spec.
+        const OXYANION_NORMALIZATION: [&str; 13] = [
+            "identity/multi-alum-dodecahydrate",
+            "identity/multi-ammonium-sulfate",
             "identity/multi-calcium-sulfate",
             "identity/multi-copper-sulfate",
-            "identity/multi-sodium-thiosulfate",
-            "identity/multi-potassium-permanganate",
-            "identity/multi-sodium-dodecyl-sulfate",
-            "identity/multi-ammonium-sulfate",
-            "identity/multi-sodium-citrate",
-            "identity/multi-magnesium-sulfate-heptahydrate",
             "identity/multi-copper-sulfate-pentahydrate",
-            "identity/multi-alum-dodecahydrate",
+            "identity/multi-magnesium-sulfate",
+            "identity/multi-magnesium-sulfate-heptahydrate",
+            "identity/multi-potassium-permanganate",
+            "identity/multi-sodium-citrate",
+            "identity/multi-sodium-dodecyl-sulfate",
+            "identity/multi-sodium-hydrogen-sulfate",
             "identity/multi-sodium-sulfate-decahydrate",
+            "identity/multi-sodium-thiosulfate",
         ];
-        if TRANSCRIPTION_DISAGREEMENTS.contains(&id) {
+        if OXYANION_NORMALIZATION.contains(&id) {
             // The fixture's smiles transcription disagrees with its
             // recorded molfile — the same class as the sulfuric-acid
             // pair: the molfile records the neutral acid with explicit
