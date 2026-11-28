@@ -7,7 +7,7 @@
 //! v0.3.42); the transcription disagreements emptied when the corpus
 //! re-recorded the fifteen broken molfiles from their own SMILES
 //! (inchi-tests v0.3.44) — the recorded exclusions are the oxyanion
-//! normalization slice (chemomer#150).
+//! normalization slice (chemomer#151).
 
 use std::fs;
 use std::path::PathBuf;
@@ -36,6 +36,15 @@ fn the_smiles_reader_derives_the_recorded_identities() {
     if cases.is_empty() {
         return;
     }
+    // The triage ledger carries the dated debts (the corpus's
+    // triage.json): a triaged row is an EXPECTED failure, and a
+    // triaged row that passes is a retirement to act on, never a
+    // silent skip.
+    let Ok(triage_text) = fs::read_to_string(dir.join("corpus/triage.json")) else {
+        return;
+    };
+    let triage: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&triage_text).expect("valid ledger");
 
     let mut ran = 0usize;
     let mut skipped_phase2 = Vec::new();
@@ -45,48 +54,19 @@ fn the_smiles_reader_derives_the_recorded_identities() {
         let Some(smiles) = case["smiles"].as_str() else {
             continue;
         };
-        // The transcription-disagreement skips emptied: the corpus's
-        // re-record (inchi-tests, the re-record-transcription.rb
-        // script) regenerated the fifteen rows' molfiles from their
-        // own SMILES through the reference gem — the molfiles had
-        // carried a systemic bond-order transcription error (every
-        // S=O double after the first spelled single), and the oracle
-        // had faithfully recorded the broken drawings. The gate is
-        // the agreement proof now.
-        // The transcription skips emptied by the corpus's re-record
-        // (inchi-tests, re-record-transcription.rb): the fifteen
-        // molfiles regenerated from their own SMILES through the
-        // reference gem. The remaining skips are the OXYANION
-        // NORMALIZATION slice (chemomer#150): the oracle keeps an
-        // explicit [O-]'s charge fixed and protonates it under the
-        // default hydrogen-add mode; the reader delocalizes the acid
-        // hydrogen over the oxygens instead. The oracle bytes on the
-        // (now correct) molfiles are that slice's spec.
-        const OXYANION_NORMALIZATION: [&str; 13] = [
-            "identity/multi-alum-dodecahydrate",
-            "identity/multi-ammonium-sulfate",
-            "identity/multi-calcium-sulfate",
-            "identity/multi-copper-sulfate",
-            "identity/multi-copper-sulfate-pentahydrate",
-            "identity/multi-magnesium-sulfate",
-            "identity/multi-magnesium-sulfate-heptahydrate",
-            "identity/multi-potassium-permanganate",
-            "identity/multi-sodium-citrate",
-            "identity/multi-sodium-dodecyl-sulfate",
-            "identity/multi-sodium-hydrogen-sulfate",
-            "identity/multi-sodium-sulfate-decahydrate",
-            "identity/multi-sodium-thiosulfate",
-        ];
-        if OXYANION_NORMALIZATION.contains(&id) {
-            // The fixture's smiles transcription disagrees with its
-            // recorded molfile — the same class as the sulfuric-acid
-            // pair: the molfile records the neutral acid with explicit
-            // H (the oracle's H4O4S/5H normalization) while the smiles
-            // field transcribes the deprotonated anion (or, for the
-            // permanganate/dodecyl-sulfate/citrate rows, a different
-            // H placement). The two inputs legitimately diverge; the
-            // recording pipeline owns the fixture fix. The molfile
-            // legs of every one of these rows pass the main gate.
+        // The triage ledger carries the dated debts (the corpus's
+        // triage.json): the oxyanion normalization rows (chemomer#151)
+        // are triaged there — the oracle keeps an explicit [O-]'s
+        // charge fixed and protonates it under the default
+        // hydrogen-add mode; the reader delocalizes the acid hydrogen
+        // over the oxygens instead. The oracle bytes on the (now
+        // correct) molfiles are that slice's spec.
+        let triaged = triage.get(id).map(|v| !v.is_null()).unwrap_or(false);
+        if triaged {
+            // The fixed-charge oxyanion normalization slice
+            // (chemomer#151): the recorded identities are the oracle's
+            // fixed-charge readings; the reader delocalizes. Expected
+            // failure until the slice lands.
             skipped_phase2.push(id.to_string());
             continue;
         }
@@ -115,12 +95,12 @@ fn the_smiles_reader_derives_the_recorded_identities() {
         }
     }
     eprintln!(
-        "smiles gate: {ran} cases derived vs the oracle, {} phase-2 skips, {} failures",
+        "smiles gate: {ran} cases derived vs the oracle, {} triaged, {} failures",
         skipped_phase2.len(),
         failures.len()
     );
     for skip in &skipped_phase2 {
-        eprintln!("  phase-2 skip: {skip}");
+        eprintln!("  triaged: {skip}");
     }
     assert!(
         failures.is_empty(),
